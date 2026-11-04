@@ -20,7 +20,8 @@
 - CLI 支持包查询／创建／改名／删除／启停／重启／配置，允许的全局设置，以及插件／技能／预设资源操作；包导入导出继续使用原界面。
 - 独立验收：npm run build 通过；npm test 为 989 passed、11 skipped（102 个测试文件通过、9 个跳过）。真实临时子进程验证独立家目录、端口和逐包启停；CLI 用真实 Node 子进程测试；浏览器检查控制面板与配置浮层，无控制台错误。
 - 评审发现并处理：大文件读取截断导致的误删已恢复；市场跨包缓存污染已修复；共享行底色和失败反馈已补齐；CLI 资源别名已修正；源引用保护、回滚、旧默认包与 profile 兼容、重复启动保护和管理员父进程看护已验证。
-- 正在生成 Windows 便携包；最终产物见 release/。
+- Windows 便携包已生成：release/preview/DSH-Launcher-1.0.4-portable.exe（92,497,456 字节）；目录版位于 release/preview/win-unpacked/。已检查 app.asar 包含 bin/launcher-control.cjs。
+- 打包原目录重命名遇到 EPERM；使用已安装 Electron 到独立 preview 输出完成目录版。封装工具直连超时后经 npmmirror 镜像下载成功。权限诊断为项目／release／临时解压目录补齐当前用户权限，复读验证通过；备份和撤销说明位于 Workspace/_cache/launcher-acl/RECOVERY.md。
 
 ## 下一步
 
