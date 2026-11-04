@@ -1,3 +1,4 @@
+import { spawnElevatedRuntime, stopElevatedRuntime } from './elevated-runtime'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createServer } from 'node:net'
 import path from 'node:path'
@@ -126,6 +127,11 @@ const STDERR_CAPTURE_LIMIT = 24_000
 const OFFICE_CLI_PREPARE_TIMEOUT_MS = 180_000
 
 export interface RuntimeControllerOptions {
+  runAsAdmin?: boolean
+  portMode?: 'auto' | 'fixed'
+  portFallbackAttempts?: number
+  reservePort?: (preferred: number, fixed: boolean) => Promise<number | null>
+  releasePort?: (port: number) => void
   readSettings: () => Promise<AppSettings>
   /** 确保有可用的 Node.js，返回其可执行文件位置。 */
   prepareNodeRuntime: () => Promise<NodeRuntime>
@@ -208,6 +214,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
   }
 
   const killProcessTree = async (processToStop: ChildProcessWithoutNullStreams): Promise<void> => {
+    if (await stopElevatedRuntime(processToStop)) return
     if (options.stopProcess) {
       await options.stopProcess(processToStop)
       return
@@ -342,9 +349,9 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
       port = null
       options.emitOutput('info', `启动模式：${replacement.name} 替代普通 DSH Web`)
     } else if (isDshWebLaunch(executable, launchArgs)) {
-      const selectedPort = await findAvailableWebPort(settings.webPort)
+      const selectedPort = await (options.reservePort ? options.reservePort(settings.webPort, options.portMode === 'fixed') : findAvailableWebPort(settings.webPort, options.portMode === 'fixed' ? 1 : (options.portFallbackAttempts ?? PORT_FALLBACK_ATTEMPTS)))
       if (selectedPort === null) {
-        const message = `从端口 ${settings.webPort} 开始连续检测 ${PORT_FALLBACK_ATTEMPTS} 个端口，均不可用。`
+        const message = options.portMode === 'fixed' ? `固定端口 ${settings.webPort} 已被占用。` : `从端口 ${settings.webPort} 开始连续检测 ${options.portFallbackAttempts ?? PORT_FALLBACK_ATTEMPTS} 个端口，均不可用。`
         options.emitOutput('error', message)
         recordLaunchFailure('port', [
           message,
@@ -434,6 +441,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
       // stop() 会先把 child 置空，据此区分主动停止与意外退出。
       const expected = child === null
       child = null
+      if (port !== null) options.releasePort?.(port)
       port = null
       void stopCompanions()
 
@@ -484,7 +492,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
 
       let started: ChildProcessWithoutNullStreams
       try {
-        started = startProcess(executable, launchArgs, { cwd, env: environment })
+        started = options.runAsAdmin ? await spawnElevatedRuntime(executable, launchArgs, { cwd, env: environment }) : startProcess(executable, launchArgs, { cwd, env: environment })
       } catch (error) {
         // 同步抛错＝进程根本没起来（可执行文件不存在、路径非法、EPERM）。
         // 不记就只剩一条 toast，用户和 agent 都不知道死在哪。
@@ -515,12 +523,15 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
           diagnosticOutput,
           error.stack ?? '',
         ])
+        if (child === started) child = null
+        if (port !== null) options.releasePort?.(port)
+        port = null
         options.emitOutput('error', `启动失败：${error.message}`)
         void stopCompanions()
         void restoreLegacyCredentials()
         broadcast()
       })
-      started.once('exit', code => { void handleExit(code) })
+      started.once('exit', code => { if (child && child !== started) return; void handleExit(code) })
       scheduleCompanions()
     }
 
@@ -539,10 +550,12 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
       return await pending
     } finally {
       if (startPromise === pending) startPromise = null
+      if (!child && port !== null) { options.releasePort?.(port); port = null }
     }
   }
 
   async function stop(): Promise<RuntimeState> {
+    if (startPromise) await startPromise.catch(() => undefined)
     const running = child
     if (!running) {
       await stopCompanions()
@@ -550,11 +563,11 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
       return state()
     }
     child = null
+    try { await Promise.all([killProcessTree(running), stopCompanions()]) } catch (error) { child = running; broadcast(); throw error }
+    if (port !== null) options.releasePort?.(port)
     port = null
     applicationAddonId = null
     applicationAddonName = null
-
-    await Promise.allSettled([killProcessTree(running), stopCompanions()])
     await restoreLegacyCredentials()
 
     options.emitOutput('info', '已发送停止请求。')

@@ -783,7 +783,51 @@ function demoSessionImportPreview(sourcePackId: string, targetPackId: string) {
   }
 }
 
+const demoPackConfigs = new Map<string, import('./types').PackControlConfig>()
+const demoPackRuntimes = new Map<string, RuntimeState>()
+const demoPackResources = new Map<string, Record<'plugins' | 'skills' | 'presets', Array<ManagedPlugin | InstalledSkill | InstalledPreset>>>()
 export const demoApi: LauncherApi = {
+  launcherControl: async request => {
+    const { command, packId, args = {} } = request
+    const config = (id: string): import('./types').PackControlConfig => demoPackConfigs.get(id) ?? { portMode: 'auto', port: 3080, runAsAdmin: false, autoStart: false, pinnedAt: null }
+    const runtime = (id: string): RuntimeState => demoPackRuntimes.get(id) ?? { running: false, pid: null, startedAt: null, url: null, port: null }
+    if (command === 'pack.list') return { packs: demoPacks.map(p => ({ ...p, config: config(p.id), runtime: runtime(p.id) })) }
+    if (command === 'settings.get') return demoSettings
+    if (command === 'settings.set') { demoSettings = { ...demoSettings, ...args }; return demoSettings }
+    if (command === 'pack.create') return demoApi.createBlankPack({ name: String(args.name ?? 'New pack'), dshVersion: typeof args.dshVersion === 'string' ? args.dshVersion : null })
+    const pack = demoPacks.find(p => p.id === packId)
+    if (!pack) throw new Error('Unknown pack')
+    const id = pack.id
+    if (command === 'pack.config.get') return config(id)
+    if (command === 'pack.config.set') { const next = { ...config(id), ...args }; demoPackConfigs.set(id, next); return next }
+    if (command === 'pack.start' || command === 'pack.restart') {
+      let port = config(id).port
+      const used = new Set([...demoPackRuntimes.entries()].filter(([key,r]) => key !== id && r.running).map(([,r]) => r.port))
+      if (used.has(port) && config(id).portMode === 'fixed') throw new Error('Fixed port is busy')
+      while (used.has(port)) port++
+      const state = { running: true, pid: 4000 + demoPacks.indexOf(pack), startedAt: new Date().toISOString(), port, url: 'http://127.0.0.1:' + port }
+      demoPackRuntimes.set(id, state); return state
+    }
+    if (command === 'pack.stop') { const state = { running: false, pid: null, startedAt: null, url: null, port: null }; demoPackRuntimes.set(id, state); return state }
+    if (command === 'pack.openWeb') return runtime(id)
+    if (command === 'pack.rename') return demoApi.renamePack(id, String(args.name))
+    if (command === 'pack.delete') return demoApi.removePack(id)
+    let resources = demoPackResources.get(id)
+    if (!resources) { resources = { plugins: structuredClone(profile().plugins), skills: structuredClone(demoInstalledSkills), presets: structuredClone(demoInstalledPresets) }; demoPackResources.set(id, resources) }
+    const kind = args.kind as 'plugins' | 'skills' | 'presets'
+    if (command === 'pack.resources.list') return { items: resources[kind] ?? [] }
+    if (command === 'pack.resources.enabled') { resources[kind] = resources[kind].map(item => ('packageName' in item ? item.packageName : item.name) === args.name ? { ...item, enabled: args.enabled === true } : item) as typeof resources[typeof kind]; return { items: resources[kind] } }
+    if (command === 'pack.resources.remove') { resources[kind] = resources[kind].filter(item => ('packageName' in item ? item.packageName : item.name) !== args.name) as typeof resources[typeof kind]; return { items: resources[kind] } }
+    if (command === 'pack.resources.link') {
+      const source = demoPackResources.get(String(args.sourcePackId)) ?? { plugins: profile().plugins, skills: demoInstalledSkills, presets: demoInstalledPresets }
+      const item = source[kind]?.find(item => ('packageName' in item ? item.packageName : item.name) === args.name)
+      if (!item) throw new Error('Shared resource not found')
+      resources[kind].push({ ...item, shared: true, sourcePackId: args.sourcePackId } as never)
+      return { items: resources[kind] }
+    }
+    if (command.startsWith('pack.market.') || command.startsWith('pack.skillMarket.')) return { installed: true }
+    throw new Error('Unsupported demo command: ' + command)
+  },
   getSettings: async () => demoSettings,
   saveSettings: async settings => (demoSettings = settings),
   detectDshInstallation: async () => ({ ...demoDshInstallation }),

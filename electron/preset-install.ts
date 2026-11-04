@@ -309,7 +309,7 @@ async function readPresetDirectory(presetRoot: string, enabled: boolean): Promis
   }
   const presets: InstalledPreset[] = []
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
     const destination = path.join(presetRoot, entry.name)
     if (await exists(path.join(destination, PRESET_MANIFEST))) {
       presets.push({ name: entry.name, path: destination, enabled })

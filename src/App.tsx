@@ -1,3 +1,4 @@
+import { PackDashboard } from './components/PackDashboard'
 import { Layers3, LoaderCircle } from 'lucide-react'
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { LauncherApiProvider, resolveLauncherApi, useLauncherApi } from './api/client'
@@ -156,6 +157,9 @@ function LauncherShell() {
             {HOME_TAB_ORDER.filter(tab => visitedTabs.current.has(tab)).map(tab => (
               <div key={tab} className={`home-tab-pane ${navigation.homeTab === tab ? '' : 'view-hidden'}`}>
                 {tab === 'start' ? (
+                  <>
+                  <PackDashboard onManage={() => navigation.goHome('packs')} onImport={() => void handlePackImport()} onExport={setExportTarget} onImportSessions={setSessionImportTarget} onCloneVersion={setCloneTarget} />
+                  <details className="legacy-home-tools"><summary>运行时安装、更新与启动器工具</summary>
                   <LauncherHome
                     runtime={store.runtime}
                     dshInstallation={store.dshInstallation}
@@ -183,6 +187,8 @@ function LauncherShell() {
                     onOpenSettings={() => setSettingsOpen(true)}
                     logoSrc={logoSrc}
                   />
+                  </details>
+                  </>
                 ) : (
                   <Suspense fallback={null}>
                     <SettingsPanels

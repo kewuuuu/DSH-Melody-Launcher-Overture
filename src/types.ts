@@ -1278,7 +1278,19 @@ export interface DshMarketProgress {
   totalBytes?: number | null
 }
 
+export interface LauncherControlRequest { command: string; packId?: string; args?: Record<string, unknown> }
+export interface PackControlConfig {
+  portMode: 'auto' | 'fixed'
+  port: number
+  runAsAdmin: boolean
+  autoStart: boolean
+  pinnedAt: string | null
+  workspace?: string
+  launchArgs?: string[]
+}
+
 export interface LauncherApi {
+  launcherControl(request: LauncherControlRequest): Promise<unknown>
   getSettings(): Promise<AppSettings>
   saveSettings(settings: AppSettings): Promise<AppSettings>
   detectDshInstallation(): Promise<DshInstallationStatus>

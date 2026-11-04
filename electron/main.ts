@@ -2,6 +2,8 @@ import { app, BrowserWindow, net, safeStorage, shell } from 'electron'
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { createLauncherControl } from './launcher-control'
+import { createLauncherControlServer } from './launcher-control-server'
 import { fileURLToPath } from 'node:url'
 import type { AppSettings, OfficialPackRelease, OfficialPackStatus, PackInstallResult, RuntimeOutput, WindowMode } from '../src/types'
 import { ACP_RUNTIME_DIRNAME, CREDENTIALS_LOCK_DIRNAME, createAiInstaller, healCredentialsLock, type AiInstaller } from './ai-install'
@@ -95,6 +97,8 @@ const getWindow = (): BrowserWindow | null => mainWindow
 const events = createRendererEvents(createRendererChannel(getWindow))
 
 interface Services {
+  packControl: ReturnType<typeof createLauncherControl>
+  launcherControl: ReturnType<typeof createLauncherControl>['execute']
   settings: SettingsStore
   pluginReceiptsPath: string
   runtime: RuntimeController
@@ -127,6 +131,7 @@ interface Services {
 
 // app.getPath 依赖 app 就绪，因此服务在 whenReady 之后才装配。
 let services: Services | null = null
+let controlServer: { close(): Promise<void> } | null = null
 
 function createServices(): Services {
   const userData = app.getPath('userData')
@@ -260,8 +265,9 @@ function createServices(): Services {
 
   let applicationAddons: ApplicationAddonManager
   let installer: Installer
+  let packControl: ReturnType<typeof createLauncherControl> | null = null
   const runtime = createRuntimeController({
-    readSettings: () => settings.read(),
+    readSettings: async () => { const value = await settings.read(); if (packControl?.hasRunningHome(value.dshHome)) throw new Error('This pack is already running through multi-pack controls'); return value },
     prepareNodeRuntime: () => prepareNodeRuntime('runtime'),
     fallbackWorkspace: () => app.getPath('documents'),
     emitOutput: (level, text) => events.output('runtime', level, text),
@@ -283,7 +289,7 @@ function createServices(): Services {
     registryPath: path.join(userData, 'packs.json'),
     manifestRoot: path.join(userData, 'pack-manifests'),
     packBodiesRoot: () => settings.read().then(value => path.join(value.dshHome, '.dsh-launcher-pack-bodies')),
-    isRuntimeRunning: () => runtime.isRunning(),
+    isRuntimeRunning: () => runtime.isRunning() || (packControl?.isRunning() ?? false),
     fillMissingDependencies: async (profileName, missing) => {
       const current = await settings.read()
       const receipts = await readPluginReceipts(pluginReceiptsPath)
@@ -425,7 +431,7 @@ function createServices(): Services {
     saveSettings: next => settings.save(next),
     prepareNodeRuntime: onProgress => prepareNodeRuntime('plugin', onProgress),
     preparePnpmRuntime: (nodeRuntime, onProgress) => preparePnpmRuntime('plugin', nodeRuntime, onProgress),
-    isRuntimeRunning: () => runtime.isRunning(),
+    isRuntimeRunning: () => runtime.isRunning() || (packControl?.isRunning() ?? false),
     emitOutput: (level, text) => events.output('plugin', level, text),
     emitProgress: progress => {
       events.installProgress(progress)
@@ -447,7 +453,7 @@ function createServices(): Services {
     preparePnpmRuntime: (nodeRuntime, onProgress) => preparePnpmRuntime('plugin', nodeRuntime, onProgress),
     emitOutput: (level, text) => events.output('plugin', level, text),
     emitProgress: progress => events.installProgress(progress),
-    isRuntimeRunning: () => runtime.isRunning(),
+    isRuntimeRunning: () => runtime.isRunning() || (packControl?.isRunning() ?? false),
     githubFetch: githubAuth.fetch,
     packageStoreRoot: path.join(userData, 'plugin-store'),
   })
@@ -466,7 +472,7 @@ function createServices(): Services {
     skillMarketCachePath: path.join(userData, 'skill-market-cache.json'),
     emitOutput: (level, text) => events.output('plugin', level, text),
     emitProgress: progress => events.installProgress(progress),
-    isRuntimeRunning: () => runtime.isRunning(),
+    isRuntimeRunning: () => runtime.isRunning() || (packControl?.isRunning() ?? false),
     githubFetch: githubAuth.fetch,
   })
 
@@ -508,7 +514,7 @@ function createServices(): Services {
     resultsPath: path.join(userData, 'plugin-trial-results.json'),
     emitOutput: (level, text) => events.output('test', level, text),
     emitResult: result => events.pluginTrial(result),
-    isRuntimeRunning: () => runtime.isRunning(),
+    isRuntimeRunning: () => runtime.isRunning() || (packControl?.isRunning() ?? false),
     isInstallerBusy: () => installer.isBusy(),
   })
 
@@ -550,7 +556,7 @@ function createServices(): Services {
       events.aiInstallEvent(event)
       void copilot.updateLegacy(event)
     },
-    isRuntimeRunning: () => runtime.isRunning(),
+    isRuntimeRunning: () => runtime.isRunning() || (packControl?.isRunning() ?? false),
     isInstallerBusy: () => installer.isBusy(),
     analyzePlugin: (repository, defaultBranch) => installer.analyzePlugin(repository, defaultBranch),
     readApiKey: dshHome => readDeepSeekApiKey(dshHome),
@@ -698,6 +704,9 @@ function createServices(): Services {
   }
 
   packManager = createPackManager({
+    isPackRunning: id => packControl?.isPackRunning(id) ?? false,
+    beforeRemovePack: async id => { await packControl?.assertPackRemovable(id) },
+    afterRemovePack: async id => { await packControl?.forgetPack(id) },
     readSettings: () => settings.read(),
     saveSettings: next => settings.save(next),
     registryPath: packsJsonPath,
@@ -710,7 +719,7 @@ function createServices(): Services {
     applicationAddons,
     emitOutput: (level, text) => events.output('plugin', level, text),
     emitEvent: event => events.packProgress(event),
-    isRuntimeRunning: () => runtime.isRunning(),
+    isRuntimeRunning: () => runtime.isRunning() || (packControl?.isRunning() ?? false),
     isInstallerBusy: () => installer.isBusy(),
     unifiedProfiles: true,
     packsRoot,
@@ -974,7 +983,7 @@ function createServices(): Services {
     pluginReceiptsPath,
     registryPath: path.join(userData, 'packs.json'),
     manifestRoot: path.join(userData, 'pack-manifests'),
-    isRuntimeRunning: () => runtime.isRunning(),
+    isRuntimeRunning: () => runtime.isRunning() || (packControl?.isRunning() ?? false),
   }).then(async () => {
     const current = await settings.read()
     const result = await consolidatePluginPool(current.dshHome)
@@ -984,11 +993,20 @@ function createServices(): Services {
       registryPath: packsJsonPath,
       readStoredSettings: () => settings.readStored(),
       saveSettings: next => settings.save(next),
-      isRuntimeRunning: () => runtime.isRunning(),
+      isRuntimeRunning: () => runtime.isRunning() || (packControl?.isRunning() ?? false),
     })
   }).catch(error => events.output('plugin', 'error', `旧整合包/插件池迁移失败：${error instanceof Error ? error.message : String(error)}`))
 
-  return { settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
+  packControl = createLauncherControl({
+    userData, cliPath: path.join(app.getAppPath(), 'bin/launcher-control.cjs'), settings, packManager: packManager!,
+    prepareNodeRuntime: () => prepareNodeRuntime('runtime'),
+    preparePnpmRuntime: node => preparePnpmRuntime('plugin', node),
+    openExternal: url => shell.openExternal(url), fallbackWorkspace: () => app.getPath('documents'),
+    fetchImpl: githubAuth.fetch, emitOutput: text => events.output('runtime', 'info', text),
+    legacyRuntimeRunning: () => runtime.isRunning(), prepareOfficeCliTool,
+    loginRegistration: enabled => { if (process.platform === 'win32' && app.isPackaged) app.setLoginItemSettings({ openAtLogin: enabled, path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath, args: ['--background'] }) },
+  })
+  return { packControl, launcherControl: request => packControl!.execute(request), settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
 }
 
 function openMainWindow(): void {
@@ -1053,6 +1071,7 @@ app.whenReady().then(async () => {
     console.error('[process-supervisor] 启动失败，退出时只能执行普通清理。', error)
   }
   services = createServices()
+  controlServer = await createLauncherControlServer({ userData: app.getPath('userData'), execute: request => services!.launcherControl(request) })
   // 外观图片统一落在 userData/appearance/，渲染层经 dsh-appearance:// 读取。
   const appearanceDirectory = path.join(app.getPath('userData'), 'appearance')
   registerAppearanceProtocol(appearanceDirectory)
@@ -1065,7 +1084,9 @@ app.whenReady().then(async () => {
     setWindowMode: (mode: WindowMode) => applyWindowMode(mainWindow, mode),
   })
   await services.profilePoolReady
+  void services.packControl.autoStart()
   openMainWindow()
+  if (process.argv.includes('--background')) mainWindow?.hide()
   // 官方整合包首启/更新核对：后台进行，不挡窗口。
   void services.officialPackBootstrap()
   tray = createTray({ iconPath: launcherIconPath, showMainWindow })
@@ -1102,6 +1123,8 @@ async function shutdownLauncherProcesses(): Promise<void> {
     console.error('[process-supervisor] 清理子进程失败。', error)
   }) ?? Promise.resolve()
   const gracefulTasks: Promise<unknown>[] = []
+  if (controlServer) gracefulTasks.push(controlServer.close())
+  if (current) gracefulTasks.push(current.packControl.shutdown())
   if (current?.runtime.isRunning()) gracefulTasks.push(current.runtime.stop())
   if (current?.pluginTrial.isBusy()) gracefulTasks.push(current.pluginTrial.cancel())
   if (current?.aiInstaller.isBusy()) gracefulTasks.push(current.aiInstaller.cancel())

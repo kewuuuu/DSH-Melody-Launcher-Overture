@@ -59,6 +59,7 @@ import { analyzeProfileRepository, applyReceiptMatches, applySelectedMatches, lo
  */
 
 export interface IpcDependencies {
+  launcherControl: (request: import('../src/types').LauncherControlRequest) => Promise<unknown>
   settings: SettingsStore
   pluginReceiptsPath: string
   runtime: RuntimeController
@@ -96,6 +97,7 @@ export interface IpcDependencies {
 }
 
 export function registerIpcHandlers(deps: IpcDependencies): void {
+  ipcMain.handle(IPC.launcherControl, (_event, request) => deps.launcherControl(request))
   const { settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles, skillsShIndexPath, newsCachePath, appearanceDirectory, restoreOfficialPack, listOfficialPackVersions, readOfficialPackStatus, installOfficialPackVersion } = deps
   const linkedComponents = createLinkedComponentController({
     readSettings: () => settings.read(),

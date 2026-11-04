@@ -47,6 +47,7 @@ export const EMPTY_DSH_INSTALLATION = { installed: false, version: null, executa
  * 此前两侧各写一遍字面量，改名时很容易只改一边。
  */
 export const IPC = {
+  launcherControl: 'launcher:control',
   settingsGet: 'settings:get',
   settingsSave: 'settings:save',
   dshDetect: 'dsh:detect-installation',

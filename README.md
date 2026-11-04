@@ -50,6 +50,23 @@
 | 把自己的配置折腾半天分享给朋友 | 导出 = 整个环境打包成 zip，对方导入即可启动 |
 | 开终端、记命令、盯输出 | 一个按钮启动，进程与日志全程托管 |
 
+## 本地开发版：多包控制面板与 CLI
+
+首页改为整合包列表，支持名称、创建时间、端口升降序；置顶项按置顶先后排列。每个包可独立启动、停止、重启和打开 DSH Web，分别设置固定／自动端口、管理员权限和开机自启。配置浮层按包管理插件、技能、预设及导出，进入市场后保留安装目标和返回路径。原有运行时下载、市场、导入导出、外观和托盘功能保留。
+
+CLI 示例（先启动本地开发版启动器，再从列表取得真实包 ID）：
+
+```sh
+node bin/launcher-control.cjs pack list --json
+node bin/launcher-control.cjs pack restart <包ID>
+node bin/launcher-control.cjs pack stop <包ID>
+node bin/launcher-control.cjs pack config set <包ID> --port-mode fixed --port 3081
+```
+
+开发启动使用 `npm ci`、`npm run dev`，或双击 `START-DSH-LAUNCHER.cmd`；Windows 便携版使用 `npm run package:win` 构建。包启动前会安装默认 `launcher-control` skill（保留用户自建同名 skill）。完整命令、配置字段和连接方式见 [CLI 文档](docs/launcher-cli.md)。CLI 的包导入／导出尚未开放，继续使用已有界面。
+
+共享引用可通过 CLI 的 `pack.resources.link` 管理；共享项以来源标签和不同底色显示。源资源仍被引用时，禁止移除源或停用目录型源技能，先解除引用。管理员启动可能弹出 Windows UAC；实际 UAC、Windows 登录自启与最终便携 EXE 需要桌面实机验收。
+
 ## v1.0.4 更新亮点
 
 - **外观自定义** —— 设置页新增「外观」分组：主题色（预设 + 自定义取色）、面板透明度、整窗背景图（含背景透明度）、启动器头像。全部存在 `settings.json` 的可选 `appearance` 字段里，旧配置照常读写；保存后立即生效，重启保留。

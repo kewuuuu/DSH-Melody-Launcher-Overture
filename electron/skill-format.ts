@@ -94,7 +94,7 @@ export async function readInstalledSkills(dshHome: string): Promise<InstalledSki
       throw error
     }
     for (const entry of sourceEntries) {
-      const format = entry.isDirectory() ? 'bundle' : entry.isFile() && entry.name.toLowerCase().endsWith('.md') ? 'flat' : null
+      const format = (entry.isDirectory() || entry.isSymbolicLink()) ? 'bundle' : entry.isFile() && entry.name.toLowerCase().endsWith('.md') ? 'flat' : null
       if (!format || entry.name === '.system') continue
       const skillPath = format === 'bundle' ? path.join(sourceRoot, entry.name, 'SKILL.md') : path.join(sourceRoot, entry.name)
       try {

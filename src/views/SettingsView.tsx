@@ -1,3 +1,4 @@
+import { launcherControl } from '../lib/pack-control'
 import {
   BookOpen,
   Check,
@@ -823,7 +824,7 @@ const SkillMarketCard = memo(function SkillMarketCard({
   )
 })
 
-function SkillMarketPanel({
+export function SkillMarketPanel({
   installedSkills,
   busy,
   busyKey,
@@ -832,7 +833,9 @@ function SkillMarketPanel({
   onInstalled,
   onRefresh,
   refreshLocked,
+  targetPackId,
 }: {
+  targetPackId?: string
   installedSkills: InstalledSkill[]
   busy: boolean
   busyKey: string | null
@@ -902,7 +905,12 @@ function SkillMarketPanel({
     setBusyName(entry.name)
     setInstallError(null)
     try {
-      const result = entry.origin === 'index'
+      const request = entry.origin === 'index'
+        ? { sourceRepository: entry.source.repository, skillId: entry.name }
+        : { repository: entry.target?.sourceRepository ?? entry.source.repository, target: entry.target! }
+      const result = targetPackId
+        ? await launcherControl(api, entry.origin === 'index' ? 'pack.skillMarket.installByName' : 'pack.skillMarket.install', targetPackId, { request }) as SkillInstallResult
+        : entry.origin === 'index'
         ? await api.skillMarketInstallByName({ sourceRepository: entry.source.repository, skillId: entry.name })
         : await api.skillMarketInstall({
           repository: entry.target?.sourceRepository ?? entry.source.repository,
@@ -915,7 +923,7 @@ function SkillMarketPanel({
     } finally {
       setBusyName(null)
     }
-  }, [api, onInstalled])
+  }, [api, onInstalled, targetPackId])
   // 传给 memo 卡片的回调必须稳定，否则每次渲染都会击穿 memo。
   const handleInstall = useCallback((entry: SkillMarketEntry) => { void install(entry) }, [install])
   const handleToggle = useCallback((name: string, enabled: boolean) => {

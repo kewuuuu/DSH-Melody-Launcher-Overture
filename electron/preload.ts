@@ -31,6 +31,7 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const api: LauncherApi = {
+  launcherControl: request => ipcRenderer.invoke(IPC.launcherControl, request),
   getSettings: () => ipcRenderer.invoke(IPC.settingsGet),
   saveSettings: (settings: AppSettings) => ipcRenderer.invoke(IPC.settingsSave, settings),
   detectDshInstallation: () => ipcRenderer.invoke(IPC.dshDetect),

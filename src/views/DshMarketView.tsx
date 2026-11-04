@@ -1,3 +1,4 @@
+import { launcherControl } from '../lib/pack-control'
 import { Check, ExternalLink, LoaderCircle, RefreshCw, Search, Star, Store, ToggleLeft, ToggleRight, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useLauncherApi } from '../api/client'
@@ -29,10 +30,11 @@ interface DshMarketViewProps {
   /** 当前激活整合包名：变化时重拉安装态。由上层传，不在这里再开一份 store。 */
   activeProfileName: string | null
   /** 面板头右侧追加的动作（如「手动添加插件」——目录读不出来时那条路仍然能走）。 */
+  targetPackId?: string
   extraActions?: ReactNode
 }
 
-export function DshMarketView({ onProfileChanged, embedded = false, activeProfileName, extraActions }: DshMarketViewProps) {
+export function DshMarketView({ onProfileChanged, embedded = false, activeProfileName, extraActions, targetPackId }: DshMarketViewProps) {
   const api = useLauncherApi()
   const [catalog, setCatalog] = useState<DshMarketCatalog | null>(cachedCatalog)
   const [query, setQuery] = useState('')
@@ -44,6 +46,7 @@ export function DshMarketView({ onProfileChanged, embedded = false, activeProfil
   const [busy, setBusy] = useState<string | null>(null)
   const [progress, setProgress] = useState<DshMarketProgress | null>(null)
   const [page, setPage] = useState(1)
+  const targetPackageNames = useRef(new Map<string, string>())
 
   const load = async () => {
     setLoading(true)
@@ -51,7 +54,16 @@ export function DshMarketView({ onProfileChanged, embedded = false, activeProfil
     try {
       const next = await api.loadDshMarket()
       cachedCatalog = next
-      setCatalog(next)
+      let displayCatalog = next
+      if (targetPackId) {
+        const resources = await launcherControl(api, 'pack.resources.list', targetPackId, { kind: 'plugins' }) as { items: Array<{ packageName: string; enabled: boolean }> }
+        displayCatalog = { ...next, plugins: next.plugins.map(plugin => {
+          const local = resources.items.find(item => item.packageName === plugin.npm || item.packageName === plugin.name || item.packageName.endsWith('/' + plugin.name))
+          if (local) targetPackageNames.current.set(plugin.name, local.packageName)
+          return { ...plugin, installed: Boolean(local), enabled: local?.enabled ?? false, updateAvailable: false }
+        }) }
+      }
+      setCatalog(displayCatalog)
     } catch (cause) { setError(cause instanceof Error ? cause.message : '无法读取 DSH Market') }
     finally { setLoading(false) }
   }
@@ -84,7 +96,7 @@ export function DshMarketView({ onProfileChanged, embedded = false, activeProfil
 
   // 激活整合包变化时——新建/删除/切换整合包——重新拉一次安装态，
   // 避免出现「整合包已删但 DSH Market 还显示已启用」的错觉。
-  useEffect(() => { void load() }, [activeProfileName])
+  useEffect(() => { void load() }, [activeProfileName, targetPackId])
 
   const visible = useMemo(() => {
     const list = (catalog?.plugins ?? []).filter(plugin => {
@@ -117,7 +129,10 @@ export function DshMarketView({ onProfileChanged, embedded = false, activeProfil
     setBusy(plugin.name)
     setError(null)
     try {
-      if (action === 'install') await api.installDshMarketPlugin(plugin.name)
+      if (targetPackId) {
+        if (action === 'install' || action === 'update') await launcherControl(api, 'pack.market.install', targetPackId, { name: plugin.name })
+        else await launcherControl(api, action === 'toggle' ? 'pack.resources.enabled' : 'pack.resources.remove', targetPackId, { kind: 'plugins', name: targetPackageNames.current.get(plugin.name) ?? plugin.npm ?? plugin.name, enabled })
+      } else if (action === 'install') await api.installDshMarketPlugin(plugin.name)
       else if (action === 'update') await api.updateDshMarketPlugin(plugin.name)
       else if (action === 'uninstall') await api.uninstallDshMarketPlugin(plugin.name)
       else await api.toggleDshMarketPlugin(plugin.name, enabled === true)

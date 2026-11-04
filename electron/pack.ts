@@ -109,6 +109,9 @@ export interface InstallInstaller {
 }
 
 export interface PackManagerOptions {
+  isPackRunning?: (packId: string) => boolean
+  beforeRemovePack?: (packId: string) => Promise<void>
+  afterRemovePack?: (packId: string) => Promise<void>
   readSettings: () => Promise<AppSettings>
   saveSettings: (settings: AppSettings) => Promise<AppSettings>
   /** packs.json 注册表路径。 */
@@ -2025,6 +2028,8 @@ export function createPackManager(options: PackManagerOptions): PackManager {
     },
 
     async removePack(packId) {
+      if (options.isPackRunning?.(packId)) throw new Error('Stop this pack before removing it')
+      await options.beforeRemovePack?.(packId)
       const settings = await options.readSettings()
       const wasActive = settings.activePackId === packId || isSelectedProfile(settings, packId)
       // 删除未激活的包不动当前环境，DSH 运行中也允许；删激活包必须先停 DSH（它就是当前环境）。
@@ -2068,6 +2073,7 @@ export function createPackManager(options: PackManagerOptions): PackManager {
             : { ...nextSettings, activePackId: null }
         }
         await options.saveSettings(nextSettings)
+        await options.afterRemovePack?.(packId)
         return {
           removed: record.plugins.length
             + (record.presets?.length ?? 0)

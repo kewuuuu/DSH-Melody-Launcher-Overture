@@ -22,6 +22,9 @@
   },
   "type": "module",
   "main": "dist-electron/main.js",
+  "bin": {
+    "dsh-launcher-control": "bin/launcher-control.cjs"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -72,6 +75,7 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "bin/launcher-control.cjs",
       "package.json"
     ],
     "extraResources": [
