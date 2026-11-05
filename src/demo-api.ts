@@ -28,6 +28,7 @@ import type {
   InstalledPreset,
   InstalledSkill,
   InstalledApplicationAddon,
+  LauncherApiEntry,
   LauncherApi,
   LauncherUpdateProgress,
   LauncherUpdateStatus,
@@ -208,6 +209,16 @@ let demoGitHubAuth: GitHubAuthStatus = {
   oauthAvailable: true,
   rateLimit: null,
 }
+/** 浏览器预览用的启动器级 API 库（与每包 custom API 互不相干）。 */
+let demoApiLibrary: LauncherApiEntry[] = [{
+  route: 'library-openai',
+  displayName: 'OpenAI 官方',
+  baseUrl: 'https://api.openai.com/v1',
+  protocol: 'openai-completions',
+  modelIds: ['gpt-5', 'gpt-5-mini'],
+  hasApiKey: true,
+}]
+const demoPackApiGrants: Record<string, string[]> = {}
 const demoStarredRepositories = new Set<string>()
 let demoDshInstallation: DshInstallationStatus = { installed: false, version: null, executable: null, source: null }
 const demoRemoteDshVersion = '0.1.5-rc.2'
@@ -1088,6 +1099,59 @@ export const demoApi: LauncherApi = {
       throw new Error('浏览器预览不支持切换数据目录：请用打包后的启动器。')
     },
     relaunch: async () => undefined,
+  },
+  apiLibrary: {
+    list: async () => demoApiLibrary.map(entry => ({ ...entry, modelIds: [...entry.modelIds] })),
+    save: async input => {
+      const route = input.route.trim()
+      if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(route)) throw new Error('路由格式无效。')
+      const previous = demoApiLibrary.find(item => item.route === input.originalRoute)
+      const entry: LauncherApiEntry = {
+        route,
+        displayName: input.displayName.trim(),
+        baseUrl: input.baseUrl.trim(),
+        protocol: input.protocol,
+        modelIds: [...input.modelIds],
+        hasApiKey: Boolean(input.apiKey?.trim()) || Boolean(previous?.hasApiKey),
+      }
+      demoApiLibrary = demoApiLibrary.filter(item => item.route !== input.originalRoute && item.route !== route)
+      demoApiLibrary.push(entry)
+      if (input.originalRoute && input.originalRoute !== route) {
+        for (const [packId, routes] of Object.entries(demoPackApiGrants)) {
+          demoPackApiGrants[packId] = routes.map(item => (item === input.originalRoute ? route : item))
+        }
+      }
+      return demoApiLibrary.map(item => ({ ...item, modelIds: [...item.modelIds] }))
+    },
+    remove: async route => {
+      demoApiLibrary = demoApiLibrary.filter(item => item.route !== route)
+      for (const [packId, routes] of Object.entries(demoPackApiGrants)) {
+        demoPackApiGrants[packId] = routes.filter(item => item !== route)
+      }
+      return demoApiLibrary.map(item => ({ ...item, modelIds: [...item.modelIds] }))
+    },
+  },
+  packApis: {
+    get: async packId => ({
+      packId,
+      enabled: [...(demoPackApiGrants[packId] ?? [])],
+      available: demoApiLibrary.map(entry => ({ ...entry, modelIds: [...entry.modelIds] })),
+      restartRequired: false,
+      error: null,
+    }),
+    set: async (packId, route, enabled) => {
+      const current = new Set(demoPackApiGrants[packId] ?? [])
+      if (enabled) current.add(route)
+      else current.delete(route)
+      demoPackApiGrants[packId] = [...current]
+      return {
+        packId,
+        enabled: [...current],
+        available: demoApiLibrary.map(entry => ({ ...entry, modelIds: [...entry.modelIds] })),
+        restartRequired: false,
+        error: null,
+      }
+    },
   },
   readProfile: async () => profile(),
   listProfiles: async () => [{

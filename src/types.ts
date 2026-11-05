@@ -1,6 +1,6 @@
 export type WindowMode = 'launcher' | 'manager'
 /** 一级导航 tab：启动页 + 五个 C 端面板（原二级设置页拍平）。顺序与显示名见 src/lib/nav.ts。 */
-export type HomeTab = 'start' | 'versions' | 'plugins' | 'skills' | 'presets' | 'packs'
+export type HomeTab = 'start' | 'versions' | 'plugins' | 'skills' | 'presets' | 'packs' | 'settings'
 export type UiTheme = 'deepseek' | 'night'
 
 /**
@@ -53,6 +53,8 @@ export interface AppSettings {
   launchArgs: string[]
   webPort: number
   openAfterLaunch: boolean
+  /** 启动器自身是否随 Windows 登录启动（隐藏窗口进托盘）；与整合包的 autoStart 无关。 */
+  launchAtLogin?: boolean
   /** 启动器界面配色；主表面由同一基色的明暗层级构成。 */
   uiTheme?: UiTheme
   /** 外观自定义（主题色/透明度/背景图/头像）；旧存档无此字段。 */
@@ -109,6 +111,39 @@ export interface CustomApiProviderInput {
   modelIds: string[]
   /** 编辑时留空表示保留现有密钥；新建时留空表示该服务无需鉴权。 */
   apiKey?: string
+}
+
+/** 启动器级 API 库条目（密钥单独存放，这里只报告是否存在）。 */
+export interface LauncherApiEntry {
+  route: string
+  displayName: string
+  baseUrl: string
+  protocol: CustomApiProtocol
+  modelIds: string[]
+  hasApiKey: boolean
+}
+
+/** 新建/编辑启动器级 API 条目；apiKey 留空表示保留原密钥（新建时表示无需鉴权）。 */
+export interface LauncherApiEntryInput {
+  originalRoute?: string
+  route: string
+  displayName: string
+  baseUrl: string
+  protocol: CustomApiProtocol
+  modelIds: string[]
+  apiKey?: string
+}
+
+/** 某个整合包从启动器 API 库中启用了哪些 API。 */
+export interface PackApiGrantState {
+  packId: string
+  /** 已授予该包的 route 列表。 */
+  enabled: string[]
+  /** 启动器库中的全部条目（供界面勾选）。 */
+  available: LauncherApiEntry[]
+  /** 该包正在运行：授予结果需要重启该包才生效。 */
+  restartRequired: boolean
+  error: string | null
 }
 
 export interface GitHubRateLimit {
@@ -1352,6 +1387,17 @@ export interface LauncherApi {
     /** 删掉指针文件，回到 EXE 决定的默认目录。 */
     reset(): Promise<StorageState>
     relaunch(): Promise<void>
+  }
+  /** 启动器级 API 库：全局唯一来源，密钥存启动器数据目录，不进整合包。 */
+  apiLibrary: {
+    list(): Promise<LauncherApiEntry[]>
+    save(input: LauncherApiEntryInput): Promise<LauncherApiEntry[]>
+    remove(route: string): Promise<LauncherApiEntry[]>
+  }
+  /** 单个整合包从 API 库中启用哪些条目；写入该包的 settings.yaml 与 .credentials.yaml。 */
+  packApis: {
+    get(packId: string): Promise<PackApiGrantState>
+    set(packId: string, route: string, enabled: boolean): Promise<PackApiGrantState>
   }
   /** 选择并复制一张外观图片；返回写进 settings 的路径与可直接加载的 URL；取消返回 null。 */
   chooseAppearanceImage(kind: AppearanceImageKind): Promise<AppearanceImageSelection | null>

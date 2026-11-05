@@ -72,6 +72,15 @@ const api: LauncherApi = {
     reset: () => ipcRenderer.invoke(IPC.storageReset),
     relaunch: () => ipcRenderer.invoke(IPC.storageRelaunch),
   },
+  apiLibrary: {
+    list: () => ipcRenderer.invoke(IPC.apiLibraryList),
+    save: input => ipcRenderer.invoke(IPC.apiLibrarySave, input),
+    remove: route => ipcRenderer.invoke(IPC.apiLibraryRemove, route),
+  },
+  packApis: {
+    get: packId => ipcRenderer.invoke(IPC.packApisGet, packId),
+    set: (packId, route, enabled) => ipcRenderer.invoke(IPC.packApisSet, { packId, route, enabled }),
+  },
   readProfile: () => ipcRenderer.invoke(IPC.profileRead),
   listProfiles: () => ipcRenderer.invoke(IPC.profilesList),
   createProfile: request => ipcRenderer.invoke(IPC.profilesCreate, request),
