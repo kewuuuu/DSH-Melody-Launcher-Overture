@@ -36,6 +36,28 @@ node bin/launcher-control.cjs pack delete pack-a
 
 Resource kinds are plugins, skills, presets. resource <operation> <id> maps to pack.resources.<operation> with that explicit pack ID; for example resource list pack-a --args '{"kind":"skills"}' calls pack.resources.list. Supported lifecycle commands are pack create with args {name,dshVersion}, pack rename with an explicit pack ID and args {name}, and pack delete with an explicit pack ID. The pack <operation> [id] and request forms forward commands to the backend; forwarding does not add operations. Unsupported commands, including pack.export, return an error. All operations on an existing pack should include its ID; the server enforces it for runtime and config commands, and the backend validates additional commands.
 
+## Storage location
+
+The packaged launcher keeps all of its data in a launcher-data directory next to its own executable: <EXE directory>/launcher-data (the portable build uses PORTABLE_EXECUTABLE_DIR, so a portable EXE carries its data in its own folder). packs.json, launcher settings, the plugin store and the managed DSH runtime all live there, and Chromium's cache is isolated in launcher-data/browser-data. Two launchers in different folders on the same machine therefore never share packs or a single-instance lock. A development build (not packaged) keeps the historical <appData>/dsh-launcher directory and cannot switch it.
+
+Resolution order, first match wins:
+
+1. --data-dir=<absolute-directory> or --data-dir <absolute-directory> on the launcher command line (a relative path is ignored with a warning).
+2. <EXE directory>/launcher-storage.json containing {"dataDir":"<absolute-directory>"} (a corrupt file is ignored with a warning).
+3. <EXE directory>/launcher-data.
+
+Switching the data directory writes that pointer file, and requires a launcher restart to take effect. The launcher UI exposes the same switch through launcher:storage:choose|reset|relaunch, which use a native directory picker. The CLI is a separate Node process with no access to Electron dialogs, so it only writes the pointer file:
+
+~~~sh
+node bin/launcher-control.cjs storage info --json
+node bin/launcher-control.cjs storage set 'D:/launcher-data' --json
+node bin/launcher-control.cjs storage reset --json
+~~~
+
+storage info returns {dataDir,source,portableDir,pointerFile,legacy:{dataDir,hasData},restartRequired,warning}, where source is argument, pointer, portable, install or development. storage set takes one existing or creatable absolute directory, verifies it is writable, writes the pointer file and reports restartRequired true. storage reset deletes the pointer file, so the next start returns to the default location; restartRequired stays true and dataDir keeps naming the directory this process is still using. legacy describes %APPDATA%/dsh-launcher on Windows (the appData equivalent elsewhere) and hasData is true when that directory already holds launcher data.
+
+To take over data from an older installation or another launcher, stop that launcher and run storage set with its data directory, for example 'C:/Users/<user>/AppData/Roaming/dsh-launcher' (quote paths containing spaces), then start the launcher again. The pointer file lives next to the EXE, so it travels with a portable copy but not with a copied launcher-data folder; run storage reset to go back to the default.
+
 ## Connection and launcher startup
 
 --user-data <directory> overrides DSH_LAUNCHER_USER_DATA. Otherwise the CLI resolves Electron's dsh-launcher userData: %APPDATA%/dsh-launcher on Windows, ~/Library/Application Support/dsh-launcher on macOS, $XDG_CONFIG_HOME/dsh-launcher or ~/.config/dsh-launcher on Linux. Product support remains Windows. Specify the directory for a launcher using custom userData.

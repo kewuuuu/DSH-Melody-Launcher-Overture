@@ -66,6 +66,12 @@ const api: LauncherApi = {
   setGitHubStar: (repository, starred) => ipcRenderer.invoke(IPC.githubStarSet, { repository, starred }),
   chooseDirectory: kind => ipcRenderer.invoke(IPC.chooseDirectory, kind),
   chooseAppearanceImage: kind => ipcRenderer.invoke(IPC.appearanceChooseImage, kind),
+  storage: {
+    get: () => ipcRenderer.invoke(IPC.storageGet),
+    choose: () => ipcRenderer.invoke(IPC.storageChoose),
+    reset: () => ipcRenderer.invoke(IPC.storageReset),
+    relaunch: () => ipcRenderer.invoke(IPC.storageRelaunch),
+  },
   readProfile: () => ipcRenderer.invoke(IPC.profileRead),
   listProfiles: () => ipcRenderer.invoke(IPC.profilesList),
   createProfile: request => ipcRenderer.invoke(IPC.profilesCreate, request),

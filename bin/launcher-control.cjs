@@ -12,6 +12,9 @@ const HELP = `DSH Launcher control (Node >=20)
   pack config set <pack-id> --port 3081 --port-mode fixed --auto-start true
   settings get
   settings set --args '{"openAfterLaunch":false}'
+  storage info
+  storage set <absolute-directory>
+  storage reset
   resource <operation> <pack-id> --args '{...}'
   pack <operation> [pack-id] --args '{...}'
   request <dotted.command> [pack-id] --args '{...}'
@@ -39,9 +42,14 @@ function parse(argv) {
   }
   if (flags.help) return { help: true }
   const group = words.shift(), action = words.shift()
-  let command, packId
+  let command, packId, storageDir
   if (group === 'request') { command = action; packId = words.shift() }
   else if (group === 'pack' && action === 'config') { command = 'pack.config.' + words.shift(); packId = words.shift(); if (!['pack.config.get','pack.config.set'].includes(command)) throw new Error('Use pack config get|set <pack-id>') }
+  else if (group === 'storage') {
+    command = 'storage.' + action
+    if (!['storage.info','storage.set','storage.reset'].includes(command)) throw new Error('用法：storage info | storage set <绝对路径目录> | storage reset')
+    if (command === 'storage.set') { storageDir = words.shift(); if (!storageDir) throw new Error('storage set 需要一个目录参数：storage set <绝对路径目录>') }
+  }
   else if (['pack','settings','resource'].includes(group) && action) { command = (group === 'resource' ? 'pack.resources' : group) + '.' + action; packId = words.shift() }
   else throw new Error('A command is required. Use --help')
   if (words.length) throw new Error('Unexpected positional arguments')
@@ -49,6 +57,10 @@ function parse(argv) {
   if ((/^pack\.(start|stop|restart|config\.(get|set))$/.test(command) || group === 'resource') && !packId) throw new Error('An explicit pack ID is required')
   if ((command === 'pack.list' || group === 'settings') && packId) throw new Error('This command does not accept a pack ID')
   const args = flags.args ? objectJSON(flags.args) : {}
+  if (storageDir !== undefined) {
+    if (!path.isAbsolute(storageDir)) throw new Error('storage set 的目录必须是绝对路径，当前收到：' + storageDir)
+    args.dir = storageDir
+  }
   const configKeys = { port: 'port', 'port-mode': 'portMode', 'run-as-admin': 'runAsAdmin', 'auto-start': 'autoStart', 'pinned-at': 'pinnedAt', workspace: 'workspace', 'launch-args': 'launchArgs' }
   for (const [flag, key] of Object.entries(configKeys)) {
     if (flags[flag] === undefined) continue

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, net, safeStorage, shell } from 'electron'
+import { mkdirSync } from 'node:fs'
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -55,6 +56,7 @@ import { createRuntimeVersionService, ensureDshVersionInstalled, findManagedDshV
 import { createSettingsStore, defaultSettings, type SettingsStore } from './settings'
 import { createTray, type TrayController } from './tray'
 import { recoverLegacyCredentials } from './dsh-credentials-compat'
+import { createStorageController, LEGACY_DATA_DIRNAME, resolveStorage, STORAGE_BROWSER_DATA_DIRNAME, type StorageResolution } from './storage-root'
 
 /**
  * 应用入口与装配根。
@@ -83,6 +85,56 @@ const bundledNodeRoot = app.isPackaged
 const bundledPnpmRoot = app.isPackaged
   ? path.join(process.resourcesPath, 'pnpm')
   : path.resolve(moduleDirectory, '../vendor/pnpm')
+
+/**
+ * 数据目录：必须在 requestSingleInstanceLock() 之前定好。
+ * 单实例锁、Chromium 的缓存目录和后面所有 path.join(userData, ...) 都取自
+ * app.getPath('userData')，所以这里改一次，全项目的数据就一起搬过去。
+ * 打包态默认落在 EXE 旁边的 launcher-data —— 同一台机器上放在不同文件夹的多份
+ * 启动器因此各自 userData 不同，单实例锁与 packs.json 都不再互相干扰。
+ */
+const storageBootstrap = { isPackaged: app.isPackaged, execPath: process.execPath, env: process.env, appDataPath: app.getPath('appData') }
+
+/** 把 userData/sessionData 指到数据目录；建不出目录就抛错，由调用方退回备用目录。 */
+function applyStorageLocation(dataDir: string): void {
+  mkdirSync(dataDir, { recursive: true })
+  mkdirSync(path.join(dataDir, STORAGE_BROWSER_DATA_DIRNAME), { recursive: true })
+  app.setPath('userData', dataDir)
+  // Chromium 的 Cache/GPUCache 单独收进子目录，launcher-data 顶层才一眼看得清哪份是数据。
+  app.setPath('sessionData', path.join(dataDir, STORAGE_BROWSER_DATA_DIRNAME))
+}
+
+function installStorageLocation(): StorageResolution {
+  try {
+    const resolution = resolveStorage({ ...storageBootstrap, argv: process.argv })
+    try {
+      applyStorageLocation(resolution.dataDir)
+      return resolution
+    } catch (error) {
+      // 数据目录写不进去（U 盘只读、杀软拦截……）不该让启动器起不来：退回开发态默认位置。
+      const fallback = path.join(storageBootstrap.appDataPath, LEGACY_DATA_DIRNAME)
+      console.error('[storage] 数据目录 ' + resolution.dataDir + ' 不可用，改用 ' + fallback + '。', error)
+      applyStorageLocation(fallback)
+      const reason = resolution.warning ? resolution.warning + ' ' : ''
+      return { ...resolution, dataDir: fallback, source: 'development', warning: reason + '原数据目录 ' + resolution.dataDir + ' 不可用，本次运行改用 ' + fallback + '。' }
+    }
+  } catch (error) {
+    console.error('[storage] 解析数据目录失败，继续使用 Electron 默认 userData。', error)
+    return { dataDir: app.getPath('userData'), source: 'development', portableDir: null, pointerFile: null, warning: '数据目录解析失败，本次运行使用 Electron 的默认目录。' }
+  }
+}
+
+const storageResolution = installStorageLocation()
+const storageController = createStorageController({ resolution: storageResolution, appDataPath: storageBootstrap.appDataPath })
+
+/** 重启启动器：丢掉会把新目录覆盖回去的 --data-dir；portable 版要重开 EXE 而不是解包出来的进程。 */
+function relaunchLauncher(): void {
+  app.relaunch({
+    execPath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
+    args: process.argv.slice(1).filter(argument => !argument.startsWith('--data-dir')),
+  })
+  app.exit(0)
+}
 
 let mainWindow: BrowserWindow | null = null
 let processSupervisor: ProcessSupervisor | null = null
@@ -998,7 +1050,7 @@ function createServices(): Services {
   }).catch(error => events.output('plugin', 'error', `旧整合包/插件池迁移失败：${error instanceof Error ? error.message : String(error)}`))
 
   packControl = createLauncherControl({
-    userData, cliPath: path.join(app.getAppPath(), 'bin/launcher-control.cjs'), settings, packManager: packManager!,
+    userData, cliPath: path.join(app.getAppPath(), 'bin/launcher-control.cjs'), settings, packManager: packManager!, storage: storageController,
     prepareNodeRuntime: () => prepareNodeRuntime('runtime'),
     preparePnpmRuntime: node => preparePnpmRuntime('plugin', node),
     openExternal: url => shell.openExternal(url), fallbackWorkspace: () => app.getPath('documents'),
@@ -1080,6 +1132,7 @@ app.whenReady().then(async () => {
     skillsShIndexPath: path.join(app.getPath('userData'), 'skills-sh-index.json'),
     newsCachePath: path.join(app.getPath('userData'), 'juya-news-cache.json'),
     appearanceDirectory,
+    storage: { ...storageController, relaunch: relaunchLauncher },
     getWindow,
     setWindowMode: (mode: WindowMode) => applyWindowMode(mainWindow, mode),
   })

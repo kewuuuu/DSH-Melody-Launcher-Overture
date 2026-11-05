@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
@@ -6,6 +6,8 @@ import path from 'node:path'
 import os from 'node:os'
 import { createLauncherControlServer } from '../electron/launcher-control-server'
 import { ensureLauncherControlSkill } from '../electron/launcher-control-skill'
+import { createStorageController } from '../electron/storage-root'
+import { createLauncherControl } from '../electron/launcher-control'
 
 const exec = promisify(execFile)
 const cliPath = path.resolve('bin/launcher-control.cjs')
@@ -103,5 +105,79 @@ describe('managed launcher skill', () => {
     await writeFile(target, 'my custom skill')
     expect((await ensureLauncherControlSkill({ packHome, userData: path.join(root, 'data'), cliPath })).status).toBe('preserved')
     expect(await readFile(target, 'utf8')).toBe('my custom skill')
+  })
+})
+
+describe('launcher control CLI storage commands', () => {
+  async function storageFixture() {
+    const userData = await temporary()
+    const exeDir = await temporary()
+    const pointerFile = path.join(exeDir, 'launcher-storage.json')
+    const controller = createStorageController({
+      resolution: { dataDir: path.join(exeDir, 'launcher-data'), source: 'install', portableDir: exeDir, pointerFile, warning: null },
+      appDataPath: exeDir,
+    })
+    const server = await createLauncherControlServer({ userData, execute: async request => {
+      if (request.command === 'storage.info') return controller.get()
+      if (request.command === 'storage.reset') return controller.reset()
+      if (request.command === 'storage.set') {
+        const dir = request.args?.dir
+        if (typeof dir !== 'string') throw new Error('storage.set needs args.dir')
+        return controller.set(dir)
+      }
+      throw new Error('Unsupported command: ' + request.command)
+    } })
+    cleanups.push(() => server.close())
+    const run = (...args: string[]) => exec(process.execPath, [cliPath, '--user-data', userData, ...args], { timeout: 10000 })
+    return { run, pointerFile, dataDir: path.join(exeDir, 'launcher-data') }
+  }
+  it('reports the resolved data directory and marks restartRequired after switching it', async () => {
+    const f = await storageFixture()
+    const initial = JSON.parse((await f.run('storage', 'info', '--json')).stdout)
+    expect(initial.dataDir).toBe(f.dataDir)
+    expect(initial.source).toBe('install')
+    expect(initial.restartRequired).toBe(false)
+    const target = await temporary()
+    const switched = JSON.parse((await f.run('storage', 'set', target, '--json')).stdout)
+    expect(switched.dataDir).toBe(target)
+    expect(switched.source).toBe('pointer')
+    expect(switched.restartRequired).toBe(true)
+    expect(JSON.parse(await readFile(f.pointerFile, 'utf8'))).toEqual({ dataDir: target })
+    const after = JSON.parse((await f.run('storage', 'info', '--json')).stdout)
+    expect(after).toMatchObject({ dataDir: target, source: 'pointer', restartRequired: true })
+    const reset = JSON.parse((await f.run('storage', 'reset', '--json')).stdout)
+    expect(reset.restartRequired).toBe(true)
+    await expect(readFile(f.pointerFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  it('rejects relative directories, missing arguments and unknown operations', async () => {
+    const f = await storageFixture()
+    await expect(f.run('storage', 'set', 'relative/data', '--json')).rejects.toMatchObject({ code: 1, stdout: '', stderr: expect.stringContaining('绝对路径') })
+    await expect(f.run('storage', 'set', '--json')).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('需要一个目录参数') })
+    await expect(f.run('storage', 'nope', '--json')).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('用法：storage info') })
+    expect((await f.run('--help')).stdout).toContain('storage set <absolute-directory>')
+  })
+})
+
+describe('launcher control storage command routing', () => {
+  it('routes storage commands to the controller and validates the directory argument', async () => {
+    const root = await temporary()
+    const pointerFile = path.join(root, 'launcher-storage.json')
+    const controller = createStorageController({
+      resolution: { dataDir: path.join(root, 'launcher-data'), source: 'install', portableDir: root, pointerFile, warning: null },
+      appDataPath: root,
+    })
+    const control = createLauncherControl({
+      userData: root, cliPath: path.join(root, 'cli.cjs'), settings: { readStored: async () => ({}), read: async () => ({}), save: vi.fn() } as never,
+      packManager: {} as never, prepareNodeRuntime: vi.fn(), preparePnpmRuntime: vi.fn(), openExternal: vi.fn(), fallbackWorkspace: () => root,
+      fetchImpl: fetch, emitOutput: () => undefined, loginRegistration: vi.fn(), legacyRuntimeRunning: () => false, storage: controller,
+    })
+    expect(await control.execute({ command: 'storage.info' })).toMatchObject({ dataDir: path.join(root, 'launcher-data'), restartRequired: false })
+    await expect(control.execute({ command: 'storage.set', args: {} })).rejects.toThrow('需要一个绝对路径参数 dir')
+    await expect(control.execute({ command: 'storage.set', args: { dir: 'relative/data' } })).rejects.toThrow('必须是绝对路径')
+    const target = await temporary()
+    expect(await control.execute({ command: 'storage.set', args: { dir: target } })).toMatchObject({ dataDir: target, source: 'pointer', restartRequired: true })
+    expect(JSON.parse(await readFile(pointerFile, 'utf8'))).toEqual({ dataDir: target })
+    expect(await control.execute({ command: 'storage.reset' })).toMatchObject({ restartRequired: true })
+    await expect(readFile(pointerFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })

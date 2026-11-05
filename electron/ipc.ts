@@ -7,6 +7,7 @@ import type { AiSessionCreateInput, ApplicationInstallRequest, AppSettings, Appe
 import { APPEARANCE_IMAGE_EXTENSIONS } from '../src/lib/appearance'
 import { storeAppearanceImage } from './appearance'
 import type { SnapshotPrivacyInclude } from './pack-snapshot'
+import type { StorageController } from './storage-root'
 import type { ApplicationAddonManager } from './application-addons'
 import type { RecommendedWebUiService } from './recommended-web-ui'
 import { isWindowMode } from './app-window'
@@ -92,6 +93,8 @@ export interface IpcDependencies {
   readOfficialPackStatus: (force?: boolean) => Promise<OfficialPackStatus>
   /** 下载并导入指定版本的官方整合包；失败抛错。 */
   installOfficialPackVersion: (version: string) => Promise<PackInstallResult>
+  /** 数据目录：切换只写 EXE 旁的 launcher-storage.json，重启后生效。 */
+  storage: StorageController & { relaunch: () => void }
   getWindow: () => BrowserWindow | null
   setWindowMode: (mode: WindowMode) => void
 }
@@ -253,6 +256,21 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
     })
     return result.canceled ? null : result.filePaths[0]
   })
+
+  // 数据目录：get 给界面读当前解析结果；choose 选目录后写指针文件；切换与重置都要重启才生效。
+  ipcMain.handle(IPC.storageGet, () => deps.storage.get())
+  ipcMain.handle(IPC.storageChoose, async () => {
+    const window = deps.getWindow()
+    if (!window) return null
+    const result = await dialog.showOpenDialog(window, {
+      title: '选择启动器数据目录',
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    return deps.storage.set(result.filePaths[0])
+  })
+  ipcMain.handle(IPC.storageReset, () => deps.storage.reset())
+  ipcMain.handle(IPC.storageRelaunch, () => { deps.storage.relaunch() })
 
   // 外观图片：选文件 → 校验扩展名/大小 → 复制进 userData/appearance → 返回固定路径 + 协议 URL。
   // 不走 file://：dev 下 http 源加载 file:// 会被 webSecurity 拦掉。

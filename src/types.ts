@@ -1289,6 +1289,25 @@ export interface PackControlConfig {
   launchArgs?: string[]
 }
 
+/** 数据目录的来源：命令行 > 指针文件 > EXE 旁的 portable 目录 > 安装目录 > 开发态默认。 */
+export type StorageSource = 'argument' | 'pointer' | 'portable' | 'install' | 'development'
+
+export interface StorageState {
+  /** 当前进程正在使用的数据目录；切换之后要重启才会变。 */
+  dataDir: string
+  source: StorageSource
+  /** 打包态下 EXE 所在目录；开发态为 null。 */
+  portableDir: string | null
+  /** 指向 <exeDir>/launcher-storage.json；开发态为 null（不支持切换）。 */
+  pointerFile: string | null
+  /** 旧版默认目录 %APPDATA%\dsh-launcher 以及它是否已经有数据，用来提示「要不要接管旧数据」。 */
+  legacy: { dataDir: string; hasData: boolean }
+  /** 已经切换/重置过，需要重启才生效。 */
+  restartRequired: boolean
+  /** 本次启动解析时的告警（配置损坏、回退说明等）；没有则为 null。 */
+  warning: string | null
+}
+
 export interface LauncherApi {
   launcherControl(request: LauncherControlRequest): Promise<unknown>
   getSettings(): Promise<AppSettings>
@@ -1325,6 +1344,15 @@ export interface LauncherApi {
   getGitHubStarStatus(repository: string): Promise<boolean>
   setGitHubStar(repository: string, starred: boolean): Promise<boolean>
   chooseDirectory(kind: 'dshInstallPath' | 'dshHome' | 'workspace'): Promise<string | null>
+  /** 数据目录（打包态默认在 EXE 旁的 launcher-data）。切换/重置之后要重启启动器才生效。 */
+  storage: {
+    get(): Promise<StorageState>
+    /** 选目录并写指针文件；用户取消返回 null。 */
+    choose(): Promise<StorageState | null>
+    /** 删掉指针文件，回到 EXE 决定的默认目录。 */
+    reset(): Promise<StorageState>
+    relaunch(): Promise<void>
+  }
   /** 选择并复制一张外观图片；返回写进 settings 的路径与可直接加载的 URL；取消返回 null。 */
   chooseAppearanceImage(kind: AppearanceImageKind): Promise<AppearanceImageSelection | null>
   readProfile(): Promise<ProfileState>

@@ -1072,6 +1072,23 @@ export const demoApi: LauncherApi = {
     const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
     return { path: url, url }
   },
+  // 浏览器预览没有主进程，也就没有数据目录：只给占位状态，切换与重置都不可用。
+  storage: {
+    get: async () => ({
+      dataDir: '（浏览器预览）',
+      source: 'development' as const,
+      portableDir: null,
+      pointerFile: null,
+      legacy: { dataDir: '（浏览器预览）', hasData: false },
+      restartRequired: false,
+      warning: null,
+    }),
+    choose: async () => null,
+    reset: async () => {
+      throw new Error('浏览器预览不支持切换数据目录：请用打包后的启动器。')
+    },
+    relaunch: async () => undefined,
+  },
   readProfile: async () => profile(),
   listProfiles: async () => [{
     id: demoSettings.profileName,

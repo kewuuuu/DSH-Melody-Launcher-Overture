@@ -10,6 +10,9 @@ import { createDshMarketService } from './dsh-market'
 import { createInstaller } from './installer'
 import { matchSkillsShTarget } from './skills-sh'
 import { isSafeRepositoryName } from './profile'
+import type { StorageController } from './storage-root'
+
+const STORAGE_UNAVAILABLE = 'storage 不可用：启动器未装配数据目录控制器，请在界面里切换数据目录，或重启启动器后重试。'
 
 export function createLauncherControl(options: {
   userData: string
@@ -23,10 +26,16 @@ export function createLauncherControl(options: {
   fetchImpl: typeof fetch
   emitOutput: (text: string) => void
   loginRegistration: (enabled: boolean) => void
+  storage?: StorageController
   legacyRuntimeRunning: () => boolean
   prepareOfficeCliTool?: import('./runtime').RuntimeControllerOptions['prepareOfficeCliTool']
 }) {
   const { userData, settings } = options
+  const storage: StorageController = options.storage ?? {
+    get() { throw new Error(STORAGE_UNAVAILABLE) },
+    set() { throw new Error(STORAGE_UNAVAILABLE) },
+    reset() { throw new Error(STORAGE_UNAVAILABLE) },
+  }
   const control = createPackControl({
     userData,
     registryPath: path.join(userData, 'packs.json'),
@@ -129,6 +138,14 @@ export function createLauncherControl(options: {
         const saved = await settings.readStored()
         return { openAfterLaunch: saved.openAfterLaunch, uiTheme: saved.uiTheme, appearance: saved.appearance, network: saved.network }
       }
+      if (request?.command === 'storage.info') return storage.get()
+      if (request?.command === 'storage.set') {
+        const dir = request.args?.dir
+        if (typeof dir !== 'string' || !dir.trim()) throw new Error('storage.set 需要一个绝对路径参数 dir，例如 {"dir":"D:\\launcher-data"}。')
+        if (!path.isAbsolute(dir)) throw new Error('storage.set 的 dir 必须是绝对路径，当前收到：' + dir + '。请改用完整路径，例如 D:\\launcher-data。')
+        return storage.set(dir)
+      }
+      if (request?.command === 'storage.reset') return storage.reset()
       return control.execute(request)
     },
   }
