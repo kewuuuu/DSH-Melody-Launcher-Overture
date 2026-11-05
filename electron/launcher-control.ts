@@ -1,5 +1,5 @@
 import path from 'node:path'
-import type { LauncherControlRequest, SkillInstallTarget } from '../src/types'
+import type { LauncherApiEntryInput, LauncherControlRequest, SkillInstallTarget } from '../src/types'
 import type { PackManager } from './pack'
 import type { SettingsStore } from './settings'
 import type { NodeRuntime, PnpmRuntime } from './node-runtime'
@@ -11,6 +11,8 @@ import { createInstaller } from './installer'
 import { matchSkillsShTarget } from './skills-sh'
 import { isSafeRepositoryName } from './profile'
 import type { StorageController } from './storage-root'
+import { createApiLibrary } from './api-library'
+import { createPackApis } from './pack-apis'
 
 export function createLauncherControl(options: {
   userData: string
@@ -63,7 +65,6 @@ export function createLauncherControl(options: {
       await ensureLauncherControlSkill({ packHome: target.dshHome, cliPath: options.cliPath, userData, packId: record.id, nodePath: node.node })
     },
     openExternal: options.openExternal,
-    onAutoStartChange: options.loginRegistration,
     lifecycle: async (command, id, args) => {
       if (command === 'pack.create') {
         if (typeof args.name !== 'string' || (args.dshVersion !== undefined && args.dshVersion !== null && typeof args.dshVersion !== 'string')) throw new Error('Invalid pack creation arguments')
@@ -115,10 +116,52 @@ export function createLauncherControl(options: {
       throw new Error('Unsupported targeted market command')
     },
   })
+  // 启动器级 API 库与「每包勾选」都只认 userData，与具体整合包无关。
+  const apiLibrary = createApiLibrary(userData)
+  const packApis = createPackApis({ userData, registryPath: path.join(userData, 'packs.json'), readSettings: () => settings.readStored(), isPackRunning: packId => control.isPackRunning(packId) })
+  // 启动器自身随登录启动：设置里的 launchAtLogin 是唯一开关（包 autoStart 只管启动器起来后拉包）。
+  const applyLaunchAtLogin = async (patch: Record<string, unknown>): Promise<{ launchAtLogin: boolean }> => {
+    let enabled = (await settings.readStored()).launchAtLogin === true
+    if (patch.enabled !== undefined) {
+      if (typeof patch.enabled !== 'boolean') throw new Error('launchAtLogin 必须是布尔值。')
+      enabled = patch.enabled
+      const next = settingsQueue.catch(() => undefined).then(async () => settings.save({ ...await settings.readStored(), launchAtLogin: enabled }))
+      settingsQueue = next
+      await next
+    }
+    options.loginRegistration(enabled)
+    return { launchAtLogin: enabled }
+  }
   let settingsQueue: Promise<unknown> = Promise.resolve()
   return {
     ...control,
+    apiLibrary,
+    packApis,
     async execute(request: LauncherControlRequest): Promise<unknown> {
+      if (request?.command === 'settings.launchAtLogin') {
+        const patch = request.args ?? {}
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(key => key !== 'enabled')) throw new Error('Unsupported launcher setting')
+        return applyLaunchAtLogin(patch)
+      }
+      if (request?.command === 'api.list') return apiLibrary.list()
+      if (request?.command === 'api.save') return apiLibrary.save((request.args ?? {}) as unknown as LauncherApiEntryInput)
+      if (request?.command === 'api.remove') {
+        const route = request.args?.route
+        if (typeof route !== 'string' || !route.trim()) throw new Error('缺少 API 路由：api remove <route>')
+        return apiLibrary.remove(route)
+      }
+      if (request?.command === 'pack.api.list') {
+        if (!request.packId) throw new Error('缺少整合包 ID：pack api list <pack-id>')
+        return packApis.getState(request.packId)
+      }
+      if (request?.command === 'pack.api.set') {
+        if (!request.packId) throw new Error('缺少整合包 ID：pack api enable|disable <pack-id> <route>')
+        const route = request.args?.route
+        const enabled = request.args?.enabled
+        if (typeof route !== 'string' || !route.trim()) throw new Error('缺少 API 路由：pack api enable|disable <pack-id> <route>')
+        if (typeof enabled !== 'boolean') throw new Error('pack.api.set 需要 enabled 布尔值')
+        return packApis.setGrant(request.packId, route, enabled)
+      }
       if (request?.command === 'settings.get') {
         const s = await settings.readStored()
         return { openAfterLaunch: s.openAfterLaunch, uiTheme: s.uiTheme, appearance: s.appearance, network: s.network }

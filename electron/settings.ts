@@ -48,6 +48,7 @@ export function defaultSettings(input: DefaultSettingsInput): AppSettings {
     aiDeveloperMode: false,
     aiPrompt: '',
     recommendedWebUiPrompted: false,
+    launchAtLogin: false,
   }
 }
 
@@ -189,6 +190,8 @@ export function validateSettings(input: AppSettings): AppSettings {
     aiPrompt: typeof input.aiPrompt === 'string' ? input.aiPrompt.slice(0, 20_000) : '',
     network: validNetworkSettings(input.network),
     recommendedWebUiPrompted: Boolean(input.recommendedWebUiPrompted),
+    // 启动器自身随登录启动：缺省关，只有显式 true 才开（与整合包 autoStart 无关）。
+    launchAtLogin: input.launchAtLogin === true,
   }
 }
 
@@ -218,6 +221,7 @@ export function mergeStoredSettings(defaults: AppSettings, stored: Partial<AppSe
     aiPrompt: typeof stored.aiPrompt === 'string' ? stored.aiPrompt.slice(0, 20_000) : '',
     network: validNetworkSettings(stored.network) ?? defaults.network,
     recommendedWebUiPrompted: Boolean(stored.recommendedWebUiPrompted),
+    launchAtLogin: typeof stored.launchAtLogin === 'boolean' ? stored.launchAtLogin : defaults.launchAtLogin === true,
   }
 }
 

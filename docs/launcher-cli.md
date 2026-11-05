@@ -12,6 +12,9 @@ node bin/launcher-control.cjs pack config set pack-a --port 3081 --port-mode fix
 node bin/launcher-control.cjs pack config set pack-a --workspace 'D:/work' --launch-args '["web"]' --pinned-at null
 node bin/launcher-control.cjs settings get --json
 node bin/launcher-control.cjs settings set --args '{"openAfterLaunch":false}'
+node bin/launcher-control.cjs settings launch-at-login on
+node bin/launcher-control.cjs api add acme --name 'Acme' --base-url 'https://api.acme.test/v1' --protocol openai-completions --models 'acme-1,acme-2' --api-key 'sk-acme'
+node bin/launcher-control.cjs pack api enable pack-a acme
 ~~~
 
 Always obtain pack IDs from pack list. Runtime/config operations never fall back to the active pack. Config flags become a flat args patch; --args accepts any additional JSON object fields. Boolean flags require true or false. A pinned timestamp is a string; use null to unpin. Changes to launch configuration take effect on next start/restart. Stopping/restarting the pack serving your conversation disconnects its DSH Web.
@@ -57,6 +60,81 @@ node bin/launcher-control.cjs storage reset --json
 storage info returns {dataDir,source,portableDir,pointerFile,legacy:{dataDir,hasData},restartRequired,warning}, where source is argument, pointer, portable, install or development. storage set takes one existing or creatable absolute directory, verifies it is writable, writes the pointer file and reports restartRequired true. storage reset deletes the pointer file, so the next start returns to the default location; restartRequired stays true and dataDir keeps naming the directory this process is still using. legacy describes %APPDATA%/dsh-launcher on Windows (the appData equivalent elsewhere) and hasData is true when that directory already holds launcher data.
 
 To take over data from an older installation or another launcher, stop that launcher and run storage set with its data directory, for example 'C:/Users/<user>/AppData/Roaming/dsh-launcher' (quote paths containing spaces), then start the launcher again. The pointer file lives next to the EXE, so it travels with a portable copy but not with a copied launcher-data folder; run storage reset to go back to the default.
+
+## Launcher API library, per-pack grants and launch at login
+
+The launcher keeps one API library for the whole machine-wide launcher profile, in userData/api-library.json (version 1). Entries hold route, name, base URL, protocol and model IDs; the API key never lands in that file. It is written to userData/.credentials.yaml as <ROUTE>_API_KEY, the same credential store the DSH runtime already uses. Routes match ^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$ and must be unique. api add on an existing route updates it in place and keeps the stored key when --api-key is omitted; api remove deletes the entry, its key and every pack grant that referenced it.
+
+A grant is per pack and lives in userData/pack-api-grants.json (version 1). Enabling one writes that pack's own settings.yaml (llm-pi-ai.providers.<route>, exactly like the custom API editor) and that pack's .credentials.yaml; disabling removes both again. A running pack accepts the change but reports restartRequired true, and the new provider only takes effect on next start/restart. If the sync fails, the grant is rolled back, the reason is kept, and the next pack api list shows it in error. Removing a library entry deliberately leaves providers already synced into pack settings.yaml alone: the pack keeps working with what it was given, and pack api disable is the command that removes it.
+
+launchAtLogin is the launcher's own Windows login item. It is independent of pack autoStart: a pack with autoStart true is started by a launcher that is already running, and it no longer registers anything at login. Saving the setting applies the login item immediately (exe path is PORTABLE_EXECUTABLE_FILE when set, otherwise the launcher executable, with --background so it starts hidden in the tray), and startup re-applies it once, so a missing launchAtLogin means off and any stale registration is removed.
+
+~~~sh
+node bin/launcher-control.cjs settings launch-at-login
+node bin/launcher-control.cjs settings launch-at-login on
+node bin/launcher-control.cjs settings launch-at-login off
+
+node bin/launcher-control.cjs api add acme --name 'Acme' --base-url 'https://api.acme.test/v1' --protocol openai-completions --models 'acme-1,acme-2' --api-key 'sk-acme'
+node bin/launcher-control.cjs api list
+node bin/launcher-control.cjs api remove acme
+
+node bin/launcher-control.cjs pack api list pack-a
+node bin/launcher-control.cjs pack api enable pack-a acme
+node bin/launcher-control.cjs pack api disable pack-a acme
+~~~
+
+settings launch-at-login without an argument reports the current value and does not change it; on and off write the setting and apply it. These are real outputs from the fixture launcher (API keys and pack IDs are fixture values):
+
+~~~text
+$ node bin/launcher-control.cjs settings launch-at-login on
+{
+  "launchAtLogin": true
+}
+~~~
+
+~~~text
+$ node bin/launcher-control.cjs api add acme --name 'Acme' --base-url 'https://api.acme.test/v1' --protocol openai-completions --models 'acme-1,acme-2' --api-key 'sk-acme'
+[
+  {
+    "route": "acme",
+    "displayName": "Acme",
+    "baseUrl": "https://api.acme.test/v1",
+    "protocol": "openai-completions",
+    "modelIds": [
+      "acme-1",
+      "acme-2"
+    ],
+    "hasApiKey": true
+  }
+]
+~~~
+
+~~~text
+$ node bin/launcher-control.cjs pack api enable alpha acme
+{
+  "packId": "alpha",
+  "enabled": [
+    "acme"
+  ],
+  "available": [
+    {
+      "route": "acme",
+      "displayName": "Acme",
+      "baseUrl": "https://api.acme.test/v1",
+      "protocol": "openai-completions",
+      "modelIds": [
+        "acme-1",
+        "acme-2"
+      ],
+      "hasApiKey": true
+    }
+  ],
+  "restartRequired": false,
+  "error": null
+}
+~~~
+
+pack api list and pack api enable return the same shape: enabled is the pack's granted routes, available is the current library, restartRequired says the pack must be restarted for the change to load, and error is null or the last sync failure. Every one of these commands is also reachable through request: api.list, api.save and api.remove are plain commands, and pack.api.list/pack.api.set take {args:{route,enabled}} behind the pack ID.
 
 ## Connection and launcher startup
 

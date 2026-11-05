@@ -12,6 +12,12 @@ const HELP = `DSH Launcher control (Node >=20)
   pack config set <pack-id> --port 3081 --port-mode fixed --auto-start true
   settings get
   settings set --args '{"openAfterLaunch":false}'
+  settings launch-at-login [on|off]
+  api list
+  api add <route> --name <name> --base-url <url> --protocol <protocol> --models a,b [--api-key <key>]
+  api remove <route>
+  pack api list <pack-id>
+  pack api enable|disable <pack-id> <route>
   storage info
   storage set <absolute-directory>
   storage reset
@@ -21,9 +27,12 @@ const HELP = `DSH Launcher control (Node >=20)
 Options: --json --user-data <directory> --launcher <explicit executable>
 Config flags: --port, --port-mode, --run-as-admin, --auto-start, --pinned-at,
               --workspace, --launch-args '["web"]'
+API flags (api add only): --name, --base-url, --protocol, --models, --api-key
+Protocols: openai-completions, openai-responses, anthropic-messages
 Set DSH_LAUNCHER_USER_DATA instead of --user-data if desired.
 --launcher starts only the executable supplied, when control is unavailable.
 `
+const FLAG_KEYS = ['user-data','launcher','args','port','port-mode','run-as-admin','auto-start','pinned-at','workspace','launch-args','name','base-url','protocol','models','api-key']
 function objectJSON(value) {
   const result = JSON.parse(value)
   if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('--args requires a JSON object')
@@ -36,15 +45,39 @@ function parse(argv) {
     if (!item.startsWith('--')) { words.push(item); continue }
     const key = item.slice(2)
     if (['json', 'help'].includes(key)) { flags[key] = true; continue }
-    if (!['user-data','launcher','args','port','port-mode','run-as-admin','auto-start','pinned-at','workspace','launch-args'].includes(key)) throw new Error('Unknown option: ' + item)
+    if (!FLAG_KEYS.includes(key)) throw new Error('Unknown option: ' + item)
     if (i + 1 >= argv.length || argv[i+1].startsWith('--')) throw new Error('Missing value for ' + item)
     flags[key] = argv[++i]
   }
   if (flags.help) return { help: true }
   const group = words.shift(), action = words.shift()
-  let command, packId, storageDir
+  let command, packId, storageDir, apiRoute, apiEnabled, launchAtLogin
   if (group === 'request') { command = action; packId = words.shift() }
+  else if (group === 'pack' && action === 'api') {
+    const operation = words.shift()
+    if (!['list', 'enable', 'disable'].includes(operation)) throw new Error('用法：pack api list <pack-id> | pack api enable|disable <pack-id> <route>')
+    command = operation === 'list' ? 'pack.api.list' : 'pack.api.set'
+    packId = words.shift()
+    if (!packId) throw new Error('pack api 需要一个整合包 ID')
+    if (operation !== 'list') {
+      apiRoute = words.shift()
+      if (!apiRoute) throw new Error('pack api ' + operation + ' 需要一个 API 路由')
+      apiEnabled = operation === 'enable'
+    }
+  }
   else if (group === 'pack' && action === 'config') { command = 'pack.config.' + words.shift(); packId = words.shift(); if (!['pack.config.get','pack.config.set'].includes(command)) throw new Error('Use pack config get|set <pack-id>') }
+  else if (group === 'api') {
+    if (action === 'list') command = 'api.list'
+    else if (action === 'add') { command = 'api.save'; apiRoute = words.shift(); if (!apiRoute) throw new Error('用法：api add <route> --name <name> --base-url <url> --protocol <protocol> --models a,b [--api-key <key>]') }
+    else if (action === 'remove') { command = 'api.remove'; apiRoute = words.shift(); if (!apiRoute) throw new Error('用法：api remove <route>') }
+    else throw new Error('用法：api list | api add <route> ... | api remove <route>')
+  }
+  else if (group === 'settings' && action === 'launch-at-login') {
+    command = 'settings.launchAtLogin'
+    const value = words.shift()
+    if (value !== undefined && !['on', 'off'].includes(value)) throw new Error('用法：settings launch-at-login [on|off]')
+    if (value !== undefined) launchAtLogin = value === 'on'
+  }
   else if (group === 'storage') {
     command = 'storage.' + action
     if (!['storage.info','storage.set','storage.reset'].includes(command)) throw new Error('用法：storage info | storage set <绝对路径目录> | storage reset')
@@ -61,6 +94,9 @@ function parse(argv) {
     if (!path.isAbsolute(storageDir)) throw new Error('storage set 的目录必须是绝对路径，当前收到：' + storageDir)
     args.dir = storageDir
   }
+  if (apiRoute !== undefined) args.route = apiRoute
+  if (apiEnabled !== undefined) args.enabled = apiEnabled
+  if (launchAtLogin !== undefined) args.enabled = launchAtLogin
   const configKeys = { port: 'port', 'port-mode': 'portMode', 'run-as-admin': 'runAsAdmin', 'auto-start': 'autoStart', 'pinned-at': 'pinnedAt', workspace: 'workspace', 'launch-args': 'launchArgs' }
   for (const [flag, key] of Object.entries(configKeys)) {
     if (flags[flag] === undefined) continue
@@ -72,6 +108,17 @@ function parse(argv) {
     if (flag === 'pinned-at' && value === 'null') value = null
     if (flag === 'launch-args') { value = JSON.parse(value); if (!Array.isArray(value) || value.some(x => typeof x !== 'string')) throw new Error('--launch-args expects a JSON string array') }
     args[key] = value
+  }
+  const apiKeys = { name: 'displayName', 'base-url': 'baseUrl', protocol: 'protocol', 'api-key': 'apiKey' }
+  for (const [flag, key] of Object.entries(apiKeys)) {
+    if (flags[flag] === undefined) continue
+    if (command !== 'api.save') throw new Error('--' + flag + ' is only valid with api add')
+    args[key] = flags[flag]
+  }
+  if (flags.models !== undefined) {
+    if (command !== 'api.save') throw new Error('--models is only valid with api add')
+    args.modelIds = String(flags.models).split(',').map(value => value.trim()).filter(Boolean)
+    if (args.modelIds.length === 0) throw new Error('--models expects a comma separated model list')
   }
   return { flags, request: { command, ...(packId ? { packId } : {}), ...(Object.keys(args).length ? { args } : {}) } }
 }

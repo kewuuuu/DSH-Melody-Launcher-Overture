@@ -17,7 +17,6 @@ export interface PackControlOptions {
   createController?: typeof createRuntimeController
   openExternal: (url: string) => Promise<unknown>
   beforeStart?: (record: PackRecord, settings: AppSettings) => Promise<void>
-  onAutoStartChange?: (enabled: boolean) => void
   lifecycle?: (command: string, packId: string | undefined, args: Record<string, unknown>) => Promise<unknown>
   market?: (command: string, settings: AppSettings, args: Record<string, unknown>) => Promise<unknown>
 }
@@ -134,7 +133,6 @@ export function createPackControl(options: PackControlOptions) {
         const updated = { ...await config(r.id), ...patch }
         all[r.id] = updated
         await writeFileAtomic(configPath, JSON.stringify(all, null, 2) + '\n')
-        options.onAutoStartChange?.((await readPackRegistry(options.registryPath)).some(r => all[r.id]?.autoStart))
         if (!controllers.get(r.id)?.isRunning()) controllers.delete(r.id)
         return updated
       })
@@ -239,7 +237,6 @@ export function createPackControl(options: PackControlOptions) {
     async autoStart() {
       const all = await readPackRegistry(options.registryPath)
       const saved = await configs()
-      options.onAutoStartChange?.(all.some(r => saved[r.id]?.autoStart))
       return Promise.allSettled(all.map(async r => { if ((await config(r.id)).autoStart) await execute({ command: 'pack.start', packId: r.id }) }))
     },
     async shutdown() { closing = true; await Promise.allSettled([...queues.values()]); await Promise.allSettled([...controllers.values()].map(c => c.stop())) },
@@ -251,7 +248,6 @@ export function createPackControl(options: PackControlOptions) {
         const saved = await configs(); delete saved[id]
         await writeFileAtomic(configPath, JSON.stringify(saved, null, 2))
         controllers.delete(id); controllerHomes.delete(id)
-        options.onAutoStartChange?.((await readPackRegistry(options.registryPath)).some(r => saved[r.id]?.autoStart))
       })
       writeQueue = next; await next
     },

@@ -23,6 +23,7 @@ import { compareVersions } from './dsh-release'
 import { buildPluginCommandArgs, createInstaller, syncProfilePnpmConfig, validateLocalPluginDirectory, type Installer } from './installer'
 import { registerIpcHandlers } from './ipc'
 import { createLauncherUpdater, type LauncherUpdater } from './launcher-update'
+import { loginItemSettings, syncLaunchAtLogin } from './login-item'
 import { createGitHubAuthService, type GitHubAuthService } from './github-auth'
 import { buildNetworkEnvironment, npmRegistryCandidates, refreshWindowsSystemProxy } from './proxy'
 import {
@@ -152,6 +153,12 @@ interface Services {
   packControl: ReturnType<typeof createLauncherControl>
   launcherControl: ReturnType<typeof createLauncherControl>['execute']
   settings: SettingsStore
+  /** 启动器级 API 库（跨整合包共享）。 */
+  apiLibrary: ReturnType<typeof createLauncherControl>['apiLibrary']
+  /** 每个整合包从库里勾选启用了哪些 API。 */
+  packApis: ReturnType<typeof createLauncherControl>['packApis']
+  /** 立即应用「启动器随登录启动」开关。 */
+  loginRegistration: (enabled: boolean) => void
   pluginReceiptsPath: string
   runtime: RuntimeController
   installer: Installer
@@ -1049,6 +1056,11 @@ function createServices(): Services {
     })
   }).catch(error => events.output('plugin', 'error', `旧整合包/插件池迁移失败：${error instanceof Error ? error.message : String(error)}`))
 
+  // 登录自启的注册动作：路径优先便携版 EXE（便携版进程路径在解包后的临时目录）。
+  const loginRegistration = (enabled: boolean): void => {
+    if (process.platform !== 'win32' || !app.isPackaged) return
+    app.setLoginItemSettings(loginItemSettings(enabled, { executablePath: process.execPath, portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE }))
+  }
   packControl = createLauncherControl({
     userData, cliPath: path.join(app.getAppPath(), 'bin/launcher-control.cjs'), settings, packManager: packManager!, storage: storageController,
     prepareNodeRuntime: () => prepareNodeRuntime('runtime'),
@@ -1056,9 +1068,9 @@ function createServices(): Services {
     openExternal: url => shell.openExternal(url), fallbackWorkspace: () => app.getPath('documents'),
     fetchImpl: githubAuth.fetch, emitOutput: text => events.output('runtime', 'info', text),
     legacyRuntimeRunning: () => runtime.isRunning(), prepareOfficeCliTool,
-    loginRegistration: enabled => { if (process.platform === 'win32' && app.isPackaged) app.setLoginItemSettings({ openAtLogin: enabled, path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath, args: ['--background'] }) },
+    loginRegistration,
   })
-  return { packControl, launcherControl: request => packControl!.execute(request), settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
+  return { packControl, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
 }
 
 function openMainWindow(): void {
@@ -1123,6 +1135,8 @@ app.whenReady().then(async () => {
     console.error('[process-supervisor] 启动失败，退出时只能执行普通清理。', error)
   }
   services = createServices()
+  // 启动时按设置校正一次登录项：缺省 false 会主动注销历史遗留的旧注册项。
+  syncLaunchAtLogin(await services.settings.read(), services.loginRegistration)
   controlServer = await createLauncherControlServer({ userData: app.getPath('userData'), execute: request => services!.launcherControl(request) })
   // 外观图片统一落在 userData/appearance/，渲染层经 dsh-appearance:// 读取。
   const appearanceDirectory = path.join(app.getPath('userData'), 'appearance')

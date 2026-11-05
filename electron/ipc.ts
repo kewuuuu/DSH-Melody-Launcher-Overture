@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { copyFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { IPC, IPC_EVENTS } from '../src/constants'
-import type { AiSessionCreateInput, ApplicationInstallRequest, AppSettings, AppearanceImageKind, CustomApiProviderInput, OfficialPackRelease, OfficialPackStatus, PackCreateRequest, PackInstallResult, NpmPluginInstallRequest, PluginInstallRequest, PresetInstallRequest, SkillInstallRequest, SkillInstallTarget, WindowMode, ProfileRepositoryImportMode, PackPluginEntry } from '../src/types'
+import type { AiSessionCreateInput, ApplicationInstallRequest, AppSettings, AppearanceImageKind, CustomApiProviderInput, LauncherApiEntryInput, OfficialPackRelease, OfficialPackStatus, PackCreateRequest, PackInstallResult, NpmPluginInstallRequest, PluginInstallRequest, PresetInstallRequest, SkillInstallRequest, SkillInstallTarget, WindowMode, ProfileRepositoryImportMode, PackPluginEntry } from '../src/types'
 import { APPEARANCE_IMAGE_EXTENSIONS } from '../src/lib/appearance'
 import { storeAppearanceImage } from './appearance'
 import type { SnapshotPrivacyInclude } from './pack-snapshot'
@@ -13,6 +13,9 @@ import type { RecommendedWebUiService } from './recommended-web-ui'
 import { isWindowMode } from './app-window'
 import { clearDeepSeekApiKey, getDeepSeekCredentialStatus, readDeepSeekApiKey, setDeepSeekApiKey } from './credentials'
 import { listCustomApiProviders, removeCustomApiProvider, saveCustomApiProvider } from './custom-api'
+import type { ApiLibrary } from './api-library'
+import type { PackApis } from './pack-apis'
+import { syncLaunchAtLogin } from './login-item'
 import { listCopilotModels } from './copilot-api'
 import { searchCatalogRepositories, type DiscoverySort } from './discovery'
 import { importCatalogFromUrl } from './github-import'
@@ -62,6 +65,12 @@ import { analyzeProfileRepository, applyReceiptMatches, applySelectedMatches, lo
 export interface IpcDependencies {
   launcherControl: (request: import('../src/types').LauncherControlRequest) => Promise<unknown>
   settings: SettingsStore
+  /** 启动器级 API 库（<userData>/api-library.json 与 .credentials.yaml）。 */
+  apiLibrary: ApiLibrary
+  /** 每个整合包从库里勾选启用了哪些 API。 */
+  packApis: PackApis
+  /** 立即应用「启动器随登录启动」；false 会主动注销旧登录项。 */
+  loginRegistration: (enabled: boolean) => void
   pluginReceiptsPath: string
   runtime: RuntimeController
   installer: Installer
@@ -148,9 +157,12 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
   }
 
   ipcMain.handle(IPC.settingsGet, () => settings.read())
-  ipcMain.handle(IPC.settingsSave, (_event, next: AppSettings) => {
+  ipcMain.handle(IPC.settingsSave, async (_event, next: AppSettings) => {
     assertProfileMutationAvailable()
-    return settings.save(next)
+    const saved = await settings.save(next)
+    // 自启开关保存即生效：与整合包 autoStart 无关，只看 settings.launchAtLogin。
+    syncLaunchAtLogin(saved, deps.loginRegistration)
+    return saved
   })
   ipcMain.handle(IPC.dshDetect, () => installer.detectDsh())
   ipcMain.handle(IPC.dshUpdateCheck, () => installer.checkDshUpdate())
@@ -223,6 +235,22 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
     if (typeof route !== 'string') throw new Error('自定义 API 路由格式无效。')
     const current = await settings.read()
     return removeCustomApiProvider(current.dshHome, route)
+  })
+  ipcMain.handle(IPC.apiLibraryList, () => deps.apiLibrary.list())
+  ipcMain.handle(IPC.apiLibrarySave, (_event, input: LauncherApiEntryInput) => deps.apiLibrary.save(input))
+  ipcMain.handle(IPC.apiLibraryRemove, (_event, route: string) => {
+    if (typeof route !== 'string' || !route.trim()) throw new Error('API 路由格式无效。')
+    return deps.apiLibrary.remove(route)
+  })
+  ipcMain.handle(IPC.packApisGet, (_event, packId: string) => {
+    if (typeof packId !== 'string' || !packId.trim()) throw new Error('整合包 ID 格式无效。')
+    return deps.packApis.getState(packId)
+  })
+  ipcMain.handle(IPC.packApisSet, (_event, packId: string, route: string, enabled: boolean) => {
+    if (typeof packId !== 'string' || !packId.trim()) throw new Error('整合包 ID 格式无效。')
+    if (typeof route !== 'string' || !route.trim()) throw new Error('API 路由格式无效。')
+    if (typeof enabled !== 'boolean') throw new Error('启用状态必须是布尔值。')
+    return deps.packApis.setGrant(packId, route, enabled)
   })
 
   ipcMain.handle(IPC.githubAuthStatus, () => githubAuth.getStatus())
