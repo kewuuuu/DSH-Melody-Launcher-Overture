@@ -36,3 +36,12 @@
 - 自动端口检查最多向后查找 100 个；启动器内并发有预留保护，外部进程抢占仍由启动错误报告。
 - 未实测联网安装市场项目；继续调用已有安装器。
 - 11 项测试跳过，不能将全量回归结果解读为所有平台行为均已实测。
+
+## 启动失败根因（实机复核）
+
+- 症状：新构建双击后没有新窗口；解压目录版直接以 0x80000003（EXCEPTION_BREAKPOINT）退出，--enable-logging=file 不产生任何日志，说明死在 Chromium 日志初始化之前。
+- 已排除产品代码：把旧版 app.asar 换进新版载荷后仍然同样崩溃；把同一份 win-unpacked 复制到 D:\launcher-preview 后正常开出窗口。
+- 根因一（单实例）：新旧版本共用默认 userData %APPDATA%\dsh-launcher。旧启动器在运行时，新 EXE 拿到 requestSingleInstanceLock 失败即静默退出，只留下旧窗口，表现为「打不开」。给 --user-data-dir 指定独立目录后同一 EXE 正常开窗（便携版实测，解压到 %TEMP% 后运行）。
+- 根因二（路径）：D:\engine\DSH 整棵树带有 Low Mandatory Level 标签和继承的 Everyone 删除拒绝 ACE，放在其中的 Electron 可执行文件在启用沙箱时启动即崩；同一份文件放在 D:\launcher-preview、D:\ 根目录或 %TEMP% 下均正常。对该树 icacls /setintegritylevel 被拒绝，无法原位修复。
+- 结论：产物本身可用；不要在 D:\engine\DSH 内直接运行构建产物，也不要与正在运行的旧启动器共用默认 userData。
+- 可运行副本：D:\launcher-preview\（目录版 DSH Launcher.exe、便携版 DSH-Launcher-1.0.4-portable.exe，以及独立配置启动脚本「启动新版启动器-独立配置.cmd」）。
