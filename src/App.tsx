@@ -6,7 +6,6 @@ import { LauncherHome } from './components/LauncherHome'
 import { TopBar } from './components/TopBar'
 import { Toast } from './components/Toast'
 import { DshFailureDialog } from './components/dialogs/DshFailureDialog'
-import { SettingsDialog } from './components/dialogs/SettingsDialog'
 import { UpdateDialog } from './components/dialogs/UpdateDialog'
 import { DSH_REPOSITORY } from './constants'
 import { BUSY } from './hooks/use-async-action'
@@ -22,6 +21,8 @@ import type { AppearanceSettings, HomeTab } from './types'
 // 启动页只看得到 LauncherHome；整合包/插件/技能/预设/版本这一整块面板（以及导入对话框）
 // 拆成按需加载的 chunk，首屏要解析的 JS 就少一截。
 const SettingsPanels = lazy(() => import('./views/SettingsView').then(module => ({ default: module.SettingsPanels })))
+// 设置页整页化后与其余面板同批按需加载：首屏只留启动页。
+const SettingsHomeView = lazy(() => import('./views/SettingsHomeView').then(module => ({ default: module.SettingsHomeView })))
 const PackInstallDialog = lazy(() => import('./components/dialogs/PackInstallDialog').then(module => ({ default: module.PackInstallDialog })))
 const SessionImportDialog = lazy(() => import('./components/dialogs/SessionImportDialog').then(module => ({ default: module.SessionImportDialog })))
 const PackExportDialog = lazy(() => import('./components/dialogs/PackExportDialog').then(module => ({ default: module.PackExportDialog })))
@@ -59,7 +60,6 @@ function LauncherShell() {
   )
 
   // 对话框开关是纯展示状态，不进 store。
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [updateOpen, setUpdateOpen] = useState(false)
   // 设置面板拖动时先预览、后保存：null 表示不预览，回到已保存的 appearance。
   const [previewAppearance, setPreviewAppearance] = useState<AppearanceSettings | null>(null)
@@ -184,11 +184,27 @@ function LauncherShell() {
                     onUpdateDsh={() => { void store.updateDsh() }}
                     onOpenLauncherUpdate={() => setUpdateOpen(true)}
                     onNavigateTab={navigation.goHome}
-                    onOpenSettings={() => setSettingsOpen(true)}
+                    onOpenSettings={() => navigation.goHome('settings')}
                     logoSrc={logoSrc}
                   />
                   </details>
                   </>
+                ) : tab === 'settings' ? (
+                  <Suspense fallback={null}>
+                    <SettingsHomeView
+                      settings={settings}
+                      busy={store.busy === BUSY.settings || profileMutationLocked}
+                      onPreview={setPreviewAppearance}
+                      onSave={async next => {
+                        const ok = await store.saveSettings(next)
+                        if (ok) setPreviewAppearance(null)
+                        return ok
+                      }}
+                      onCheckUpdate={() => setUpdateOpen(true)}
+                      onOpenPath={targetPath => { void api.openPath(targetPath) }}
+                      onOpenDshFolder={() => void api.openDshFolder()}
+                    />
+                  </Suspense>
                 ) : (
                   <Suspense fallback={null}>
                     <SettingsPanels
@@ -268,20 +284,6 @@ function LauncherShell() {
         </div>
       </div>
 
-      {settingsOpen && (
-        <SettingsDialog
-          settings={settings}
-          busy={store.busy === BUSY.settings || profileMutationLocked}
-          onPreview={setPreviewAppearance}
-          onClose={() => { setPreviewAppearance(null); setSettingsOpen(false) }}
-          onSave={async next => {
-            if (await store.saveSettings(next)) {
-              setPreviewAppearance(null)
-              setSettingsOpen(false)
-            }
-          }}
-        />
-      )}
       {packInstall.phase !== 'idle' && (
         <Suspense fallback={null}>
           <PackInstallDialog

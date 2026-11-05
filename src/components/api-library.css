@@ -1,0 +1,65 @@
+/* 设置页「API 库」卡片：条目行 + 内联新增/编辑表单。 */
+.api-library-heading-actions { display: flex; align-items: center; gap: 8px; }
+
+.api-library-panel .settings-panel-heading { margin-bottom: 8px; }
+
+.api-library-list { display: flex; flex-direction: column; margin-top: 4px; }
+
+.api-library-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+
+.api-library-row-main {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.api-library-row-main strong { color: var(--ink); font-size: 13px; font-weight: 700; }
+.api-library-row-main code { color: var(--muted); font-size: 11px; }
+.api-library-row-main small { flex-basis: 100%; color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+
+.api-library-model-count {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--quiet);
+  font-size: 10.5px;
+}
+
+.api-library-row-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+
+.api-library-key { color: var(--quiet); font-size: 10.5px; white-space: nowrap; }
+.api-library-key.is-set { color: var(--accent); font-weight: 600; }
+
+.api-library-form {
+  display: grid;
+  gap: 12px;
+  max-width: 680px;
+  margin: 4px 0 2px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.api-library-field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+.api-library-form-actions { display: flex; align-items: center; gap: 10px; }
+
+.api-library-error { margin: 0; color: var(--danger); font-size: 11.5px; }
+
+.api-library-empty { line-height: 1.8; }
+
+@media (max-width: 720px) {
+  .api-library-field-grid { grid-template-columns: 1fr; }
+  .api-library-row { flex-direction: column; align-items: stretch; }
+  .api-library-row-actions { flex-wrap: wrap; }
+}

@@ -17,6 +17,7 @@ export const HOME_TABS: ReadonlyArray<HomeTabDefinition> = [
   { id: 'plugins', label: '插件' },
   { id: 'skills', label: '技能' },
   { id: 'presets', label: '预设' },
+  { id: 'settings', label: '设置' },
 ]
 
 /** 面板挂载顺序，派生自 HOME_TABS。 */

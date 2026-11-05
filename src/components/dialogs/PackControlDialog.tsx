@@ -2,7 +2,7 @@ import { ArrowLeft, Download, LoaderCircle, RefreshCw, Settings2, Store, Trash2 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLauncherApi } from '../../api/client'
 import { launcherControl, type ControlledPack, type PackControlConfig } from '../../lib/pack-control'
-import type { InstalledSkill, InstalledPreset, ManagedPlugin } from '../../types'
+import type { InstalledSkill, InstalledPreset, ManagedPlugin, PackApiGrantState } from '../../types'
 import { DshMarketView } from '../../views/DshMarketView'
 import { SkillMarketPanel } from '../../views/SettingsView'
 import { ModalShell } from './ModalShell'
@@ -22,7 +22,7 @@ interface Props {
 export function PackControlDialog(props: Props) {
   const { pack } = props
   const api = useLauncherApi()
-  const [tab, setTab] = useState<'overview' | 'settings' | Kind | 'export'>('overview')
+  const [tab, setTab] = useState<'overview' | 'settings' | 'api' | Kind | 'export'>('overview')
   const [market, setMarket] = useState(false)
   const [items, setItems] = useState<Resource[]>([])
   const [loading, setLoading] = useState(false)
@@ -31,6 +31,10 @@ export function PackControlDialog(props: Props) {
   const [workspace, setWorkspace] = useState(pack.config.workspace ?? '')
   const [launchArgs, setLaunchArgs] = useState((pack.config.launchArgs ?? []).join('\n'))
   const [saved, setSaved] = useState(false)
+  // 「API」子页：available 是启动器 API 库全量，enabled 是已授予本包的部分。
+  const [apiGrants, setApiGrants] = useState<PackApiGrantState | null>(null)
+  const [apiLoading, setApiLoading] = useState(false)
+  const [apiError, setApiError] = useState<string | null>(null)
   const requestVersion = useRef(0)
   const kind = tab === 'plugins' || tab === 'skills' || tab === 'presets' ? tab : null
   const load = useCallback(async () => {
@@ -42,6 +46,21 @@ export function PackControlDialog(props: Props) {
     finally { if (version === requestVersion.current) setLoading(false) }
   }, [api, kind, pack.id])
   useEffect(() => { setItems([]); void load() }, [load])
+  const loadApis = useCallback(async () => {
+    setApiLoading(true); setApiError(null)
+    try { setApiGrants(await api.packApis.get(pack.id)) }
+    catch (cause) { setApiError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setApiLoading(false) }
+  }, [api, pack.id])
+  // 只在这个子页打开时读库：省掉每次开窗都打一次 IPC。
+  useEffect(() => { if (tab === 'api') { setApiGrants(null); void loadApis() } }, [tab, loadApis])
+  const toggleApi = async (route: string, enabled: boolean) => {
+    setWorking(true); setApiError(null)
+    try { setApiGrants(await api.packApis.set(pack.id, route, enabled)) }
+    // 失败后先重新读一遍（可能别人改过），再把错误留在界面上：loadApis 会清空 apiError。
+    catch (cause) { const message = cause instanceof Error ? cause.message : String(cause); await loadApis(); setApiError(message) }
+    finally { setWorking(false) }
+  }
   const mutate = async (command: string, item: Resource, enabled?: boolean) => {
     setWorking(true); setError(null)
     try {
@@ -54,10 +73,23 @@ export function PackControlDialog(props: Props) {
   const title = tab === 'plugins' ? '插件' : tab === 'skills' ? '技能' : '预设'
   return <ModalShell titleId="pack-control-title" title={<>整合包配置 · {pack.name}</>} icon={<Settings2 size={19} />} className="pack-control-modal" onClose={props.onClose} closeDisabled={working || props.busy}>
     <div className="pack-target-banner"><span className="pack-target-dot" />当前操作对象 <strong>{pack.name}</strong><code>{pack.id}</code></div>
-    <nav className="pack-config-tabs" aria-label="整合包配置">{([['overview', '概览'], ['settings', '启动设置'], ['plugins', '插件'], ['skills', '技能'], ['presets', '预设'], ['export', '导出与迁移']] as const).map(([key, label]) => <button key={key} disabled={working} aria-current={tab === key ? 'page' : undefined} className={tab === key ? 'active' : ''} onClick={() => { setTab(key); setMarket(false); setError(null) }}>{label}</button>)}</nav>
+    <nav className="pack-config-tabs" aria-label="整合包配置">{([['overview', '概览'], ['settings', '启动设置'], ['api', 'API'], ['plugins', '插件'], ['skills', '技能'], ['presets', '预设'], ['export', '导出与迁移']] as const).map(([key, label]) => <button key={key} disabled={working} aria-current={tab === key ? 'page' : undefined} className={tab === key ? 'active' : ''} onClick={() => { setTab(key); setMarket(false); setError(null) }}>{label}</button>)}</nav>
     {error && <div className="pack-error" role="alert">{error}</div>}
     {tab === 'overview' && <div className="pack-overview"><div><span>运行状态</span><strong>{pack.runtime.running ? '运行中' : '未运行'}</strong><small>{pack.runtime.url ?? '启动后可以打开工作台'}</small></div><div><span>DSH 版本</span><strong>{pack.dshVersion ?? '未指定'}</strong><small>{pack.native ? '共用家目录，请留意资源影响范围' : '独立的整合包环境'}</small></div><div><span>创建时间</span><strong>{new Date(pack.installedAt).toLocaleDateString('zh-CN')}</strong><small>{pack.description || '为每一种工作保留合适的环境。'}</small></div></div>}
     {tab === 'settings' && <form className="pack-config-form" onSubmit={event => { event.preventDefault(); setSaved(false); setError(null); void props.onSave({ workspace, launchArgs: launchArgs.split('\n').filter(Boolean) }).then(ok => { setSaved(ok); if (!ok) setError('保存设置失败，请检查参数后重试。') }) }}><label>工作区<input value={workspace} onChange={event => { setWorkspace(event.target.value); setSaved(false) }} placeholder="使用默认工作区" /></label><label>附加启动参数 <small>每行一个参数</small><textarea rows={5} value={launchArgs} onChange={event => { setLaunchArgs(event.target.value); setSaved(false) }} /></label><p>端口、管理员权限和自动启动可在首页直接调整。运行中的整合包将在下次启动时应用设置。</p><button className="primary-button" disabled={props.busy} type="submit">{props.busy ? '正在保存…' : '保存设置'}</button>{saved && <span role="status">设置已保存</span>}</form>}
+    {tab === 'api' && <div className="pack-resource-panel">
+      <div className="pack-resource-heading"><h3>API 授权</h3><div><button className="icon-button" aria-label="刷新 API 库" disabled={working || apiLoading} onClick={() => void loadApis()}><RefreshCw size={15} /></button></div></div>
+      <p className="settings-hint">勾选后「{pack.name}」就能使用启动器 API 库里的这个服务；取消勾选立即收回。</p>
+      {apiError && <div className="pack-error" role="alert">{apiError}</div>}
+      {apiGrants?.error && <div className="pack-error" role="alert">{apiGrants.error}</div>}
+      {apiGrants?.restartRequired && <div className="settings-current" role="status"><span>该包正在运行，重启后生效。</span></div>}
+      {apiLoading && !apiGrants && <div className="pack-empty"><LoaderCircle size={17} className="spin" />正在读取 API 库…</div>}
+      {apiGrants && apiGrants.available.length === 0 && <div className="pack-empty">启动器 API 库还是空的：先到「设置 → API 库」添加服务，再回来按包授予。</div>}
+      {apiGrants && apiGrants.available.map(entry => {
+        const enabled = apiGrants.enabled.includes(entry.route)
+        return <div className="pack-resource-row is-shared" key={entry.route}><div><strong>{entry.displayName}</strong><small>{entry.baseUrl}</small><span className="pack-source shared">来自启动器 API 库 · {entry.route}</span><span className="pack-source">{entry.modelIds.length} 个模型 · {entry.hasApiKey ? '已保存密钥' : '无需鉴权'}</span></div><div><label><input aria-label={'授予 ' + entry.route} type="checkbox" checked={enabled} disabled={working} onChange={event => void toggleApi(entry.route, event.target.checked)} />授予</label></div></div>
+      })}
+    </div>}
     {kind && <div className="pack-resource-panel">{market ? <><button className="secondary-button" onClick={() => { setMarket(false); void load() }}><ArrowLeft size={14} />返回 {pack.name} 的{title}列表</button><p className="settings-hint">安装目标：{pack.name} · 完成后返回此列表</p>{kind === 'plugins' ? <DshMarketView embedded activeProfileName={null} targetPackId={pack.id} onProfileChanged={load} /> : <SkillMarketPanel targetPackId={pack.id} installedSkills={items as InstalledSkill[]} busy={working} busyKey={null} onToggleSkill={(item, enabled) => void mutate('pack.resources.enabled', item, enabled)} onUninstallSkill={item => mutate('pack.resources.remove', item)} onInstalled={() => { void load(); void props.onRefresh() }} onRefresh={() => void load()} refreshLocked={working} />}</> : <><div className="pack-resource-heading"><h3>已安装{title}</h3><div>{kind !== 'presets' && <button className="primary-button" onClick={() => setMarket(true)}><Store size={14} />安装{title}</button>}<button className="icon-button" aria-label="刷新资源" disabled={working} onClick={() => void load()}><RefreshCw size={15} /></button></div></div>{loading && <div className="pack-empty"><LoaderCircle size={17} className="spin" />正在读取…</div>}{!loading && items.length === 0 && !error && <div className="pack-empty">这个整合包还没有安装{title}。</div>}{items.map(item => {
       const name = 'packageName' in item ? item.packageName : item.name
       const shared = item.shared || Boolean(item.sourcePackId)
