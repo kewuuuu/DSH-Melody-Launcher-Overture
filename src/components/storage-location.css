@@ -1,0 +1,82 @@
+/* 设置页「存储位置」区块：路径文本可选中复制 + 动作条 + 重启/告警提示。 */
+.storage-location-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.storage-location-path code {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.storage-location-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  border: 1px solid #e8d2a6;
+  border-radius: 8px;
+  color: var(--amber);
+  background: var(--amber-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.storage-location-warning span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+.storage-location-restart {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  color: var(--amber);
+  background: var(--amber-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.storage-location-restart span { flex: 1; min-width: 0; }
+
+.storage-location-restart .primary-command {
+  min-height: 28px;
+  padding: 0 12px;
+  background: var(--amber);
+  font-size: 12px;
+}
+
+.storage-location-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.storage-location-actions .secondary-button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
+.storage-location-note {
+  margin: 10px 0 0;
+  color: var(--quiet);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}

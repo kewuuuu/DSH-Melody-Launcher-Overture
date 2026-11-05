@@ -30,6 +30,7 @@ import { SkeletonStrip } from '../components/Skeleton'
 import { DshMarketView } from './DshMarketView'
 import { DesktopPackRow, DesktopPluginsPanel } from './DesktopPluginsPanel'
 import { PluginAddDialog } from '../components/dialogs/PluginAddDialog'
+import { StorageLocationCard } from '../components/StorageLocationCard'
 import {
   SKILL_CATEGORIES,
   SKILL_MARKET_SOURCES,
@@ -451,6 +452,8 @@ function SettingsVersions({
           />
         ))}
       </section>
+      {/* 数据目录（userData）随 DSH 版本一同落在磁盘上：位置与来源就放在版本页末尾。 */}
+      <StorageLocationCard />
     </div>
   )
 }
