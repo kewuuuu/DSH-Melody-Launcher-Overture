@@ -110,20 +110,31 @@ function parsePointer(text: string): PointerParse {
   return { dataDir: path.resolve(dataDir) }
 }
 
-/** 读 --data-dir=<dir> 或 --data-dir <dir>；没给或给了空值返回 null。 */
-function readDataDirArgument(argv: string[]): string | null {
+/** 读 --flag=<path> 或 --flag <path>；没给或给了空值返回 null。 */
+function readPathArgument(argv: string[], flag: string): string | null {
   for (let index = 0; index < argv.length; index += 1) {
     const item = argv[index]
-    if (item === '--data-dir') {
+    if (item === flag) {
       const next = argv[index + 1]
       return next && !next.startsWith('--') ? next : null
     }
-    if (item.startsWith('--data-dir=')) {
-      const value = item.slice('--data-dir='.length)
+    if (item.startsWith(flag + '=')) {
+      const value = item.slice(flag.length + 1)
       return value.trim() === '' ? null : value
     }
   }
   return null
+}
+
+/**
+ * 「选择数据目录」对话框的初始位置。只认绝对路径：相对路径、空串、非字符串一律忽略，
+ * 由系统决定初始位置 —— 这个值只影响对话框停在哪，绝不参与数据目录解析，也不写进配置。
+ */
+export function defaultDialogDirectory(input: unknown): string | undefined {
+  if (typeof input !== 'string') return undefined
+  const trimmed = input.trim()
+  if (trimmed === '' || !path.isAbsolute(trimmed)) return undefined
+  return path.resolve(trimmed)
 }
 
 export function resolveStorage(options: ResolveStorageOptions): StorageResolution {
@@ -135,12 +146,14 @@ export function resolveStorage(options: ResolveStorageOptions): StorageResolutio
   const warnings: string[] = []
 
   // 1. 命令行优先：临时换一份数据目录，不需要改任何文件。
-  const argument = readDataDirArgument(options.argv)
-  if (argument !== null) {
+  // --data-dir 是本项目自己的开关，优先于 Electron 的 --user-data-dir（vite 用它启动 dev Electron 做隔离）。
+  for (const flag of ['--data-dir', '--user-data-dir']) {
+    const argument = readPathArgument(options.argv, flag)
+    if (argument === null) continue
     if (path.isAbsolute(argument)) {
       return { dataDir: path.resolve(argument), source: 'argument', portableDir, pointerFile, warning: joinWarnings(warnings) }
     }
-    warnings.push('已忽略 --data-dir：' + argument + ' 不是绝对路径，本次仍按后面解析到的数据目录启动。')
+    warnings.push('已忽略 ' + flag + '：' + argument + ' 不是绝对路径，本次仍按后面解析到的数据目录启动。')
   }
 
   // 2. EXE 旁边的 launcher-storage.json：界面与 CLI 切换数据目录写的就是它。

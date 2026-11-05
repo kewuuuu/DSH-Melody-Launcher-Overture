@@ -134,7 +134,7 @@ describe('explicit pack control', () => {
     await mkdir(path.join(home, 'profiles', 'b'), { recursive: true })
     await writeFile(path.join(home, 'profiles', 'b', 'package.json'), JSON.stringify({ dependencies: { 'fixture-plugin': '1.0.0' }, dsh: { profile: { bundles: ['fixture-plugin'] } } }))
     const save = vi.fn()
-    const control = createLauncherControl({ userData: root, cliPath: path.join(root, 'cli.cjs'), settings: { readStored: async () => settings, read: async () => settings, save }, packManager: {} as never, prepareNodeRuntime: vi.fn(), preparePnpmRuntime: vi.fn(), openExternal: vi.fn(), fallbackWorkspace: () => root, fetchImpl: fetch, emitOutput: () => undefined, loginRegistration: vi.fn(), legacyRuntimeRunning: () => false })
+    const control = createLauncherControl({ userData: root, cliPath: path.join(root, 'cli.cjs'), settings: { readStored: async () => settings, read: async () => settings, save }, packManager: {} as never, prepareNodeRuntime: vi.fn(), preparePnpmRuntime: vi.fn(), openExternal: vi.fn(), fallbackWorkspace: () => root, fetchImpl: fetch, emitOutput: () => undefined, loginRegistration: vi.fn(), storage: { get: () => ({ dataDir: root, source: 'install' as const, portableDir: root, pointerFile: null, legacy: { dataDir: root, hasData: false }, restartRequired: false, warning: null }), set: vi.fn(), reset: vi.fn() }, legacyRuntimeRunning: () => false })
     const list = await control.execute({ command: 'pack.resources.list', packId: 'b', args: { kind: 'plugins' } }) as { items: Array<{ packageName: string }> }
     expect(list.items.some(i => i.packageName === 'fixture-plugin')).toBe(true)
     expect(save).not.toHaveBeenCalled(); expect(settings.activePackId).toBe('a')

@@ -7,7 +7,7 @@ import type { AiSessionCreateInput, ApplicationInstallRequest, AppSettings, Appe
 import { APPEARANCE_IMAGE_EXTENSIONS } from '../src/lib/appearance'
 import { storeAppearanceImage } from './appearance'
 import type { SnapshotPrivacyInclude } from './pack-snapshot'
-import type { StorageController } from './storage-root'
+import { defaultDialogDirectory, type StorageController } from './storage-root'
 import type { ApplicationAddonManager } from './application-addons'
 import type { RecommendedWebUiService } from './recommended-web-ui'
 import { isWindowMode } from './app-window'
@@ -259,11 +259,14 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
 
   // 数据目录：get 给界面读当前解析结果；choose 选目录后写指针文件；切换与重置都要重启才生效。
   ipcMain.handle(IPC.storageGet, () => deps.storage.get())
-  ipcMain.handle(IPC.storageChoose, async () => {
+  ipcMain.handle(IPC.storageChoose, async (_event, requestedDefault?: unknown) => {
     const window = deps.getWindow()
     if (!window) return null
+    // 初始位置只是界面提示：非法值（相对路径、空串）直接丢掉，不影响选中的目录。
+    const defaultPath = defaultDialogDirectory(requestedDefault)
     const result = await dialog.showOpenDialog(window, {
       title: '选择启动器数据目录',
+      ...(defaultPath ? { defaultPath } : {}),
       properties: ['openDirectory', 'createDirectory'],
     })
     if (result.canceled || !result.filePaths[0]) return null

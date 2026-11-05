@@ -6,6 +6,7 @@ import {
   assertWritableDirectory,
   clearStoragePointer,
   createStorageController,
+  defaultDialogDirectory,
   describeLegacyData,
   readStoragePointer,
   resolveStorage,
@@ -138,6 +139,39 @@ describe('resolveStorage', () => {
     expect(resolution.portableDir).toBeNull()
     expect(resolution.pointerFile).toBeNull()
     expect(existsSync(path.join(exeDir, STORAGE_POINTER_FILENAME))).toBe(false)
+  })
+
+  it('开发态把 --user-data-dir 当作数据目录（vite 的 dev 隔离），来源是 argument', () => {
+    const devUserData = temporary()
+    const { options } = fixture({ isPackaged: false })
+    const resolution = resolveStorage({ ...options, argv: ['--no-sandbox', '--user-data-dir=' + devUserData] })
+    expect(resolution.source).toBe('argument')
+    expect(resolution.dataDir).toBe(devUserData)
+    expect(resolution.portableDir).toBeNull()
+    expect(resolution.pointerFile).toBeNull()
+  })
+
+  it('--data-dir 与 --user-data-dir 同时出现时 --data-dir 生效', () => {
+    const userDataDir = temporary()
+    const dataDir = temporary()
+    const { options } = fixture({ isPackaged: false })
+    const resolution = resolveStorage({ ...options, argv: ['--user-data-dir=' + userDataDir, '--data-dir', dataDir] })
+    expect(resolution.source).toBe('argument')
+    expect(resolution.dataDir).toBe(dataDir)
+    expect(resolution.warning).toBeNull()
+  })
+})
+
+describe('defaultDialogDirectory', () => {
+  it('只接受绝对路径，其余一律忽略', () => {
+    const absolute = temporary()
+    expect(defaultDialogDirectory(absolute)).toBe(path.resolve(absolute))
+    expect(defaultDialogDirectory('  ' + absolute + '  ')).toBe(path.resolve(absolute))
+    expect(defaultDialogDirectory('relative/dir')).toBeUndefined()
+    expect(defaultDialogDirectory('')).toBeUndefined()
+    expect(defaultDialogDirectory('   ')).toBeUndefined()
+    expect(defaultDialogDirectory(undefined)).toBeUndefined()
+    expect(defaultDialogDirectory(42)).toBeUndefined()
   })
 })
 

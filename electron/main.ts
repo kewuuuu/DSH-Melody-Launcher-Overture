@@ -127,11 +127,11 @@ function installStorageLocation(): StorageResolution {
 const storageResolution = installStorageLocation()
 const storageController = createStorageController({ resolution: storageResolution, appDataPath: storageBootstrap.appDataPath })
 
-/** 重启启动器：丢掉会把新目录覆盖回去的 --data-dir；portable 版要重开 EXE 而不是解包出来的进程。 */
+/** 重启启动器：丢掉会把新目录覆盖回去的 --data-dir / --user-data-dir；portable 版要重开 EXE 而不是解包出来的进程。 */
 function relaunchLauncher(): void {
   app.relaunch({
     execPath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
-    args: process.argv.slice(1).filter(argument => !argument.startsWith('--data-dir')),
+    args: process.argv.slice(1).filter(argument => !argument.startsWith('--data-dir') && !argument.startsWith('--user-data-dir')),
   })
   app.exit(0)
 }

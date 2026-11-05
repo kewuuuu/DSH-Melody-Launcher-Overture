@@ -1347,8 +1347,8 @@ export interface LauncherApi {
   /** 数据目录（打包态默认在 EXE 旁的 launcher-data）。切换/重置之后要重启启动器才生效。 */
   storage: {
     get(): Promise<StorageState>
-    /** 选目录并写指针文件；用户取消返回 null。 */
-    choose(): Promise<StorageState | null>
+    /** 选目录并写指针文件；用户取消返回 null。defaultPath 只决定对话框初始位置（非法值忽略），不写进配置。 */
+    choose(defaultPath?: string): Promise<StorageState | null>
     /** 删掉指针文件，回到 EXE 决定的默认目录。 */
     reset(): Promise<StorageState>
     relaunch(): Promise<void>

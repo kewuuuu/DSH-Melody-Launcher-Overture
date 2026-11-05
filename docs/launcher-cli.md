@@ -42,11 +42,11 @@ The packaged launcher keeps all of its data in a launcher-data directory next to
 
 Resolution order, first match wins:
 
-1. --data-dir=<absolute-directory> or --data-dir <absolute-directory> on the launcher command line (a relative path is ignored with a warning).
+1. --data-dir=<absolute-directory> or --data-dir <absolute-directory> on the launcher command line (a relative path is ignored with a warning). Electron's --user-data-dir is honored at the same level when --data-dir is absent, which is how a development launcher keeps the isolation vite hands it; --data-dir wins when both are present because it is the launcher's own switch.
 2. <EXE directory>/launcher-storage.json containing {"dataDir":"<absolute-directory>"} (a corrupt file is ignored with a warning).
 3. <EXE directory>/launcher-data.
 
-Switching the data directory writes that pointer file, and requires a launcher restart to take effect. The launcher UI exposes the same switch through launcher:storage:choose|reset|relaunch, which use a native directory picker. The CLI is a separate Node process with no access to Electron dialogs, so it only writes the pointer file:
+Switching the data directory writes that pointer file, and requires a launcher restart to take effect. The launcher UI exposes the same switch through launcher:storage:choose|reset|relaunch, which use a native directory picker. launcher:storage:choose takes an optional defaultPath (for example %APPDATA%/dsh-launcher, to take over legacy data in one click); it only positions the picker, a relative or empty value is ignored, and it is never written to the pointer file. The CLI is a separate Node process with no access to Electron dialogs, so it only writes the pointer file:
 
 ~~~sh
 node bin/launcher-control.cjs storage info --json

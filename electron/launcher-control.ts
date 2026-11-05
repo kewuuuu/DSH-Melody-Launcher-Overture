@@ -12,8 +12,6 @@ import { matchSkillsShTarget } from './skills-sh'
 import { isSafeRepositoryName } from './profile'
 import type { StorageController } from './storage-root'
 
-const STORAGE_UNAVAILABLE = 'storage 不可用：启动器未装配数据目录控制器，请在界面里切换数据目录，或重启启动器后重试。'
-
 export function createLauncherControl(options: {
   userData: string
   cliPath: string
@@ -26,16 +24,12 @@ export function createLauncherControl(options: {
   fetchImpl: typeof fetch
   emitOutput: (text: string) => void
   loginRegistration: (enabled: boolean) => void
-  storage?: StorageController
+  storage: StorageController
   legacyRuntimeRunning: () => boolean
   prepareOfficeCliTool?: import('./runtime').RuntimeControllerOptions['prepareOfficeCliTool']
 }) {
   const { userData, settings } = options
-  const storage: StorageController = options.storage ?? {
-    get() { throw new Error(STORAGE_UNAVAILABLE) },
-    set() { throw new Error(STORAGE_UNAVAILABLE) },
-    reset() { throw new Error(STORAGE_UNAVAILABLE) },
-  }
+  const storage = options.storage
   const control = createPackControl({
     userData,
     registryPath: path.join(userData, 'packs.json'),

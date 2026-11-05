@@ -68,7 +68,7 @@ const api: LauncherApi = {
   chooseAppearanceImage: kind => ipcRenderer.invoke(IPC.appearanceChooseImage, kind),
   storage: {
     get: () => ipcRenderer.invoke(IPC.storageGet),
-    choose: () => ipcRenderer.invoke(IPC.storageChoose),
+    choose: (defaultPath?: string) => ipcRenderer.invoke(IPC.storageChoose, defaultPath),
     reset: () => ipcRenderer.invoke(IPC.storageReset),
     relaunch: () => ipcRenderer.invoke(IPC.storageRelaunch),
   },
