@@ -18,6 +18,7 @@
 - 2026-11-05：实现列表控制面板（名称／创建时间／端口升降序、独立置顶顺序、逐包端口／权限／自启）、配置浮层和指定包市场返回路径。
 - 实现多包管理器、配置持久化、启动端口预留、逐包启停重启、管理员监督进程及便携版登录自启路径。
 - CLI 支持包查询／创建／改名／删除／启停／重启／配置，允许的全局设置，以及插件／技能／预设资源操作；包导入导出继续使用原界面。
+- 2026-11-05：数据目录改为跟随 EXE（单文件便携即 EXE 同级 launcher-data），支持 --data-dir、指针文件、便携／安装／开发态解析、设置页存储位置区块与 storage CLI，详见下文「数据目录（单文件 EXE · 同级存储）」。
 - 独立验收：npm run build 通过；npm test 为 989 passed、11 skipped（102 个测试文件通过、9 个跳过）。真实临时子进程验证独立家目录、端口和逐包启停；CLI 用真实 Node 子进程测试；浏览器检查控制面板与配置浮层，无控制台错误。
 - 评审发现并处理：大文件读取截断导致的误删已恢复；市场跨包缓存污染已修复；共享行底色和失败反馈已补齐；CLI 资源别名已修正；源引用保护、回滚、旧默认包与 profile 兼容、重复启动保护和管理员父进程看护已验证。
 - Windows 便携包已生成：release/preview/DSH-Launcher-1.0.4-portable.exe（92,497,456 字节）；目录版位于 release/preview/win-unpacked/。已检查 app.asar 包含 bin/launcher-control.cjs。
@@ -45,3 +46,15 @@
 - 根因二（路径）：D:\engine\DSH 整棵树带有 Low Mandatory Level 标签和继承的 Everyone 删除拒绝 ACE，放在其中的 Electron 可执行文件在启用沙箱时启动即崩；同一份文件放在 D:\launcher-preview、D:\ 根目录或 %TEMP% 下均正常。对该树 icacls /setintegritylevel 被拒绝，无法原位修复。
 - 结论：产物本身可用；不要在 D:\engine\DSH 内直接运行构建产物，也不要与正在运行的旧启动器共用默认 userData。
 - 可运行副本：D:\launcher-preview\（目录版 DSH Launcher.exe、便携版 DSH-Launcher-1.0.4-portable.exe，以及独立配置启动脚本「启动新版启动器-独立配置.cmd」）。
+
+## 数据目录（单文件 EXE · 同级存储）
+
+- 目标：一个 EXE 即可运行，数据写在 EXE 同级 `launcher-data`（整合包登记、包目录、DSH 运行时、插件存储），不同启动器互不干扰，并能在界面里指定任意目录以接管旧数据。
+- 解析优先级（命中即返回）：`--data-dir=<绝对路径>` / `--user-data-dir=<绝对路径>`（也支持空格形式，`--data-dir` 优先）→ EXE 同级 `launcher-storage.json` 的 `{"dataDir":"…"}` → 便携版 `PORTABLE_EXECUTABLE_DIR/launcher-data` → 安装版 `dirname(execPath)/launcher-data` → 开发态 `%APPDATA%/dsh-launcher`（保持 vite 传给 dev 的隔离参数有效）。
+- `app.setPath('userData')` 与 `app.setPath('sessionData', <数据目录>/browser-data)` 都在 `requestSingleInstanceLock` 之前执行，因此单实例锁、log、CLI 元数据都跟着所选目录走；建目录失败退回 `%APPDATA%/dsh-launcher` 并给出中文警告，不阻断启动。
+- 切换目录只写指针文件 `launcher-storage.json`，需重启生效；`relaunchLauncher` 用 `PORTABLE_EXECUTABLE_FILE || process.execPath` 并剔除 `--data-dir`/`--user-data-dir`，避免旧参数把新目录覆盖回去。
+- 界面：设置页「DSH版本」tab 末尾的「存储位置」区块提供当前路径与复制、来源说明、指针文件行、警告与重启提示、选择文件夹／接管旧版数据（把 `%APPDATA%/dsh-launcher` 作为默认目录带入选择框）／恢复默认位置。
+- CLI：`storage info` / `storage set <dir>` / `storage reset`，支持 `--user-data` 指定要查询的实例；`storage set` 写指针并返回 `restartRequired: true`。
+- 实机验收（2026-11-05，Windows）：新便携包复制到 `D:\DSH-Launcher\DSH-Launcher.exe`（92,544,598 字节）运行后，同级生成 `launcher-data`（packs.json、launcher-control.json、settings.json、browser-data 等），`storage info` 报 `source: "portable"`；`storage set` 写指针后重启，`source: "pointer"` 且数据落到新目录；两个不同数据目录的实例可同时运行；强杀后再次启动可正常接管。
+- 回归：`npx tsc --noEmit` 通过，`npm run build` 通过，`npm test` 为 **1027 passed、11 skipped（104 文件通过、9 跳过）**；storage 相关定向用例 46 例全绿。
+- 交付副本：`D:\DSH-Launcher\DSH-Launcher.exe`（目录内不要再手写 `--user-data-dir`，默认即 EXE 同级）。构建产物仍不可在 `D:\engine\DSH` 树内直接运行，见上一节。
