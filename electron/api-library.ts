@@ -205,9 +205,10 @@ export async function saveApiLibraryEntry(userData: string, input: LauncherApiEn
 }
 
 /**
- * 删除一条库记录：同时清掉启动器的密钥与所有包的授予记录。
- * 取舍：不从各包 settings.yaml 里删已经写入的 provider——包内配置属于包自己，
- * 用户可能手工改过；库只负责「谁能被授予」，撤销授予后用户可在包内自行重配。
+ * 删除一条库记录：清掉启动器的密钥与所有包的授予记录（授予记录只记「谁被授予」）。
+ * 已经同步进各包 settings.yaml 的 provider 由上层组合负责级联撤销：launcher-control
+ * 里的 apiLibrary facade 先对所有已授予该路由的包做一次真正的 syncDisable，再调用这里。
+ * 这里保持纯库语义，不与 pack-apis 互相依赖，避免两个模块形成引用环。
  */
 export async function removeApiLibraryEntry(userData: string, route: string): Promise<LauncherApiEntry[]> {
   const normalizedRoute = normalizeRoute(route)

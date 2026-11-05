@@ -63,9 +63,9 @@ To take over data from an older installation or another launcher, stop that laun
 
 ## Launcher API library, per-pack grants and launch at login
 
-The launcher keeps one API library for the whole machine-wide launcher profile, in userData/api-library.json (version 1). Entries hold route, name, base URL, protocol and model IDs; the API key never lands in that file. It is written to userData/.credentials.yaml as <ROUTE>_API_KEY, the same credential store the DSH runtime already uses. Routes match ^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$ and must be unique. api add on an existing route updates it in place and keeps the stored key when --api-key is omitted; api remove deletes the entry, its key and every pack grant that referenced it.
+The launcher keeps one API library for the whole machine-wide launcher profile, in userData/api-library.json (version 1). Entries hold route, name, base URL, protocol and model IDs; the API key never lands in that file. It is written to userData/.credentials.yaml as <ROUTE>_API_KEY, the same credential store the DSH runtime already uses. Routes match ^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$ and must be unique. api add on an existing route updates it in place and keeps the stored key when --api-key is omitted. The library is the single source of truth: saving an entry re-syncs displayName, base URL, protocol and model IDs into every pack that has the grant, and renaming a route moves each of those packs' provider to the new route (the pack-side key migrates with it, the old route and its key are removed). api remove is a cascade: it revokes the grant in every pack that had it — pack settings.yaml provider and pack-side key are removed first — then clears the grant records, the library entry and its key.
 
-A grant is per pack and lives in userData/pack-api-grants.json (version 1). Enabling one writes that pack's own settings.yaml (llm-pi-ai.providers.<route>, exactly like the custom API editor) and that pack's .credentials.yaml; disabling removes both again. A running pack accepts the change but reports restartRequired true, and the new provider only takes effect on next start/restart. If the sync fails, the grant is rolled back, the reason is kept, and the next pack api list shows it in error. Removing a library entry deliberately leaves providers already synced into pack settings.yaml alone: the pack keeps working with what it was given, and pack api disable is the command that removes it.
+A grant is per pack and lives in userData/pack-api-grants.json (version 1). Enabling one writes that pack's own settings.yaml (llm-pi-ai.providers.<route>, exactly like the custom API editor) and that pack's .credentials.yaml; disabling removes both again. A running pack accepts the change and reports restartRequired true, and the new provider only takes effect on next start/restart; restartRequired is true only when that call really changed the grant, so a plain pack api list reports false and shows no "restart to apply" hint when nothing is pending. If the sync fails, the grant is rolled back, the reason is kept, and the next pack api list shows it in error. pack api disable only ever touches a route the pack was granted, so a provider the user configured by hand inside a pack is never deleted by a disable of some other route.
 
 launchAtLogin is the launcher's own Windows login item. It is independent of pack autoStart: a pack with autoStart true is started by a launcher that is already running, and it no longer registers anything at login. Saving the setting applies the login item immediately (exe path is PORTABLE_EXECUTABLE_FILE when set, otherwise the launcher executable, with --background so it starts hidden in the tray), and startup re-applies it once, so a missing launchAtLogin means off and any stale registration is removed.
 
@@ -134,7 +134,23 @@ $ node bin/launcher-control.cjs pack api enable alpha acme
 }
 ~~~
 
-pack api list and pack api enable return the same shape: enabled is the pack's granted routes, available is the current library, restartRequired says the pack must be restarted for the change to load, and error is null or the last sync failure. Every one of these commands is also reachable through request: api.list, api.save and api.remove are plain commands, and pack.api.list/pack.api.set take {args:{route,enabled}} behind the pack ID.
+Removing a library entry that a pack had been granted takes the provider out of that pack as well:
+
+~~~text
+$ node bin/launcher-control.cjs api remove acme
+[]
+
+$ node bin/launcher-control.cjs pack api list alpha
+{
+  "packId": "alpha",
+  "enabled": [],
+  "available": [],
+  "restartRequired": false,
+  "error": null
+}
+~~~
+
+pack api list and pack api enable return the same shape: enabled is the pack's granted routes, available is the current library, restartRequired is true only for a call that actually changed the grant while the pack was running, and error is null or the last sync failure. Every one of these commands is also reachable through request: api.list, api.save and api.remove are plain commands, and pack.api.list/pack.api.set take {args:{route,enabled}} behind the pack ID.
 
 ## Connection and launcher startup
 

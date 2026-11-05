@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { AppSettings } from '../src/types'
@@ -9,6 +9,7 @@ import { readCredential } from '../electron/credentials'
 import { credentialNameForRoute, listCustomApiProviders } from '../electron/custom-api'
 import { createLauncherControl } from '../electron/launcher-control'
 import { createLauncherControlServer } from '../electron/launcher-control-server'
+import { readPackApiGrants } from '../electron/pack-api-grants'
 import { writePackRegistry, type PackRecord } from '../electron/pack-registry'
 import { defaultSettings } from '../electron/settings'
 
@@ -24,8 +25,13 @@ async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'launcher-api-cli-test-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const homeA = path.join(root, 'home-alpha')
+  const homeB = path.join(root, 'home-beta')
   await mkdir(homeA, { recursive: true })
-  const records: PackRecord[] = [{ id: 'alpha', name: 'alpha', description: '', version: '1', homePath: homeA, source: 'created', installedAt: '', updatedAt: '', state: 'complete', plugins: [] }]
+  await mkdir(homeB, { recursive: true })
+  const records: PackRecord[] = [
+    { id: 'alpha', name: 'alpha', description: '', version: '1', homePath: homeA, source: 'created', installedAt: '', updatedAt: '', state: 'complete', plugins: [] },
+    { id: 'beta', name: 'beta', description: '', version: '1', homePath: homeB, source: 'created', installedAt: '', updatedAt: '', state: 'complete', plugins: [] },
+  ]
   await writePackRegistry(path.join(root, 'packs.json'), records)
   let stored: AppSettings = { ...defaultSettings({ homeDirectory: path.join(root, 'user'), documentsDirectory: path.join(root, 'docs') }), dshHome: homeA }
   const settings = {
@@ -55,7 +61,7 @@ async function fixture() {
   const server = await createLauncherControlServer({ userData: root, execute: request => control.execute(request) })
   cleanups.push(() => server.close())
   const run = (...args: string[]) => exec(process.execPath, [cliPath, '--user-data', root, ...args], { timeout: 20000 })
-  return { root, homeA, run, loginRegistration, settings }
+  return { root, homeA, homeB, run, loginRegistration, settings }
 }
 
 async function addAcme(f: Awaited<ReturnType<typeof fixture>>) {
@@ -107,6 +113,52 @@ describe('launcher control cli: api library and launch at login', () => {
     expect(JSON.parse(disabled.stdout)).toMatchObject({ packId: 'alpha', enabled: [] })
     expect(await listCustomApiProviders(f.homeA)).toEqual([])
     expect(await readCredential(f.homeA, credentialNameForRoute('acme'))).toBeNull()
+  })
+
+  it('D2 re-syncs updated library values into a pack that already has the grant', async () => {
+    const f = await fixture()
+    await addAcme(f)
+    await f.run('pack', 'api', 'enable', 'alpha', 'acme', '--json')
+    const updated = await f.run('api', 'add', 'acme', '--name', 'Acme Pro', '--base-url', 'https://api2.acme.test/v2', '--protocol', 'openai-responses', '--models', 'acme-3', '--json')
+    expect(JSON.parse(updated.stdout)).toMatchObject([{ route: 'acme', displayName: 'Acme Pro', baseUrl: 'https://api2.acme.test/v2', protocol: 'openai-responses', modelIds: ['acme-3'], hasApiKey: true }])
+    expect(await listCustomApiProviders(f.homeA)).toMatchObject([{ route: 'acme', displayName: 'Acme Pro', baseUrl: 'https://api2.acme.test/v2', protocol: 'openai-responses', modelIds: ['acme-3'], hasApiKey: true }])
+    expect(await readCredential(f.homeA, credentialNameForRoute('acme'))).toBe('sk-acme')
+    expect(await listCustomApiProviders(f.homeB)).toEqual([])
+  })
+
+  it('D2 moves a granted provider to the new route when the library entry is renamed', async () => {
+    const f = await fixture()
+    await addAcme(f)
+    await f.run('pack', 'api', 'enable', 'alpha', 'acme', '--json')
+    const args = { originalRoute: 'acme', route: 'acme-two', displayName: 'Acme Two', baseUrl: 'https://api.acme.test/v1', protocol: 'openai-completions', modelIds: ['acme-1'] }
+    const renamed = await f.run('request', 'api.save', '--args', JSON.stringify(args), '--json')
+    console.log('[cli] request api.save (rename acme -> acme-two)\n' + renamed.stdout.trim())
+    expect(JSON.parse(renamed.stdout)).toMatchObject([{ route: 'acme-two', displayName: 'Acme Two', hasApiKey: true }])
+    const providers = await listCustomApiProviders(f.homeA)
+    expect(providers.map(provider => provider.route)).toEqual(['acme-two'])
+    expect(providers[0]).toMatchObject({ displayName: 'Acme Two', hasApiKey: true })
+    expect(await readCredential(f.homeA, credentialNameForRoute('acme-two'))).toBe('sk-acme')
+    expect(await readCredential(f.homeA, credentialNameForRoute('acme'))).toBeNull()
+    expect((await readPackApiGrants(f.root)).grants).toEqual({ alpha: ['acme-two'] })
+    expect(JSON.parse((await f.run('pack', 'api', 'list', 'alpha', '--json')).stdout)).toMatchObject({ enabled: ['acme-two'], error: null })
+    expect(await listCustomApiProviders(f.homeB)).toEqual([])
+  })
+
+  it('D2 cascades a library removal to every pack that had the grant', async () => {
+    const f = await fixture()
+    await addAcme(f)
+    await f.run('pack', 'api', 'enable', 'alpha', 'acme', '--json')
+    const removed = await f.run('api', 'remove', 'acme')
+    console.log('[cli] api remove acme\n' + removed.stdout.trim())
+    const state = await f.run('pack', 'api', 'list', 'alpha')
+    console.log('[cli] pack api list alpha (after api remove)\n' + state.stdout.trim())
+    expect(JSON.parse(removed.stdout)).toEqual([])
+    expect(JSON.parse(state.stdout)).toMatchObject({ enabled: [], restartRequired: false, error: null })
+    expect(await listCustomApiProviders(f.homeA)).toEqual([])
+    expect(await readCredential(f.homeA, credentialNameForRoute('acme'))).toBeNull()
+    expect((await readPackApiGrants(f.root)).grants).toEqual({ alpha: [] })
+    await expect(readFile(path.join(f.homeB, 'settings.yaml'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(path.join(f.homeB, '.credentials.yaml'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('reports bad arguments and unknown routes with exit code 1', async () => {

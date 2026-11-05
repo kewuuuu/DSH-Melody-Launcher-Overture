@@ -11,7 +11,7 @@ import { createInstaller } from './installer'
 import { matchSkillsShTarget } from './skills-sh'
 import { isSafeRepositoryName } from './profile'
 import type { StorageController } from './storage-root'
-import { createApiLibrary } from './api-library'
+import { createApiLibrary, type ApiLibrary } from './api-library'
 import { createPackApis } from './pack-apis'
 
 export function createLauncherControl(options: {
@@ -117,8 +117,23 @@ export function createLauncherControl(options: {
     },
   })
   // 启动器级 API 库与「每包勾选」都只认 userData，与具体整合包无关。
-  const apiLibrary = createApiLibrary(userData)
+  const apiLibraryStore = createApiLibrary(userData)
   const packApis = createPackApis({ userData, registryPath: path.join(userData, 'packs.json'), readSettings: () => settings.readStored(), isPackRunning: packId => control.isPackRunning(packId) })
+  // 库是唯一来源：库条目改动后把新值重新同步进已授予该 API 的包，删除条目则级联撤销。
+  const apiLibrary: ApiLibrary = {
+    list: () => apiLibraryStore.list(),
+    async save(input) {
+      const previousRoute = typeof input?.originalRoute === 'string' ? input.originalRoute.trim() : ''
+      const entries = await apiLibraryStore.save(input)
+      const route = typeof input?.route === 'string' ? input.route.trim() : ''
+      if (route) await packApis.resyncGranted(route, previousRoute || undefined)
+      return entries
+    },
+    async remove(route) {
+      await packApis.revokeGranted(route)
+      return apiLibraryStore.remove(route)
+    },
+  }
   // 启动器自身随登录启动：设置里的 launchAtLogin 是唯一开关（包 autoStart 只管启动器起来后拉包）。
   const applyLaunchAtLogin = async (patch: Record<string, unknown>): Promise<{ launchAtLogin: boolean }> => {
     let enabled = (await settings.readStored()).launchAtLogin === true

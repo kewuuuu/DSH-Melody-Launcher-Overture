@@ -5,7 +5,7 @@ import path from 'node:path'
 import type { AppSettings } from '../src/types'
 import { saveApiLibraryEntry } from '../electron/api-library'
 import { readCredential } from '../electron/credentials'
-import { credentialNameForRoute, listCustomApiProviders } from '../electron/custom-api'
+import { credentialNameForRoute, listCustomApiProviders, saveCustomApiProvider } from '../electron/custom-api'
 import { packApiGrantsPath, readPackApiGrants } from '../electron/pack-api-grants'
 import { createPackApis } from '../electron/pack-apis'
 import { writePackRegistry, type PackRecord } from '../electron/pack-registry'
@@ -44,8 +44,8 @@ async function addLibraryEntry(root: string): Promise<void> {
 describe('pack api grants', () => {
   it('rejects an unknown pack without writing anything', async () => {
     const f = await fixture()
-    await expect(f.packApis.getState('ghost')).rejects.toThrow('Unknown pack: ghost')
-    await expect(f.packApis.setGrant('ghost', 'acme', true)).rejects.toThrow('Unknown pack: ghost')
+    await expect(f.packApis.getState('ghost')).rejects.toThrow('未找到整合包：ghost')
+    await expect(f.packApis.setGrant('ghost', 'acme', true)).rejects.toThrow('未找到整合包：ghost')
     await expect(readFile(packApiGrantsPath(f.root), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
@@ -95,7 +95,35 @@ describe('pack api grants', () => {
     expect(state).toMatchObject({ enabled: [], error: null })
   })
 
-  it('reports restartRequired while the pack is running and still applies the change', async () => {
+  it('D1 leaves a hand-configured provider in the pack untouched when disabling a route that was never granted', async () => {
+    const f = await fixture()
+    await saveCustomApiProvider(f.homeA, { route: 'manual-x', displayName: 'Manual', baseUrl: 'https://manual.test/v1', protocol: 'openai-completions', modelIds: ['manual-1'], apiKey: 'sk-manual' })
+    const settingsBefore = await readFile(path.join(f.homeA, 'settings.yaml'), 'utf8')
+    const credentialsBefore = await readFile(path.join(f.homeA, '.credentials.yaml'), 'utf8')
+    const state = await f.packApis.setGrant('a', 'manual-x', false)
+    expect(state).toEqual({ packId: 'a', enabled: [], available: [], restartRequired: false, error: null })
+    expect(await readFile(path.join(f.homeA, 'settings.yaml'), 'utf8')).toBe(settingsBefore)
+    expect(await readFile(path.join(f.homeA, '.credentials.yaml'), 'utf8')).toBe(credentialsBefore)
+    expect((await listCustomApiProviders(f.homeA)).map(provider => provider.route)).toEqual(['manual-x'])
+    await expect(readFile(packApiGrantsPath(f.root), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('D3 reports restartRequired false when the pack is running but nothing changed', async () => {
+    const f = await fixture()
+    await addLibraryEntry(f.root)
+    f.running.add('a')
+    expect((await f.packApis.getState('a')).restartRequired).toBe(false)
+  })
+
+  it('D3 keeps restartRequired false when the grant did not change', async () => {
+    const f = await fixture()
+    await addLibraryEntry(f.root)
+    f.running.add('a')
+    await f.packApis.setGrant('a', 'acme', true)
+    expect((await f.packApis.setGrant('a', 'acme', true)).restartRequired).toBe(false)
+  })
+
+  it('D3 reports restartRequired while the grant really changes and the pack is running', async () => {
     const f = await fixture()
     await addLibraryEntry(f.root)
     f.running.add('a')
