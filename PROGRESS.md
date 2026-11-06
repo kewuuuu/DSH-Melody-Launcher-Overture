@@ -45,7 +45,15 @@
 - 根因一（单实例）：新旧版本共用默认 userData %APPDATA%\dsh-launcher。旧启动器在运行时，新 EXE 拿到 requestSingleInstanceLock 失败即静默退出，只留下旧窗口，表现为「打不开」。给 --user-data-dir 指定独立目录后同一 EXE 正常开窗（便携版实测，解压到 %TEMP% 后运行）。
 - 根因二（路径）：D:\engine\DSH 整棵树带有 Low Mandatory Level 标签和继承的 Everyone 删除拒绝 ACE，放在其中的 Electron 可执行文件在启用沙箱时启动即崩；同一份文件放在 D:\launcher-preview、D:\ 根目录或 %TEMP% 下均正常。对该树 icacls /setintegritylevel 被拒绝，无法原位修复。
 - 结论：产物本身可用；不要在 D:\engine\DSH 内直接运行构建产物，也不要与正在运行的旧启动器共用默认 userData。
-- 可运行副本：D:\launcher-preview\（目录版 DSH Launcher.exe、便携版 DSH-Launcher-1.0.4-portable.exe，以及独立配置启动脚本「启动新版启动器-独立配置.cmd」）。
+- 早先为跑起来临时放的项目外副本 `D:\launcher-preview\`、`D:\DML-Smoke\`、`D:\DML-Smoke2\` 已全部删除；构建产物只保留在项目内 `release\` 下，规则见文末「构建产物与交付路径约定」。
+
+## 构建产物与交付路径约定（2026-11-07）
+
+- 唯一构建产物位置：`D:\engine\DSH\projects\launcher-overture\release\<tag>\`（便携单文件 `DSH-Launcher-<ver>-portable.exe`、解包版在同级 `win-unpacked\`）。`release/` 已在 `.gitignore`，不进仓库。
+- 为什么不放在项目外也能跑到：`D:\engine\DSH` 把 `Mandatory Label\Low Mandatory Level` 继承给整棵子树，Electron 沙箱在里面启动即静默退出（0x80000003），NSIS 便携壳直接报 NSIS Error；对该树 `icacls /setintegritylevel` 被拒绝，无法原位修复。
+- 2026-11-07 复测：把 portable EXE 复制到 `release\b3\smoke-test\` 用 schtasks 拉起，24 秒内 `launcher-data` 未生成、进程随即消失，确认项目树内不可运行。该目录已删除。
+- 因此实机烟测一律复制到 `%TEMP%\<name>-smoke\` 跑，跑完删除；交付说明只报项目内绝对路径 + 文件大小 + SHA256，不把 EXE 复制到 `D:\` 根或桌面当交付物。
+- 例外：`D:\DSH-Launcher\` 是用户在用的运行实例（同级 `launcher-data` 含整合包与市场缓存），属用户数据，不按构建产物清理；它的 EXE 与 `release\b3` 那份 SHA256 一致，删掉也不会丢构建产物。
 
 ## 数据目录（单文件 EXE · 同级存储）
 
@@ -70,6 +78,6 @@
 - CLI 新增：`api list` / `api add <route> --name --base-url --protocol --models [--api-key]` / `api remove <route>`（级联撤销）/ `pack api list <pack-id>` / `pack api enable|disable <pack-id> <route>` / `settings launch-at-login [on|off]`，文档见 `docs/launcher-cli.md`。
 - 回归：`npm run build` 通过（`dist-electron/preload.mjs` 18.63 kB）；`npm test` **1073 passed / 11 skipped（112 文件通过、9 跳过）**；`npx tsc --noEmit` 通过。新增用例覆盖 api-library 7、pack-apis 11（含未授予 no-op、restartRequired 真值语义）、launch-at-login 7、launcher-control-api-cli 7（含库改元数据跟随、改名迁移、删除级联且未授予包两文件仍 ENOENT）、ipc-launch-at-login 2，前端 SettingsHomeView 3 / ApiLibraryCard 4 / PackControlDialog 5。
 - 实机验收（2026-11-06，Windows，便携单文件 EXE 从 `D:\DML-Smoke2\` 与 `D:\DSH-Launcher\` 两处各跑一次）：同级自建 `launcher-data`，`storage info` 报 `source:"portable"`，`pack list` 返回默认 web 包；`api add smoke-openai` → `pack api enable web smoke-openai` 后，该包家目录（本例 `C:\Users\kewu0\.dsh`）`settings.yaml` 出现 provider 且 `.credentials.yaml` 出现 `SMOKE_OPENAI_API_KEY`；改库端点/协议/模型后该 provider 跟着变；`request api.save` 改名到 `smoke-two` 后 provider 与密钥名一起迁移、旧密钥消失、grants 跟着改名；`api remove smoke-two` 后 `settings.yaml` 回到 `{ llm-pi-ai: {} }`、包侧密钥清空、grants 为 `{"web":[]}`；`pack api disable web never-granted` 返回 `enabled:[]` 且不碰包；`settings launch-at-login on` 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写入 `electron.app.DSH Launcher : "D:\DML-Smoke2\DSH-Launcher.exe" --background`，`off` 后该值消失且其它自启项未受影响。
-- 交付副本：`D:\DSH-Launcher\DSH-Launcher.exe`（92,561,829 字节，SHA256 `A09E039AE8116AA9AC803B266F8F360EEC1F97B47F27DE29FA565947A25187C4`，目录内只有这一个文件）；该副本已实机启动验证并清空了测试产生的 `launcher-data`，首次双击会重新生成。
+- 该轮产物：`release\b3\DSH-Launcher-1.0.4-portable.exe`（92,561,829 字节，SHA256 `A09E039AE8116AA9AC803B266F8F360EEC1F97B47F27DE29FA565947A25187C4`）。当时另复制了一份到 `D:\DSH-Launcher\` 做烟测，用户随后在那个位置继续使用，因此它成了运行实例（数据在同级 `launcher-data`）。构建产物不再放项目外。
 - 未验证：真实 UAC 提权启动、Windows 登录后自启的实际触发（只验证了注册表项写入与移除）、以及打包 EXE 的窗口截图（工具截屏对 Electron 窗口取不到画面）。
 
