@@ -2,7 +2,31 @@ import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { setDefaultBackupEngine, type BackupEngine } from '../electron/backups'
+
+/** 删除链路会先备份；这些用例测的是删除本身，注入一个不落盘的桩引擎。 */
+const backupStub = {
+  create: async (input: { label: string; op?: string; paths: string[] }) => ({
+    id: 'stub-backup',
+    op: input.op ?? 'manual',
+    label: input.label,
+    createdAt: 0,
+    sizeBytes: 0,
+    fileCount: 0,
+    locked: false,
+    origin: input.paths,
+    archivePath: 'stub.zip',
+  }),
+} as unknown as BackupEngine
+
+beforeEach(() => {
+  setDefaultBackupEngine(backupStub)
+})
+
+afterEach(() => {
+  setDefaultBackupEngine(null)
+})
 import { parseSkillDocument, readInstalledSkills, toggleInstalledSkill, uninstallInstalledSkill } from '../electron/skill-format'
 
 const temporaryRoots: string[] = []
@@ -12,6 +36,20 @@ afterEach(async () => {
 })
 
 describe('DSH skill format', () => {
+  it('备份失败时中止卸载，技能文件原样保留', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-skill-backup-'))
+    temporaryRoots.push(root)
+    const skillDir = path.join(root, 'skills', 'demo-skill')
+    await mkdir(skillDir, { recursive: true })
+    await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: demo-skill\ndescription: 演示技能\n---\n正文\n')
+    setDefaultBackupEngine({
+      create: async () => {
+        throw new Error('磁盘已满')
+      },
+    } as unknown as BackupEngine)
+    await expect(uninstallInstalledSkill(root, 'demo-skill')).rejects.toThrow(/备份「demo-skill」失败，已阻止删除：磁盘已满/)
+    expect(existsSync(path.join(skillDir, 'SKILL.md'))).toBe(true)
+  })
   it('parses the official frontmatter and invocation policy', () => {
     expect(parseSkillDocument(`---
 name: release-check

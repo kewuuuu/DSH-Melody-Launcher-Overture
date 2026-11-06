@@ -2,7 +2,31 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setDefaultBackupEngine, type BackupEngine } from '../electron/backups'
+
+/** 删除链路会先备份；这些用例测的是删除本身，注入一个不落盘的桩引擎。 */
+const backupStub = {
+  create: async (input: { label: string; op?: string; paths: string[] }) => ({
+    id: 'stub-backup',
+    op: input.op ?? 'manual',
+    label: input.label,
+    createdAt: 0,
+    sizeBytes: 0,
+    fileCount: 0,
+    locked: false,
+    origin: input.paths,
+    archivePath: 'stub.zip',
+  }),
+} as unknown as BackupEngine
+
+beforeEach(() => {
+  setDefaultBackupEngine(backupStub)
+})
+
+afterEach(() => {
+  setDefaultBackupEngine(null)
+})
 import type { AppSettings } from '../src/types'
 import { createPackManager } from '../electron/pack'
 import { readPackRegistry, upsertPackRecord, type PackRecord } from '../electron/pack-registry'

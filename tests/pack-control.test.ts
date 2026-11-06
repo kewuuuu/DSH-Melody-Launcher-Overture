@@ -1,4 +1,28 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setDefaultBackupEngine, type BackupEngine } from '../electron/backups'
+
+/** 删除链路会先备份；这些用例测的是删除本身，注入一个不落盘的桩引擎。 */
+const backupStub = {
+  create: async (input: { label: string; op?: string; paths: string[] }) => ({
+    id: 'stub-backup',
+    op: input.op ?? 'manual',
+    label: input.label,
+    createdAt: 0,
+    sizeBytes: 0,
+    fileCount: 0,
+    locked: false,
+    origin: input.paths,
+    archivePath: 'stub.zip',
+  }),
+} as unknown as BackupEngine
+
+beforeEach(() => {
+  setDefaultBackupEngine(backupStub)
+})
+
+afterEach(() => {
+  setDefaultBackupEngine(null)
+})
 import { mkdtemp, mkdir, writeFile, readFile, rm, lstat } from 'node:fs/promises'
 import { createServer, connect } from 'node:net'
 import { spawn } from 'node:child_process'
