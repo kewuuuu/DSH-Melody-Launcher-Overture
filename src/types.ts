@@ -1343,6 +1343,130 @@ export interface StorageState {
   warning: string | null
 }
 
+/* ===== 备份区：所有可恢复的删除/迁移都压缩成 zip 存在这里 ===== */
+
+/** 一次备份动作的来源，决定界面上怎么称呼它。 */
+export type BackupOpKind =
+  | 'pack.delete'
+  | 'plugin.delete'
+  | 'skill.delete'
+  | 'preset.delete'
+  | 'resource.unlink'
+  | 'version.delete'
+  | 'path.migrate'
+  | 'manual'
+
+export interface BackupEntry {
+  id: string
+  op: BackupOpKind
+  label: string
+  createdAt: number
+  sizeBytes: number
+  fileCount: number
+  /** 锁定后不参与容量清理。 */
+  locked: boolean
+  /** 被备份的原始路径（迁移时是旧目录）。 */
+  origin: string[]
+  archivePath: string
+  packId?: string
+  restoredAt?: number
+}
+
+export interface BackupOverview {
+  entries: BackupEntry[]
+  totalBytes: number
+  /** 0 表示不限制。 */
+  limitBytes: number
+  directory: string
+}
+
+/* ===== 启动器插件：给启动页右下角提供数据面板 ===== */
+
+export interface LauncherPluginItem {
+  label: string
+  value?: string
+  href?: string
+}
+
+export type LauncherPluginPanel =
+  | { id: string; plugin: string; title: string; type: 'list'; items: LauncherPluginItem[]; hint?: string }
+  | { id: string; plugin: string; title: string; type: 'table'; columns: string[]; rows: string[][]; hint?: string }
+  | { id: string; plugin: string; title: string; type: 'html'; html: string; hint?: string }
+
+export interface LauncherPluginInfo {
+  name: string
+  title: string
+  version?: string
+  description?: string
+  /** 有 index.mjs 才会在子进程里执行；纯 manifest 插件为 false。 */
+  hasCode: boolean
+  error: string | null
+}
+
+export interface LauncherPluginsState {
+  plugins: LauncherPluginInfo[]
+  panels: LauncherPluginPanel[]
+  /** 上次取数的时间；启动器刚起来还没取过为 null。 */
+  fetchedAt: number | null
+  directory: string
+}
+
+/* ===== 工作区 skill：<workspace>/.dsh/skills 下的技能也要列出来 ===== */
+
+export interface WorkspaceSkillEntry {
+  id: string
+  name: string
+  description?: string
+  path: string
+  scope: 'global' | 'workspace'
+  workspaceId?: string
+  workspaceTitle?: string
+  /** 停用是改名成 .disabled，不删文件。 */
+  disabled: boolean
+}
+
+export interface WorkspaceSkillGroup {
+  id: string
+  title: string
+  path: string
+  missing: boolean
+}
+
+export interface WorkspaceSkillsOverview {
+  skills: WorkspaceSkillEntry[]
+  workspaces: WorkspaceSkillGroup[]
+}
+
+/* ===== 对话自动续接：重启/停止前留下的那条请求 ===== */
+
+export interface PendingResumeEntry {
+  id: string
+  packId: string
+  /** 未指定时由启动器挑该包唯一 running 的会话。 */
+  sessionId?: string
+  prompt: string
+  requestId: string
+  createdAt: number
+  attempts: number
+  status: 'pending' | 'sent' | 'failed'
+  error: string | null
+}
+
+/* ===== 目录迁移：DSH_HOME / 本体安装目录换位置 ===== */
+
+export type MigratablePath = 'dshHome' | 'dshInstallPath'
+
+export interface PathMigrationResult {
+  kind: MigratablePath
+  /** 迁移后写进设置的新路径。 */
+  current: string
+  /** 旧目录压缩成的备份；没有旧数据时为 null。 */
+  backupId: string | null
+  /** 还有包在跑时不删旧目录，留到下次启动或手动清理。 */
+  removedOld: boolean
+  warning: string | null
+}
+
 export interface LauncherApi {
   launcherControl(request: LauncherControlRequest): Promise<unknown>
   getSettings(): Promise<AppSettings>
@@ -1398,6 +1522,40 @@ export interface LauncherApi {
   packApis: {
     get(packId: string): Promise<PackApiGrantState>
     set(packId: string, route: string, enabled: boolean): Promise<PackApiGrantState>
+  }
+  /** 备份区：可恢复的删除/迁移都落成 zip；超容量按最久优先清理未锁定项。 */
+  backups: {
+    list(): Promise<BackupOverview>
+    create(input: { paths: string[]; label: string; op?: BackupOpKind; packId?: string }): Promise<BackupOverview>
+    restore(id: string): Promise<BackupOverview>
+    remove(id: string): Promise<BackupOverview>
+    setLocked(id: string, locked: boolean): Promise<BackupOverview>
+    /** 0 表示不限制。 */
+    setLimit(bytes: number): Promise<BackupOverview>
+    reveal(id: string): Promise<void>
+  }
+  /** 启动器插件：启动页右下角的数据面板来源。refresh 会重新调用每个插件一次。 */
+  launcherPlugins: {
+    list(): Promise<LauncherPluginsState>
+    refresh(): Promise<LauncherPluginsState>
+    openFolder(): Promise<void>
+  }
+  /** 工作区 skill（<workspace>/.dsh/skills）与全局 skill 一起列、一起管。 */
+  workspaceSkills: {
+    list(): Promise<WorkspaceSkillsOverview>
+    setEnabled(id: string, enabled: boolean): Promise<WorkspaceSkillsOverview>
+    remove(id: string): Promise<WorkspaceSkillsOverview>
+    reveal(id: string): Promise<void>
+  }
+  /** 待发续接请求：重启前后留下的那条对话。 */
+  pendingResumes: {
+    list(): Promise<PendingResumeEntry[]>
+    retry(id: string): Promise<{ ok: boolean; error: string | null; entries: PendingResumeEntry[] }>
+    discard(id: string): Promise<PendingResumeEntry[]>
+  }
+  /** 目录迁移：复制到新位置 → 写设置 → 旧目录进备份区。 */
+  paths: {
+    migrate(kind: MigratablePath, target: string): Promise<PathMigrationResult>
   }
   /** 选择并复制一张外观图片；返回写进 settings 的路径与可直接加载的 URL；取消返回 null。 */
   chooseAppearanceImage(kind: AppearanceImageKind): Promise<AppearanceImageSelection | null>

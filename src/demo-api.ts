@@ -1153,6 +1153,53 @@ export const demoApi: LauncherApi = {
       }
     },
   },
+  backups: {
+    list: async () => ({ entries: [], totalBytes: 0, limitBytes: 2 * 1024 * 1024 * 1024, directory: `${demoSettings.dshHome}\\..\\launcher-data\\backups` }),
+    create: async () => ({ entries: [], totalBytes: 0, limitBytes: 2 * 1024 * 1024 * 1024, directory: 'C:\\demo\\launcher-data\\backups' }),
+    restore: async () => ({ entries: [], totalBytes: 0, limitBytes: 2 * 1024 * 1024 * 1024, directory: 'C:\\demo\\launcher-data\\backups' }),
+    remove: async () => ({ entries: [], totalBytes: 0, limitBytes: 2 * 1024 * 1024 * 1024, directory: 'C:\\demo\\launcher-data\\backups' }),
+    setLocked: async () => ({ entries: [], totalBytes: 0, limitBytes: 2 * 1024 * 1024 * 1024, directory: 'C:\\demo\\launcher-data\\backups' }),
+    setLimit: async () => ({ entries: [], totalBytes: 0, limitBytes: 0, directory: 'C:\\demo\\launcher-data\\backups' }),
+    reveal: async () => undefined,
+  },
+  launcherPlugins: {
+    list: async () => ({
+      plugins: [{ name: 'demo-usage', title: '用量速览', version: '0.1.0', description: '演示插件：今日 Token 与命中率', hasCode: true, error: null }],
+      panels: [
+        { id: 'demo-usage:tokens', plugin: 'demo-usage', title: '今日 Token', type: 'list', items: [{ label: '输入', value: '1.2M' }, { label: '输出', value: '86K' }, { label: '官方用量页', href: 'https://platform.deepseek.com/usage' }] },
+        { id: 'demo-usage:link', plugin: 'demo-usage', title: '相关链接', type: 'list', items: [{ label: 'DeepSeek 用量', href: 'https://platform.deepseek.com/usage' }, { label: 'API 文档', href: 'https://platform.deepseek.com/api-docs' }] },
+      ],
+      fetchedAt: Date.now(),
+      directory: 'C:\\demo\\launcher-data\\launcher-plugins',
+    }),
+    refresh: async () => ({
+      plugins: [{ name: 'demo-usage', title: '用量速览', version: '0.1.0', description: '演示插件：今日 Token 与命中率', hasCode: true, error: null }],
+      panels: [{ id: 'demo-usage:tokens', plugin: 'demo-usage', title: '今日 Token', type: 'list', items: [{ label: '输入', value: '1.2M' }, { label: '输出', value: '86K' }] }],
+      fetchedAt: Date.now(),
+      directory: 'C:\\demo\\launcher-data\\launcher-plugins',
+    }),
+    openFolder: async () => undefined,
+  },
+  workspaceSkills: {
+    list: async () => ({
+      skills: [
+        { id: 'global:wksp-rules', name: 'wksp-rules', description: '本机落盘与项目管理规则', path: `${demoSettings.dshHome}\\skills\\wksp-rules\\SKILL.md`, scope: 'global' as const, disabled: false },
+        { id: 'ws:demo:wksp-rules', name: 'wksp-rules', description: '本机落盘与项目管理规则', path: 'D:\\engine\\DSH\\Workspace\\.dsh\\skills\\wksp-rules\\SKILL.md', scope: 'workspace' as const, workspaceId: 'demo-workspace', workspaceTitle: 'Workspace', disabled: false },
+      ],
+      workspaces: [{ id: 'demo-workspace', title: 'Workspace', path: 'D:\\engine\\DSH\\Workspace', missing: false }],
+    }),
+    setEnabled: async () => ({ skills: [], workspaces: [] }),
+    remove: async () => ({ skills: [], workspaces: [] }),
+    reveal: async () => undefined,
+  },
+  pendingResumes: {
+    list: async () => [],
+    retry: async () => ({ ok: false, error: null, entries: [] }),
+    discard: async () => [],
+  },
+  paths: {
+    migrate: async (kind, target) => ({ kind, current: target, backupId: null, removedOld: false, warning: null }),
+  },
   readProfile: async () => profile(),
   listProfiles: async () => [{
     id: demoSettings.profileName,

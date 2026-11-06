@@ -90,6 +90,29 @@ export const IPC = {
   apiLibraryRemove: 'api-library:remove',
   packApisGet: 'pack-apis:get',
   packApisSet: 'pack-apis:set',
+  /** 备份区。 */
+  backupsList: 'backups:list',
+  backupsCreate: 'backups:create',
+  backupsRestore: 'backups:restore',
+  backupsRemove: 'backups:remove',
+  backupsSetLocked: 'backups:set-locked',
+  backupsSetLimit: 'backups:set-limit',
+  backupsReveal: 'backups:reveal',
+  /** 启动器插件数据面板。 */
+  launcherPluginsList: 'launcher-plugins:list',
+  launcherPluginsRefresh: 'launcher-plugins:refresh',
+  launcherPluginsOpenFolder: 'launcher-plugins:open-folder',
+  /** 工作区 skill。 */
+  workspaceSkillsList: 'workspace-skills:list',
+  workspaceSkillsSetEnabled: 'workspace-skills:set-enabled',
+  workspaceSkillsRemove: 'workspace-skills:remove',
+  workspaceSkillsReveal: 'workspace-skills:reveal',
+  /** 待发续接请求。 */
+  pendingResumesList: 'pending-resumes:list',
+  pendingResumesRetry: 'pending-resumes:retry',
+  pendingResumesDiscard: 'pending-resumes:discard',
+  /** 目录迁移。 */
+  pathsMigrate: 'paths:migrate',
   profileRead: 'profile:read',
   profilesList: 'profiles:list',
   profilesCreate: 'profiles:create',
