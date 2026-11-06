@@ -1,5 +1,5 @@
-import { app, BrowserWindow, net, safeStorage, shell } from 'electron'
-import { mkdirSync } from 'node:fs'
+import { app, BrowserWindow, dialog, ipcMain, net, safeStorage, shell } from 'electron'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import type { AppSettings, OfficialPackRelease, OfficialPackStatus, PackInstallResult, RuntimeOutput, WindowMode } from '../src/types'
 import { ACP_RUNTIME_DIRNAME, CREDENTIALS_LOCK_DIRNAME, createAiInstaller, healCredentialsLock, type AiInstaller } from './ai-install'
 import { registerAppearanceProtocol, registerAppearanceScheme } from './appearance-protocol'
+import { registerBackupsIpc } from './backups-ipc'
 import { createApplicationAddonManager, type ApplicationAddonManager } from './application-addons'
 import { applyWindowMode, createMainWindow, createRendererChannel } from './app-window'
 import { createCatalogSyncService, type CatalogSyncService } from './catalog-sync'
@@ -1117,6 +1118,31 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => showMainWindow())
 }
 
+/**
+ * 备份区恢复前要按路径反查整合包，而这条链路在 IPC handle 里是同步的：
+ * 直接读注册表原文（与 readPackRegistry 同一信封），读不到就当没有包。
+ */
+function packRecordsForBackups(): { id: string; name: string; homePath?: string }[] {
+  try {
+    const value = JSON.parse(readFileSync(path.join(app.getPath('userData'), 'packs.json'), 'utf8')) as {
+      records?: { id?: unknown; name?: unknown; homePath?: unknown }[]
+    }
+    if (!Array.isArray(value.records)) return []
+    const records: { id: string; name: string; homePath?: string }[] = []
+    for (const record of value.records) {
+      if (typeof record?.id !== 'string' || !record.id) continue
+      records.push({
+        id: record.id,
+        name: typeof record.name === 'string' ? record.name : record.id,
+        ...(typeof record.homePath === 'string' && record.homePath ? { homePath: record.homePath } : {}),
+      })
+    }
+    return records
+  } catch {
+    return [] // 与 readPackRegistry 一致：文件缺失或损坏都按「没有包」处理
+  }
+}
+
 app.whenReady().then(async () => {
   // 系统代理先探起来（异步，与下面的启动步骤并行）：之后所有子进程都只读缓存，
   // 不必再在事件循环上同步查注册表。等完再建服务，确保第一次装包/启动就带上代理。
@@ -1135,8 +1161,38 @@ app.whenReady().then(async () => {
     console.error('[process-supervisor] 启动失败，退出时只能执行普通清理。', error)
   }
   services = createServices()
+  const startupSettings = await services.settings.read()
+  // 备份区必须早于任何「会删用户数据的启动路径」：三条删除链路在没装配引擎时会拒绝删除，
+  // 而装配本身同步且零成本（tar.exe / PowerShell 探测推迟到第一次备份）。
+  try {
+    registerBackupsIpc({
+      ipcMain,
+      root: app.getPath('userData'),
+      isPackRunning: id => services?.packControl.isPackRunning(id) ?? false,
+      packLabel: id => packRecordsForBackups().find(record => record.id === id)?.name ?? null,
+      // 恢复前拦活着的包：同一家目录可能有多个包共用，优先报正在跑的那个。
+      packForPath: target => {
+        const resolved = path.resolve(target).toLowerCase()
+        const matches = packRecordsForBackups().filter(record => {
+          const home = record.homePath ?? startupSettings.dshHome
+          if (!home) return false
+          const prefix = path.resolve(home).toLowerCase()
+          return resolved === prefix || resolved.startsWith(prefix + path.sep)
+        })
+        if (matches.length === 0) return null
+        const running = matches.find(record => services?.packControl.isPackRunning(record.id))
+        return (running ?? matches[0]).id
+      },
+      revealPath: target => shell.showItemInFolder(target),
+    })
+  } catch (error) {
+    // 吞掉异常会让启动器能开、但所有删除都失败，等同于把用户卡在半坏状态。
+    dialog.showErrorBox('备份区初始化失败', error instanceof Error ? error.message : String(error))
+    app.quit()
+    return
+  }
   // 启动时按设置校正一次登录项：缺省 false 会主动注销历史遗留的旧注册项。
-  syncLaunchAtLogin(await services.settings.read(), services.loginRegistration)
+  syncLaunchAtLogin(startupSettings, services.loginRegistration)
   controlServer = await createLauncherControlServer({ userData: app.getPath('userData'), execute: request => services!.launcherControl(request) })
   // 外观图片统一落在 userData/appearance/，渲染层经 dsh-appearance:// 读取。
   const appearanceDirectory = path.join(app.getPath('userData'), 'appearance')
