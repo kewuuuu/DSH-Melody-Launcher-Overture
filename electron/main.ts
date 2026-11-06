@@ -10,6 +10,8 @@ import type { AppSettings, OfficialPackRelease, OfficialPackStatus, PackInstallR
 import { ACP_RUNTIME_DIRNAME, CREDENTIALS_LOCK_DIRNAME, createAiInstaller, healCredentialsLock, type AiInstaller } from './ai-install'
 import { registerAppearanceProtocol, registerAppearanceScheme } from './appearance-protocol'
 import { registerBackupsIpc } from './backups-ipc'
+import { registerPathMigrationIpc } from './path-migration-ipc'
+import { registerPendingResumesIpc } from './pending-resume-ipc'
 import { registerLauncherPluginsIpc } from './launcher-plugins-ipc'
 import { createWorkspaceSkillsService } from './workspace-skills'
 import { registerWorkspaceSkillsIpc } from './workspace-skills-ipc'
@@ -1214,6 +1216,13 @@ app.whenReady().then(async () => {
     service: createWorkspaceSkillsService({ home: () => workspaceSkillsHome }),
     revealPath: target => shell.showItemInFolder(target),
   })
+  // 续接队列与目录迁移：队列实例由 facade 持有，IPC 复用同一份，界面「重试」才看得到 CLI 排的条目。
+  registerPendingResumesIpc({
+    ipcMain,
+    queue: services.packControl.pendingResumeQueue,
+    baseUrlOf: packId => services?.packControl.runtimeUrl(packId) ?? null,
+  })
+  registerPathMigrationIpc({ ipcMain, migrate: (kind, target) => services!.packControl.paths.migrate(kind, target) })
   // 启动时按设置校正一次登录项：缺省 false 会主动注销历史遗留的旧注册项。
   syncLaunchAtLogin(startupSettings, services.loginRegistration)
   controlServer = await createLauncherControlServer({ userData: app.getPath('userData'), execute: request => services!.launcherControl(request) })

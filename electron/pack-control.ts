@@ -242,6 +242,7 @@ export function createPackControl(options: PackControlOptions) {
     async shutdown() { closing = true; await Promise.allSettled([...queues.values()]); await Promise.allSettled([...controllers.values()].map(c => c.stop())) },
     isRunning: () => [...controllers.values()].some(c => c.isRunning()),
     isPackRunning: (id: string) => controllers.get(id)?.isRunning() ?? false,
+    runtimeUrl: (id: string) => controllers.get(id)?.state().url ?? null,
     assertPackRemovable: (id: string) => assertNotSharedSource(id),
     async forgetPack(id: string) {
       const next = writeQueue.catch(() => undefined).then(async () => {

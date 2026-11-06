@@ -128,6 +128,12 @@ export function createLauncherControl(options: {
     if (!pack?.runtime?.running || typeof pack.runtime.url !== 'string') return null
     return pack.runtime.url
   }
+  // 包一启动好就把积压的续接请求发回去；发送失败只留在队列里，不改变启动结果。
+  const deliverPending = (request: LauncherControlRequest, result: unknown): unknown => {
+    const target = pendingDeliveryFor(request, result)
+    if (target) void pendingResumeQueue.deliver(target.packId, target.url).catch(() => undefined)
+    return result
+  }
   const pendingResumes = {
     list: () => pendingResumeQueue.list(),
     async retry(id: string) {
@@ -277,12 +283,23 @@ export function createLauncherControl(options: {
           { enqueue: input => pendingResumeQueue.enqueue(input), restart: () => control.execute({ ...request, args: rest }) },
           { packId: request.packId, ...resume },
         )
-        return { resume: entry, runtime: result }
+        return { resume: entry, runtime: deliverPending(request, result) }
       }
       if (request?.command === 'storage.reset') return storage.reset()
-      return control.execute(request)
+      return deliverPending(request, await control.execute(request))
     },
   }
+}
+/**
+ * 哪些成功结果该触发续接投递：只有包启动/重启、且拿到了运行时 URL 的那一次。
+ * 抽成纯函数是为了不为了测这一行去起真实运行时。
+ */
+export function pendingDeliveryFor(request: LauncherControlRequest, result: unknown): { packId: string; url: string } | null {
+  if (!request || (request.command !== 'pack.start' && request.command !== 'pack.restart')) return null
+  const packId = typeof request.packId === 'string' ? request.packId : ''
+  const url = (result as { url?: unknown } | null)?.url
+  if (!packId || typeof url !== 'string' || !url) return null
+  return { packId, url }
 }
 function readResumeInput(raw: unknown): { prompt: string; sessionId?: string } {
   if (typeof raw === 'string') {
