@@ -71,7 +71,7 @@ it('按全局与各工作区分组，缺失工作区标灰并给出提示', asyn
   expect(groups().map(item => item.getAttribute('aria-label'))).toEqual(['全局 skill', '项目甲 skill', '项目乙 skill'])
   expect(groups()[0].className).not.toContain('is-missing')
   expect(groups()[2].className).toContain('is-missing')
-  expect(groups()[2].textContent).toContain('工作区路径不存在')
+  expect(groups()[2].textContent).toContain('目录不存在')
   expect(groupSkills(sample()).map(item => item.title)).toEqual(['全局', '项目甲', '项目乙'])
   const sources = Array.from(container.querySelectorAll('.workspace-skill-source')).map(item => item.textContent)
   expect(sources).toEqual(['全局', '项目甲', '项目乙'])

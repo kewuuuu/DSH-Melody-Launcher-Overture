@@ -30,6 +30,7 @@ import { SkeletonStrip } from '../components/Skeleton'
 import { DshMarketView } from './DshMarketView'
 import { DesktopPackRow, DesktopPluginsPanel } from './DesktopPluginsPanel'
 import { PluginAddDialog } from '../components/dialogs/PluginAddDialog'
+import { WorkspaceSkillsPanel } from '../components/workspace-skills/WorkspaceSkillsPanel'
 import {
   SKILL_CATEGORIES,
   SKILL_MARKET_SOURCES,
@@ -663,6 +664,8 @@ function SettingsSkillsTab({
             />
           ))}
         </SettingsSection>
+        {/* 工作区 skill 与已安装技能并列：同一件事的另一个来源（<workspace>/.dsh/skills）。 */}
+        <WorkspaceSkillsPanel />
       </div>
       <div className={subView === 'market' ? undefined : 'view-hidden'}>
         <SkillMarketPanel

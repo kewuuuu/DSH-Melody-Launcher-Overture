@@ -6,7 +6,6 @@ import { ApiLibraryCard } from '../components/ApiLibraryCard'
 import { BackupManager } from '../components/backup/BackupManager'
 import { PathMigrationSection } from '../components/path-migration/PathMigrationSection'
 import { StorageLocationCard } from '../components/StorageLocationCard'
-import { WorkspaceSkillsPanel } from '../components/workspace-skills/WorkspaceSkillsPanel'
 import { GITHUB_MIRROR_PRESETS } from '../constants'
 import {
   ACCENT_PRESETS,
@@ -336,7 +335,6 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
 
           <BackupManager packDir={profileDirectory(draft.dshHome, draft.profileName)} packId={draft.profileName} />
 
-          <WorkspaceSkillsPanel />
 
           <Section icon={<Globe size={16} />} title="网络" desc="默认使用国内 npm 镜像（npmmirror），并自动跟随 Windows 系统代理；留空即可。">
             <label className="form-field">

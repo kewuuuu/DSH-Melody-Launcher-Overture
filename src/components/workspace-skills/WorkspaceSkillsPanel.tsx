@@ -5,7 +5,7 @@ import type { WorkspaceSkillEntry, WorkspaceSkillsOverview } from '../../types'
 import './workspace-skills.css'
 
 /**
- * 设置页「工作区 Skills」：全局 skill 与 <workspace>/.dsh/skills 下的 skill 一起列、一起管。
+ * 「工作区技能」区块：全局 skill 与 <workspace>/.dsh/skills 下的 skill 一起列、一起管。
  * 同名不同来源靠来源标签区分；停用只是改名成 .disabled，删除会进备份。
  */
 
@@ -130,18 +130,18 @@ export function WorkspaceSkillsPanel() {
   }
 
   return (
-    <section className="settings-panel settings-home-panel workspace-skill-panel" aria-label="工作区 Skills">
+    <section className="settings-panel settings-home-panel workspace-skill-panel" aria-label="工作区技能">
       <div className="settings-panel-heading">
         <div className="settings-panel-title">
           <span className="settings-group-icon"><FolderOpen size={16} /></span>
-          <span>工作区 Skills</span>
+          <span>工作区技能</span>
           {total > 0 && <span className="settings-count">{total}</span>}
         </div>
         <button type="button" className="secondary-button compact" onClick={() => void load()} disabled={loading}>
           <RefreshCw size={13} />{loading ? '读取中…' : '刷新'}
         </button>
       </div>
-      <p className="settings-hint">全局 skill 对所有整合包生效；工作区 skill 只在对应工作区里生效。停用只改名不删文件，删除会进备份区。</p>
+      <p className="settings-hint">来自各工作区 <code>.dsh/skills</code> 目录：全局 skill 对所有整合包生效，工作区 skill 只在对应工作区里生效。停用只改名不删文件，删除会先进备份区。</p>
 
       {error && <div className="error-banner" role="alert">{error}</div>}
       {notice && <p className="workspace-skill-notice" role="status">{notice}</p>}
@@ -162,7 +162,7 @@ export function WorkspaceSkillsPanel() {
             </div>
             {group.missing && (
               <p className="workspace-skill-missing">
-                <AlertTriangle size={13} />工作区路径不存在，可能已被移动或删除；这里的 skill 暂时不会被加载。
+                <AlertTriangle size={13} />目录不存在：可能已被移动或删除，这里的 skill 暂时不会被加载。
               </p>
             )}
             {group.skills.length === 0
@@ -194,7 +194,7 @@ export function WorkspaceSkillsPanel() {
                           <Trash2 size={12} />删除
                         </button>
                         <button type="button" className="secondary-button compact" onClick={() => reveal(skill)}>
-                          <FolderOpen size={12} />打开文件夹
+                          <FolderOpen size={12} />在文件夹中显示
                         </button>
                         <button type="button" className="secondary-button compact" onClick={() => void copyPath(skill.path)}>
                           <Copy size={12} />复制路径

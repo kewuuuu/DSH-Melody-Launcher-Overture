@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState, type CSSPropertie
 import { Layers3, LoaderCircle } from 'lucide-react'
 import { LauncherApiProvider, resolveLauncherApi, useLauncherApi } from './api/client'
 import { PackDashboard } from './components/PackDashboard'
+import { PendingResumesBanner } from './components/PendingResumesBanner'
 import { StartView, updateNeedsDialog } from './components/start/StartView'
 import { TopBar } from './components/TopBar'
 import { Toast } from './components/Toast'
@@ -276,6 +277,7 @@ function LauncherShell() {
                   </Suspense>
                 ) : tab === 'packs' ? (
                   <div className="packs-view">
+                    <PendingResumesBanner />
                     <PacksRuntimeBar
                       runtime={store.runtime}
                       dshInstallation={store.dshInstallation}

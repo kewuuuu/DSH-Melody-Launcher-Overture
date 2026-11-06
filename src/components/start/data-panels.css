@@ -1,0 +1,192 @@
+/* 启动页右下角插件数据面板：轮播、三种面板类型、插件失败提示。 */
+
+.dp-page {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--quiet);
+}
+
+.dp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dp-carousel {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  min-height: 0;
+}
+
+.dp-arrow {
+  flex: none;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.dp-arrow:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.dp-arrow:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.dp-slide {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dp-slide-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dp-slide-head strong {
+  font-size: 12.5px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-plugin {
+  font-size: 10.5px;
+  color: var(--quiet);
+}
+
+.dp-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.dp-row.is-link {
+  cursor: pointer;
+}
+
+.dp-row.is-link:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.dp-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-value {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.dp-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.dp-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.dp-table th,
+.dp-table td {
+  padding: 5px 10px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.dp-table th {
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--surface-soft);
+}
+
+.dp-html {
+  display: block;
+  width: 100%;
+  height: 200px;
+  max-height: 200px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+}
+
+.dp-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--quiet);
+}
+
+.dp-dots {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.dp-dot {
+  width: 7px;
+  height: 7px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--line-strong);
+  cursor: pointer;
+}
+
+.dp-dot.is-active {
+  background: var(--accent);
+}
+
+.dp-plugin-errors {
+  padding: 6px 20px 0;
+  color: var(--danger);
+}
+
+.dp-plugin-errors p {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  font-size: 11.5px;
+}

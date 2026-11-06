@@ -1,9 +1,10 @@
-import { ExternalLink, Layers3, LoaderCircle, RefreshCw } from 'lucide-react'
+import { ExternalLink, LoaderCircle, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import packageMetadata from '../../../package.json'
 import { useLauncherApi } from '../../api/client'
 import { pricingPeriod } from '../../lib/deepseek-pricing'
 import type { DeepSeekBalanceResult, DshUsageResult, LauncherUpdateStatus } from '../../types'
+import { DataPanels } from './DataPanels'
 import './start.css'
 
 /** DeepSeek 平台的用量页：余额卡右上角「查看用量」的去处。 */
@@ -58,8 +59,7 @@ function usageText(usage: DshUsageResult | null): string {
 
 /**
  * 「启动」页：左列品牌（品牌图 + 软件名 + 版本号/检查更新），
- * 右列上余额卡（DeepSeek 余额 + 今日 Token + 查看用量），右列下数据面板占位。
- * 插件数据面板的渲染不在本轮范围内，这里只出空状态。
+ * 右列上余额卡（DeepSeek 余额 + 今日 Token + 查看用量），右列下插件数据面板（见 DataPanels）。
  */
 export function StartView({ logoSrc, update, busy, onUpdateChecked, onOpenSettings }: StartViewProps) {
   const api = useLauncherApi()
@@ -164,16 +164,7 @@ export function StartView({ logoSrc, update, busy, onUpdateChecked, onOpenSettin
           </div>
         </section>
 
-        <section className="start-panel start-data">
-          <header className="start-panel-head">
-            <h2>数据面板</h2>
-            <button type="button" className="start-icon-button" aria-label="刷新数据面板" disabled title="插件数据面板将在后续版本提供">刷新</button>
-          </header>
-          <div className="start-data-empty">
-            <Layers3 size={22} />
-            <p>还没有数据面板 · 把插件放进数据目录的 launcher-plugins 文件夹</p>
-          </div>
-        </section>
+        <DataPanels />
       </section>
     </div>
   )
