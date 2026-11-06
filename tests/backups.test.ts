@@ -5,6 +5,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   assertSafeArchiveMembers,
+  backupBeforeDelete,
   createBackupEngine,
   DEFAULT_BACKUP_LIMIT_BYTES,
   setDefaultBackupEngine,
@@ -315,5 +316,25 @@ describe('备份区引擎', () => {
     expect(overview.entries).toHaveLength(1)
     expect(overview.entries[0]?.op).toBe('skill.delete')
     expect(overview.entries[0]?.origin).toEqual([skillDir])
+  })
+
+  it('没有注入引擎时拒绝放行，调用方的删除不执行', async () => {
+    const root = await makeRoot()
+    const home = path.join(root, 'dsh-home')
+    const skillDir = path.join(home, 'skills', 'demo-skill')
+    await mkdir(skillDir, { recursive: true })
+    await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: demo-skill\ndescription: 演示技能\n---\n正文\n')
+
+    setDefaultBackupEngine(null)
+    await expect(backupBeforeDelete({ paths: [skillDir], label: '示例技能', op: 'skill.delete' })).rejects.toThrow('备份引擎尚未就绪，已阻止删除：示例技能')
+    await expect(uninstallInstalledSkill(home, 'demo-skill')).rejects.toThrow(/备份引擎尚未就绪，已阻止删除：demo-skill/)
+    expect(existsSync(path.join(skillDir, 'SKILL.md'))).toBe(true)
+    expect(await readdir(path.join(home, 'skills'))).toEqual(['demo-skill'])
+
+    const engine = createBackupEngine({ root, tools: fakeTool(10) })
+    setDefaultBackupEngine(engine)
+    expect(await uninstallInstalledSkill(home, 'demo-skill')).toEqual([])
+    expect(existsSync(skillDir)).toBe(false)
+    expect((await engine.list()).entries).toHaveLength(1)
   })
 })

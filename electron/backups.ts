@@ -563,8 +563,8 @@ export function createBackupEngine(deps: BackupEngineDeps): BackupEngine {
 let defaultEngine: BackupEngine | null = null
 
 /**
- * 装配期把引擎交给删除 hook 用（main.ts 通过 registerBackupsIpc 完成）。
- * 不接引擎时 hook 直接放行：单测与命令行环境没有真实 userData，也不该因此删不了东西。
+ * 装配期把引擎交给删除 hook 用（main.ts 在 whenReady 里经 registerBackupsIpc 完成）。
+ * 不接引擎时删除 hook 一律拒绝：静默放行等于给「先备份再删除」开了一个后门。
  */
 export function setDefaultBackupEngine(engine: BackupEngine | null): void {
   defaultEngine = engine
@@ -582,12 +582,13 @@ export interface DeleteBackupInput {
 }
 
 /**
- * 删除前的最后一道保险：把待删路径压进备份区，失败就抛中文错误让调用方中止删除。
- * 返回 null 表示没有可备份的内容（路径本就不存在）或没有接引擎。
+ * 删除前的最后一道保险：把待删路径压进备份区，任何一步不成立都抛中文错误，调用方就中止删除。
+ * 没接引擎同样抛错：装配顺序出错时宁可删不动，也不能在没有备份的情况下静默删掉用户数据。
+ * 返回 null 只表示没有可备份的内容（待删路径本就不存在）。
  */
 export async function backupBeforeDelete(input: DeleteBackupInput): Promise<BackupEntry | null> {
   const engine = defaultEngine
-  if (!engine) return null
+  if (!engine) throw new Error('备份引擎尚未就绪，已阻止删除：' + input.label)
   const paths: string[] = []
   for (const candidate of input.paths) {
     if (candidate && (await pathExists(candidate))) paths.push(candidate)
