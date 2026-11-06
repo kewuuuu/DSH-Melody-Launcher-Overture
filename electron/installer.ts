@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { writeFileAtomic } from './fs-atomic'
+import { backupBeforeDelete } from './backups'
 import { DEFAULT_PROFILE_NAME, DSH_PACKAGE_NAME } from '../src/constants'
 import type {
   ApplicationRepositoryAnalysis,
@@ -907,6 +908,14 @@ export function createInstaller(options: InstallerOptions): Installer {
           // profiles 目录尚未创建时仍保留当前 Profile 作为唯一候选。
         }
       }
+
+      // 卸载会直接删掉 node_modules 里的插件本体：先把这些目录一起备份，失败就一个 profile 都不动。
+      await backupBeforeDelete({
+        paths: [...targetProfiles].map(targetProfile =>
+          path.join(settings.dshHome, 'profiles', targetProfile, 'node_modules', ...packageName.split('/'))),
+        label: packageName,
+        op: 'plugin.delete',
+      })
 
       const failures: string[] = []
       for (const targetProfile of targetProfiles) {

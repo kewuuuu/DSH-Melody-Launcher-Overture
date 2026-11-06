@@ -42,6 +42,7 @@ import type {
 import { assertMeaningfulPackName, assertPackDshVersion, isValidPackDshVersion, manifestNameFromPackId, normalizePackDshVersion, packProfileName, parsePackManifest } from './pack-manifest'
 import { extractOfflineSupportFromPath, extractPackBodiesFromPath, extractPresetBodiesFromPath, findManifestInArchiveFromPath, inspectPackZipFromPath } from './pack-zip'
 import { validateFullArchive } from './profile-repository-import'
+import { backupBeforeDelete } from './backups'
 import { cleanPackNameHint, extractRawPluginBodiesFromPath, extractRawPresetSourcesFromPath, extractRawSkillSourcesFromPath, scanRawPackZipFromPath, type ExtractByteBudget } from './pack-scan'
 import { describeSnapshotZip, extractSnapshot, planSnapshot, writeSnapshotZip, type SnapshotPrivacyCategory, type SnapshotPrivacyInclude } from './pack-snapshot'
 import {
@@ -2043,9 +2044,15 @@ export function createPackManager(options: PackManagerOptions): PackManager {
       try {
         const record = await findRecord(packId)
         const stored = options.readStoredSettings ? await options.readStoredSettings() : settings
-        if (record.homePath && !samePath(record.homePath, stored.dshHome)) {
+        const privateHome = Boolean(record.homePath) && !samePath(record.homePath as string, stored.dshHome)
+        const removalTargets = privateHome
+          ? [record.homePath as string]
+          : [path.join(stored.dshHome, 'profiles', packId), packBodiesDir(stored.dshHome, packId)]
+        // 删之前先压一份进备份区：备份失败会抛错，下面的删除一行都不会执行。
+        await backupBeforeDelete({ paths: removalTargets, label: record.name, op: 'pack.delete', packId })
+        if (privateHome) {
           // 私有家目录：整个环境连会话、登录、插件一并删除（共享的 DSH 版本二进制不动）。
-          await removeDirectoryAtomically(record.homePath)
+          await removeDirectoryAtomically(record.homePath as string)
         } else {
           const home = stored.dshHome
           await removeDirectoryAtomically(path.join(home, 'profiles', packId))

@@ -3,6 +3,7 @@ import type { Dirent } from 'node:fs'
 import path from 'node:path'
 import { parse } from 'yaml'
 import type { InstalledSkill } from '../src/types'
+import { backupBeforeDelete } from './backups'
 
 export interface ParsedSkill {
   name: string
@@ -155,6 +156,8 @@ export async function uninstallInstalledSkill(dshHome: string, name: string): Pr
   const current = await readInstalledSkills(dshHome)
   const skill = current.find(item => item.name === name)
   if (!skill) throw new Error(`未找到本地 Skill：${name}`)
+  // 删之前先把技能包压进备份区：备份失败就中止卸载，磁盘上的文件原样保留。
+  await backupBeforeDelete({ paths: [skill.path], label: skill.name, op: 'skill.delete' })
   await rm(skill.path, { recursive: true, force: true })
   return readInstalledSkills(dshHome)
 }
