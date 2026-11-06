@@ -1,0 +1,40 @@
+/* 设置页「启动器」里的目录迁移入口：当前路径 + 迁移按钮 + 二次确认 + 结果。 */
+.path-migration {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.path-migration-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+
+.path-migration-current {
+  flex: 1 1 200px;
+  min-width: 0;
+  color: var(--quiet);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.path-migration-confirm { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line-strong); }
+.path-migration-target { margin: 0 0 6px; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
+.path-migration-target code { color: var(--accent); font-size: 11.5px; }
+.path-migration-note { margin: 0 0 10px; color: var(--quiet); font-size: 11px; line-height: 1.7; }
+.path-migration-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.path-migration-error { margin: 8px 0 0; color: var(--danger); font-size: 11.5px; overflow-wrap: anywhere; }
+
+.path-migration-result {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.path-migration-result > div { display: flex; align-items: baseline; gap: 10px; }
+.path-migration-result dt { flex: none; width: 62px; color: var(--quiet); font-size: 11px; }
+.path-migration-result dd { margin: 0; min-width: 0; color: var(--ink); font-size: 11.5px; overflow-wrap: anywhere; }
+.path-migration-result .is-warning dd { color: var(--danger); }

@@ -1,0 +1,96 @@
+/* 设置页「备份管理」：容量摘要 + 备份表格 + 行内两步确认。 */
+.backup-panel .settings-panel-heading { margin-bottom: 8px; }
+
+.backup-usage {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.backup-usage-value { color: var(--ink); font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.backup-usage-directory {
+  flex: 1 1 220px;
+  min-width: 0;
+  color: var(--quiet);
+  font-size: 11px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.backup-limit-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+}
+
+.backup-limit-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; }
+
+.backup-limit-field input,
+.backup-limit-field select {
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12.5px;
+}
+
+.backup-limit-field input { width: 120px; }
+.backup-limit-hint { margin-right: auto; color: var(--quiet); font-size: 11px; }
+
+.backup-table-wrap { margin-top: 12px; overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+.backup-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+
+.backup-table th {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--quiet);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.backup-table td { padding: 9px 10px; border-top: 1px solid var(--line); color: var(--ink); vertical-align: middle; }
+.backup-table tbody tr:first-child td { border-top: none; }
+
+.backup-time { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.backup-op {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.backup-op.is-migration { background: var(--surface-strong); color: var(--muted); }
+
+.backup-name { min-width: 140px; }
+.backup-name strong { display: block; font-weight: 650; overflow-wrap: anywhere; }
+.backup-name small { color: var(--quiet); font-size: 10.5px; }
+.backup-size { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.backup-lock { white-space: nowrap; color: var(--muted); font-size: 11.5px; }
+.backup-lock.is-locked { color: var(--accent); font-weight: 600; }
+
+.backup-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 250px; }
+.backup-confirm-text { color: var(--muted); font-size: 11px; }
+.backup-empty { margin: 14px 0 4px; color: var(--quiet); font-size: 12px; line-height: 1.7; }
+
+.backup-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+.backup-footer small { color: var(--quiet); font-size: 11px; overflow-wrap: anywhere; }

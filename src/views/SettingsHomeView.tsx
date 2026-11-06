@@ -3,7 +3,10 @@ import { useEffect, useState, type ReactNode } from 'react'
 import packageMetadata from '../../package.json'
 import { useLauncherApi } from '../api/client'
 import { ApiLibraryCard } from '../components/ApiLibraryCard'
+import { BackupManager } from '../components/backup/BackupManager'
+import { PathMigrationSection } from '../components/path-migration/PathMigrationSection'
 import { StorageLocationCard } from '../components/StorageLocationCard'
+import { WorkspaceSkillsPanel } from '../components/workspace-skills/WorkspaceSkillsPanel'
 import { GITHUB_MIRROR_PRESETS } from '../constants'
 import {
   ACCENT_PRESETS,
@@ -21,7 +24,7 @@ import '../components/settings-home.css'
 
 /**
  * 设置主页（顶栏「设置」）：把原本散在设置弹窗里的东西收成整页。
- * 分区顺序即使用频率：外观 → 启动器 → 存储位置 → API 库 → 网络 → 关于。
+ * 分区顺序即使用频率：外观 → 启动器 → 存储位置 → API 库 → 备份管理 → 工作区 Skills → 网络 → 关于。
  * 只有点「保存设置」才写盘；外观改动会实时预览，离开本页即回到已保存设置。
  */
 
@@ -49,6 +52,14 @@ const UI_THEMES: Array<{ id: UiTheme; label: string }> = [
 const CUSTOM_MIRROR = '__custom__'
 /** 比较镜像地址时忽略首尾空格与结尾斜杠（手敲的常常少一个 / ）。 */
 const normalizeMirror = (value: string): string => value.trim().replace(/\/+$/, '')
+
+/** <dshHome>/profiles/<name>：整合包在 DSH_HOME 里的固定位置，备份按钮备份的就是它。 */
+function profileDirectory(dshHome: string, profileName: string): string {
+  const root = dshHome.trim().replace(/[\\/]+$/, '')
+  if (!root) return ''
+  const separator = root.includes('\\') ? '\\' : '/'
+  return `${root}${separator}profiles${separator}${profileName}`
+}
 
 function Section({ icon, title, desc, children }: { icon: ReactNode; title: string; desc?: string; children: ReactNode }) {
   return (
@@ -291,6 +302,12 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
                 <button type="button" onClick={() => void chooseDirectory('dshInstallPath')} title="选择 DSH 本体安装目录"><Folder size={17} /></button>
               </div>
             </label>
+            <PathMigrationSection
+              kind="dshInstallPath"
+              label="本体安装目录"
+              current={draft.dshInstallPath}
+              onMigrated={result => patch({ dshInstallPath: result.current })}
+            />
             <label className="form-field">
               <span>DSH_HOME</span>
               <div className="path-input">
@@ -298,6 +315,12 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
                 <button type="button" onClick={() => void chooseDirectory('dshHome')} title="选择 DSH_HOME"><Folder size={17} /></button>
               </div>
             </label>
+            <PathMigrationSection
+              kind="dshHome"
+              label="DSH_HOME"
+              current={draft.dshHome}
+              onMigrated={result => patch({ dshHome: result.current })}
+            />
             <label className="form-field">
               <span>工作区</span>
               <div className="path-input">
@@ -310,6 +333,10 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
           <StorageLocationCard />
 
           <ApiLibraryCard onChanged={() => { /* 包配置页每次进入都会重新读取，这里无需广播。 */ }} />
+
+          <BackupManager packDir={profileDirectory(draft.dshHome, draft.profileName)} packId={draft.profileName} />
+
+          <WorkspaceSkillsPanel />
 
           <Section icon={<Globe size={16} />} title="网络" desc="默认使用国内 npm 镜像（npmmirror），并自动跟随 Windows 系统代理；留空即可。">
             <label className="form-field">
