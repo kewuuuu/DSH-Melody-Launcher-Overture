@@ -1,0 +1,332 @@
+/* 「启动」页：左列品牌 + 右列（余额卡 / 数据面板占位）。
+   这一页自己不滚动：外层 .home-tab-pane 是本栈里唯一的滚动容器（见 styles.css 同名规则），
+   页面只声明 min-height:100%，内容超出时由 pane 滚。 */
+.start-view {
+  display: grid;
+  grid-template-columns: minmax(240px, 28%) minmax(0, 1fr);
+  min-height: 100%;
+  color: var(--ink);
+  background: linear-gradient(180deg, var(--app-bg) 0%, var(--workspace-bg) 100%);
+}
+
+/* 左列：品牌沉在偏上，版本/更新沉底。 */
+.start-brand {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 36px 26px 18px;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) calc(var(--panel-opacity) * 100%), transparent);
+}
+
+.start-brand-main {
+  display: flex;
+  margin: 6vh 0 0;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+}
+
+.start-brand-logo {
+  width: 112px;
+  height: 112px;
+  object-fit: contain;
+  filter: drop-shadow(0 10px 22px rgba(38, 52, 104, 0.2));
+}
+
+.start-brand-name {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.start-brand-name span {
+  color: var(--accent);
+}
+
+.start-brand-tagline {
+  margin: -6px 0 0;
+  color: var(--quiet);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.start-brand-foot {
+  display: flex;
+  margin-top: auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 28px;
+}
+
+.start-brand-version {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.start-check-update,
+.start-settings {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  background: var(--surface);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: transform 160ms cubic-bezier(.23, 1, .32, 1), color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.start-check-update:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.start-check-update:active:not(:disabled),
+.start-settings:active {
+  transform: scale(.97);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .start-check-update:hover:not(:disabled),
+  .start-settings:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+}
+
+.start-brand-note {
+  margin: 8px 0 0;
+  color: var(--quiet);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 右列：上余额卡、下数据面板。 */
+.start-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+  padding: 26px 28px 24px;
+}
+
+.start-panel {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) calc(var(--panel-opacity) * 100%), transparent);
+  box-shadow: 0 12px 30px rgba(38, 60, 88, 0.06);
+}
+
+.start-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 10%, var(--line));
+}
+
+.start-panel-head h2 {
+  margin: 0;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.start-panel-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.start-period {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.start-period.peak {
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.start-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--surface);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.start-icon-button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.start-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.start-link:hover {
+  text-decoration: underline;
+}
+
+.start-panel-body {
+  padding-top: 14px;
+}
+
+.start-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.start-state {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.start-state strong {
+  font-size: 13px;
+}
+
+.start-state p,
+.start-state small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.start-state.is-error strong {
+  color: var(--danger);
+}
+
+.start-state.is-warn {
+  margin: 10px 0 0;
+  color: var(--danger);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.start-balance-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.start-amount,
+.start-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.start-amount small,
+.start-metric small {
+  color: var(--quiet);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.start-amount strong {
+  color: var(--accent);
+  font-size: 26px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.start-amount span,
+.start-metric span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.start-metric strong {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 数据面板占位：本轮只有空状态。 */
+.start-data-empty {
+  display: flex;
+  min-height: 132px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 18px;
+  margin-top: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  color: var(--quiet);
+  background: var(--surface-soft);
+  text-align: center;
+}
+
+.start-data-empty p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 900px) {
+  .start-view {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .start-brand {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .start-brand-main {
+    margin-top: 0;
+  }
+
+  .start-brand-foot {
+    padding-top: 18px;
+  }
+}

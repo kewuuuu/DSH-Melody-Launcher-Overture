@@ -21,7 +21,7 @@ it('routes row and resource actions to the selected pack while retaining the mar
   const api = { launcherControl: bridge, loadDshMarket: async () => ({ plugins: [], categories: {} }), onDshMarketProgress: () => () => {} } as unknown as LauncherApi
   const container = document.createElement('div'); document.body.append(container)
   const root = createRoot(container); roots.push(root)
-  await act(async () => root.render(<LauncherApiProvider value={api}><PackDashboard onManage={() => {}} onImport={() => {}} onExport={() => {}} onImportSessions={() => {}} onCloneVersion={() => {}} /></LauncherApiProvider>))
+  await act(async () => root.render(<LauncherApiProvider value={api}><PackDashboard installedDshVersions={['1.0']} onCreate={async () => true} onImport={() => {}} onExport={() => {}} onImportSessions={() => {}} onCloneVersion={() => {}} onOpenVersions={() => {}} /></LauncherApiProvider>))
   const click = async (selector: string) => { const button = container.querySelector<HTMLButtonElement>(selector); expect(button).not.toBeNull(); await act(async () => button!.click()) }
   await click('tbody tr:nth-child(2) .primary-button')
   expect(requests).toContainEqual({ command: 'pack.start', packId: 'beta', args: undefined })
@@ -36,6 +36,24 @@ it('routes row and resource actions to the selected pack while retaining the mar
   await act(async () => (Array.from(dialog.querySelectorAll('button')).find(button => button.textContent === '安装插件') as HTMLButtonElement).click())
   expect(dialog.textContent).toContain('返回 Beta 的插件列表')
   expect(requests.filter(request => request.packId && request.packId !== 'beta')).toHaveLength(0)
+})
+
+it('offers pack creation and import on the dashboard itself', async () => {
+  const bridge = vi.fn(async (request: { command: string }) => request.command === 'pack.list' ? { packs: [] } : {})
+  const onCreate = vi.fn(async () => true)
+  const onImport = vi.fn()
+  const api = { launcherControl: bridge } as unknown as LauncherApi
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container); roots.push(root)
+  await act(async () => root.render(<LauncherApiProvider value={api}><PackDashboard installedDshVersions={['1.0']} onCreate={onCreate} onImport={onImport} onExport={() => {}} onImportSessions={() => {}} onCloneVersion={() => {}} onOpenVersions={() => {}} /></LauncherApiProvider>))
+  const label = (text: string) => Array.from(container.querySelectorAll('button')).find(button => button.textContent === text) as HTMLButtonElement | undefined
+  expect(label('新建整合包')).toBeDefined()
+  expect(label('导入整合包')).toBeDefined()
+  await act(async () => label('新建整合包')!.click())
+  expect(container.querySelector('input[aria-label="整合包名称"]')).not.toBeNull()
+  expect(container.querySelector('select[aria-label="DSH 版本"]')!.textContent).toContain('DSH 1.0')
+  await act(async () => label('导入整合包')!.click())
+  expect(onImport).toHaveBeenCalledTimes(1)
 })
 
 it('does not overwrite the neutral market cache with a target pack installation state', async () => {

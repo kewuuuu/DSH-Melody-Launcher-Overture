@@ -3,7 +3,7 @@ import { HOME_TABS } from '../lib/nav'
 import type { HomeTab } from '../types'
 
 /**
- * 全局顶栏（PCL2 式）：DML 文字标记 + 一级导航 tab + 打开网页（运行中）+ 窗口键。
+ * 全局顶栏（PCL2 式）：KEWU 文字标记 + 一级导航 tab + 打开网页（运行中）+ 窗口键。
  * 整条可拖拽；按钮区 no-drag。
  * 栏目顺序在 src/lib/nav.ts 里定义（App 的挂载顺序同源）。
  */
@@ -21,7 +21,7 @@ interface TopBarProps {
 export function TopBar({ activeTab, openWebVisible, onSelectTab, onOpenHarness, onMinimize, onClose }: TopBarProps) {
   return (
     <header className="topbar">
-      <span className="topbar-mark" aria-hidden="true">DML</span>
+      <span className="topbar-mark" aria-hidden="true">KEWU</span>
       <nav className="topbar-tabs" aria-label="一级导航">
         {HOME_TABS.map(tab => (
           <button
