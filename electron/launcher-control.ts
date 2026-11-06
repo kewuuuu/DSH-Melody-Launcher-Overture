@@ -1,5 +1,5 @@
 import path from 'node:path'
-import type { LauncherApiEntryInput, LauncherControlRequest, SkillInstallTarget } from '../src/types'
+import type { LauncherApiEntryInput, LauncherControlRequest, MigratablePath, SkillInstallTarget } from '../src/types'
 import type { PackManager } from './pack'
 import type { SettingsStore } from './settings'
 import type { NodeRuntime, PnpmRuntime } from './node-runtime'
@@ -13,6 +13,8 @@ import { isSafeRepositoryName } from './profile'
 import type { StorageController } from './storage-root'
 import { createApiLibrary, type ApiLibrary } from './api-library'
 import { createPackApis } from './pack-apis'
+import { createPendingResumeQueue, enqueueBeforeRestart, type PendingResumeQueue } from './pending-resume'
+import { migratePath } from './path-migration'
 
 export function createLauncherControl(options: {
   userData: string
@@ -29,6 +31,8 @@ export function createLauncherControl(options: {
   storage: StorageController
   legacyRuntimeRunning: () => boolean
   prepareOfficeCliTool?: import('./runtime').RuntimeControllerOptions['prepareOfficeCliTool']
+  /** 父级接线时可注入同一条队列给 IPC 复用；缺省按 userData 建一条。 */
+  pendingResumeQueue?: PendingResumeQueue
 }) {
   const { userData, settings } = options
   const storage = options.storage
@@ -116,6 +120,51 @@ export function createLauncherControl(options: {
       throw new Error('Unsupported targeted market command')
     },
   })
+  const pendingResumeQueue = options.pendingResumeQueue ?? createPendingResumeQueue({ file: path.join(userData, 'pending-resumes.json'), fetch: options.fetchImpl })
+  // 续接要在包重启前就登记好，所以 CLI 的 pack restart --resume 走「先入队、再重启」。
+  const runtimeUrlOf = async (packId: string): Promise<string | null> => {
+    const listed = (await control.execute({ command: 'pack.list' })) as { packs?: Array<{ id?: string; runtime?: { running?: boolean; url?: string } }> }
+    const pack = listed?.packs?.find(item => item?.id === packId)
+    if (!pack?.runtime?.running || typeof pack.runtime.url !== 'string') return null
+    return pack.runtime.url
+  }
+  const pendingResumes = {
+    list: () => pendingResumeQueue.list(),
+    async retry(id: string) {
+      const targetId = typeof id === 'string' ? id.trim() : ''
+      if (!targetId) throw new Error('缺少续接请求 ID。')
+      const entries = await pendingResumeQueue.list()
+      const entry = entries.find(item => item.id === targetId)
+      if (!entry) throw new Error('未找到续接请求：' + targetId)
+      const baseUrl = await runtimeUrlOf(entry.packId)
+      if (!baseUrl) {
+        const next = await pendingResumeQueue.retry(targetId)
+        return { ok: false, error: '整合包 ' + entry.packId + ' 未在运行，续接请求已保留，待该包启动后再发送。', entries: next }
+      }
+      const next = await pendingResumeQueue.retry(targetId, baseUrl)
+      const updated = next.find(item => item.id === targetId)
+      const sent = updated?.status === 'sent'
+      return { ok: sent, error: sent ? null : (updated?.error ?? '续接消息未能发送。'), entries: next }
+    },
+    discard: (id: string) => pendingResumeQueue.discard(id),
+  }
+  // 目录迁移：设置里的 dshHome / dshInstallPath 是唯一来源；旧目录先备份，有包在跑就留着不删。
+  const paths = {
+    migrate: (kind: MigratablePath, target: string) => migratePath({
+      kind,
+      target,
+      current: async () => {
+        const latest = await settings.readStored()
+        return kind === 'dshHome' ? latest.dshHome : latest.dshInstallPath
+      },
+      save: async next => {
+        const latest = await settings.readStored()
+        await settings.save(kind === 'dshHome' ? { ...latest, dshHome: next } : { ...latest, dshInstallPath: next })
+      },
+      isBusy: () => control.isRunning(),
+      launcherDataDir: userData,
+    }),
+  }
   // 启动器级 API 库与「每包勾选」都只认 userData，与具体整合包无关。
   const apiLibraryStore = createApiLibrary(userData)
   const packApis = createPackApis({ userData, registryPath: path.join(userData, 'packs.json'), readSettings: () => settings.readStored(), isPackRunning: packId => control.isPackRunning(packId) })
@@ -152,6 +201,9 @@ export function createLauncherControl(options: {
     ...control,
     apiLibrary,
     packApis,
+    pendingResumeQueue,
+    pendingResumes,
+    paths,
     async execute(request: LauncherControlRequest): Promise<unknown> {
       if (request?.command === 'settings.launchAtLogin') {
         const patch = request.args ?? {}
@@ -197,8 +249,50 @@ export function createLauncherControl(options: {
         if (!path.isAbsolute(dir)) throw new Error('storage.set 的 dir 必须是绝对路径，当前收到：' + dir + '。请改用完整路径，例如 D:\\launcher-data。')
         return storage.set(dir)
       }
+      if (request?.command === 'pending.list') return pendingResumes.list()
+      if (request?.command === 'pending.retry') {
+        const id = request.args?.id
+        if (typeof id !== 'string' || !id.trim()) throw new Error('缺少续接请求 ID：pending retry <id>')
+        return pendingResumes.retry(id)
+      }
+      if (request?.command === 'pending.discard') {
+        const id = request.args?.id
+        if (typeof id !== 'string' || !id.trim()) throw new Error('缺少续接请求 ID：pending discard <id>')
+        return pendingResumes.discard(id)
+      }
+      if (request?.command === 'path.migrate') {
+        const kind = request.args?.kind
+        const target = request.args?.target
+        if (kind !== 'dshHome' && kind !== 'dshInstallPath') throw new Error('path migrate 需要 dshHome 或 dshInstallPath，例如 path migrate dshHome D:\\dsh-home。')
+        if (typeof target !== 'string' || !target.trim()) throw new Error('path migrate 需要一个目标目录：path migrate <dshHome|dshInstallPath> <绝对路径目录>')
+        return paths.migrate(kind, target)
+      }
+      // 先入队、再重启：入队失败就不重启，AI 留下的那句话不会丢。
+      if (request?.command === 'pack.restart' && request.args?.resume !== undefined) {
+        if (!request.packId) throw new Error('缺少整合包 ID：pack restart <pack-id> --resume "…"')
+        const resume = readResumeInput(request.args.resume)
+        const rest = { ...request.args }
+        delete rest.resume
+        const { entry, result } = await enqueueBeforeRestart(
+          { enqueue: input => pendingResumeQueue.enqueue(input), restart: () => control.execute({ ...request, args: rest }) },
+          { packId: request.packId, ...resume },
+        )
+        return { resume: entry, runtime: result }
+      }
       if (request?.command === 'storage.reset') return storage.reset()
       return control.execute(request)
     },
   }
+}
+function readResumeInput(raw: unknown): { prompt: string; sessionId?: string } {
+  if (typeof raw === 'string') {
+    if (!raw.trim()) throw new Error('--resume 需要一段续接内容。')
+    return { prompt: raw }
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('--resume 需要一段续接内容。')
+  const value = raw as Record<string, unknown>
+  const prompt = typeof value.prompt === 'string' ? value.prompt : ''
+  if (!prompt.trim()) throw new Error('--resume 需要一段续接内容。')
+  const sessionId = typeof value.sessionId === 'string' && value.sessionId.trim() ? value.sessionId.trim() : undefined
+  return { prompt, ...(sessionId ? { sessionId } : {}) }
 }

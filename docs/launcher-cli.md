@@ -189,3 +189,49 @@ await ensureLauncherControlSkill({
 packHome, cliPath and userData must be absolute. nodePath is the managed Node executable, never Electron's process.execPath; omit only when node is available on PATH. The helper reads the source through Electron's ASAR-aware filesystem and copies it to a versioned userData/tools/launcher-control-<hash>.cjs path, runnable by external Node. package.json includes the source CLI in packaged files and exposes dsh-launcher-control as a bin entry. Old content-addressed CLI copies are retained so existing pack skills remain runnable until refreshed.
 
 The helper returns {path,status:'installed'|'updated'|'preserved'} for packHome/skills/launcher-control/SKILL.md. Only skills containing its management marker may be updated. Existing custom skills and symlinked skills paths are preserved. Generated commands are JSON argv arrays with exact absolute paths and explicit pack IDs; callers execute entries as process arguments instead of evaluating a shell string. The helper writes only the explicit supplied pack home and launcher userData. Tests use temporary fixture homes.
+
+## 对话自动续接（pending）
+
+AI 在整合包里停/重启之前留下的那句话，先落盘到 <userData>/pending-resumes.json（信封 {version:1,entries}，原子写），等整合包重新就绪后由启动器自动发回该包会话。条目结构见 src/types.ts 的 PendingResumeEntry：{id,packId,sessionId?,prompt,requestId,createdAt,attempts,status,error}，status 为 pending/sent/failed。prompt 不能为空，最长 8000 字符；文件损坏或缺失按空队列处理，不会让命令失败。
+
+~~~sh
+node bin/launcher-control.cjs pending list --json
+node bin/launcher-control.cjs pending list --pack pack-a --json
+node bin/launcher-control.cjs pending retry 8f1c2d
+node bin/launcher-control.cjs pending discard 8f1c2d
+node bin/launcher-control.cjs pack restart pack-a --resume '问题还在，请继续刚才的分析' --session s-42
+~~~
+
+pending list 返回条目数组；--pack 只在本机命令行里过滤（后端仍返回全部）。pending retry 返回 {ok,error,entries}：包没在运行时 ok 为 false，error 说明「整合包 <id> 未在运行，续接请求已保留」，条目留在队列里等下一次启动；包在运行时立即重发，requestId 复用条目里那个，所以重发是幂等的，不会在会话里出现两条消息。pending discard 返回删除后剩下的条目数组，id 不存在时也不报错。
+
+~~~text
+$ node bin/launcher-control.cjs pending list --json
+[{"id":"8f1c2d","packId":"pack-a","prompt":"问题还在，请继续刚才的分析","requestId":"0b6e…","createdAt":1735689600000,"attempts":0,"status":"pending","error":null}]
+~~~
+
+pack restart 带 --resume 时先登记续接请求、再执行原来的重启；入队失败就不重启，避免那句话丢失。返回 {resume, runtime}：resume 是新条目，runtime 是原有的 RuntimeState。没有 --resume 时 pack restart 行为不变；--session 必须与 --resume 一起用，省略时启动器会挑该包唯一 running 的会话，零个或多个都会报中文错误并列出候选。自动发送失败会把条目标成 failed、attempts 加一；连试 3 次仍失败就不再自动重发，手动 pending retry 会把计数清零。
+
+## 目录迁移（path migrate）
+
+把 DSH 数据目录（dshHome）或本体安装目录（dshInstallPath）换到新位置。目标必须是绝对路径，且不能等于当前目录、不能位于当前目录内部、不能是启动器自己的数据目录；这些情况一律中文报错并且不写入任何文件。
+
+~~~sh
+node bin/launcher-control.cjs path migrate dshHome 'D:/dsh-home' --json
+node bin/launcher-control.cjs path migrate dshInstallPath 'D:/dsh-runtime' --json
+~~~
+
+顺序是固定的：校验目标 → 旧目录存在且非空时先把它压进备份区（op 为 path.migrate，备份失败或备份引擎未就绪就整体中止，不拷贝也不删）→ 递归拷贝到新目录（不覆盖已有内容，遇到同名文件中止并清理已拷贝的部分）→ 写入设置 → 只有没有整合包在跑时才删除旧目录。
+
+~~~text
+$ node bin/launcher-control.cjs path migrate dshHome 'D:/dsh-home'
+{
+  "kind": "dshHome",
+  "current": "D:\\dsh-home",
+  "backupId": "20260107T101500-ab12",
+  "removedOld": false,
+  "warning": "有整合包正在运行，旧目录暂未删除：C:\\Users\\me\\.dsh"
+}
+~~~
+
+返回 {kind,current,backupId,removedOld,warning}：current 是写进设置的新路径；backupId 是旧目录的备份条目，没有旧数据时为 null；removedOld 表示旧目录是否已经删除；warning 是中文提示（有包在跑所以保留旧目录，或旧目录删不掉需要手动清理）。迁移过程中不会启动或停止任何整合包。
+

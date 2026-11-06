@@ -8,6 +8,7 @@ const { spawn } = require('node:child_process')
 const HELP = `DSH Launcher control (Node >=20)
   pack list
   pack start|stop|restart <pack-id>
+  pack restart <pack-id> --resume "<prompt>" [--session <session-id>]
   pack config get <pack-id>
   pack config set <pack-id> --port 3081 --port-mode fixed --auto-start true
   settings get
@@ -21,6 +22,10 @@ const HELP = `DSH Launcher control (Node >=20)
   storage info
   storage set <absolute-directory>
   storage reset
+  pending list [--pack <pack-id>]
+  pending retry <id>
+  pending discard <id>
+  path migrate dshHome|dshInstallPath <absolute-directory>
   resource <operation> <pack-id> --args '{...}'
   pack <operation> [pack-id] --args '{...}'
   request <dotted.command> [pack-id] --args '{...}'
@@ -28,11 +33,12 @@ Options: --json --user-data <directory> --launcher <explicit executable>
 Config flags: --port, --port-mode, --run-as-admin, --auto-start, --pinned-at,
               --workspace, --launch-args '["web"]'
 API flags (api add only): --name, --base-url, --protocol, --models, --api-key
+Resume flags: --resume "<prompt>" --session <id> (both with pack restart only), --pack <id> (pending list only)
 Protocols: openai-completions, openai-responses, anthropic-messages
 Set DSH_LAUNCHER_USER_DATA instead of --user-data if desired.
 --launcher starts only the executable supplied, when control is unavailable.
 `
-const FLAG_KEYS = ['user-data','launcher','args','port','port-mode','run-as-admin','auto-start','pinned-at','workspace','launch-args','name','base-url','protocol','models','api-key']
+const FLAG_KEYS = ['user-data','launcher','args','port','port-mode','run-as-admin','auto-start','pinned-at','workspace','launch-args','name','base-url','protocol','models','api-key','resume','session','pack']
 function objectJSON(value) {
   const result = JSON.parse(value)
   if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('--args requires a JSON object')
@@ -51,7 +57,7 @@ function parse(argv) {
   }
   if (flags.help) return { help: true }
   const group = words.shift(), action = words.shift()
-  let command, packId, storageDir, apiRoute, apiEnabled, launchAtLogin
+  let command, packId, storageDir, apiRoute, apiEnabled, launchAtLogin, pendingPackId, pendingId, pathKind, pathTarget
   if (group === 'request') { command = action; packId = words.shift() }
   else if (group === 'pack' && action === 'api') {
     const operation = words.shift()
@@ -82,6 +88,26 @@ function parse(argv) {
     command = 'storage.' + action
     if (!['storage.info','storage.set','storage.reset'].includes(command)) throw new Error('用法：storage info | storage set <绝对路径目录> | storage reset')
     if (command === 'storage.set') { storageDir = words.shift(); if (!storageDir) throw new Error('storage set 需要一个目录参数：storage set <绝对路径目录>') }
+  }
+  else if (group === 'pending') {
+    if (!['list', 'retry', 'discard'].includes(action)) throw new Error('用法：pending list [--pack <id>] | pending retry <id> | pending discard <id>')
+    command = 'pending.' + action
+    if (action === 'list') {
+      if (words.length) throw new Error('Unexpected positional arguments')
+      if (flags.pack !== undefined) pendingPackId = flags.pack
+    } else {
+      pendingId = words.shift()
+      if (!pendingId) throw new Error('pending ' + action + ' 需要一个续接请求 ID')
+    }
+  }
+  else if (group === 'path') {
+    if (action !== 'migrate') throw new Error('用法：path migrate dshHome|dshInstallPath <绝对路径目录>')
+    command = 'path.migrate'
+    pathKind = words.shift()
+    if (!['dshHome', 'dshInstallPath'].includes(pathKind)) throw new Error('path migrate 的迁移目标只能是 dshHome 或 dshInstallPath')
+    pathTarget = words.shift()
+    if (!pathTarget) throw new Error('path migrate 需要一个目标目录：path migrate <dshHome|dshInstallPath> <绝对路径目录>')
+    if (!path.isAbsolute(pathTarget)) throw new Error('path migrate 的目录必须是绝对路径，当前收到：' + pathTarget)
   }
   else if (['pack','settings','resource'].includes(group) && action) { command = (group === 'resource' ? 'pack.resources' : group) + '.' + action; packId = words.shift() }
   else throw new Error('A command is required. Use --help')
@@ -120,6 +146,17 @@ function parse(argv) {
     args.modelIds = String(flags.models).split(',').map(value => value.trim()).filter(Boolean)
     if (args.modelIds.length === 0) throw new Error('--models expects a comma separated model list')
   }
+  if (pendingPackId !== undefined) args.packId = pendingPackId
+  if (pendingId !== undefined) args.id = pendingId
+  if (pathKind !== undefined) { args.kind = pathKind; args.target = path.resolve(pathTarget) }
+  if (flags.pack !== undefined && command !== 'pending.list') throw new Error('--pack 只用于 pending list')
+  if (flags.resume !== undefined) {
+    if (command !== 'pack.restart') throw new Error('--resume 只用于 pack restart <pack-id>')
+    if (!packId) throw new Error('pack restart --resume 需要一个整合包 ID')
+    if (!String(flags.resume).trim()) throw new Error('--resume 需要一段续接内容')
+    args.resume = { prompt: flags.resume, ...(flags.session ? { sessionId: flags.session } : {}) }
+  }
+  if (flags.session !== undefined && flags.resume === undefined) throw new Error('--session 必须与 --resume 一起使用')
   return { flags, request: { command, ...(packId ? { packId } : {}), ...(Object.keys(args).length ? { args } : {}) } }
 }
 function defaultUserData() {
@@ -164,6 +201,10 @@ async function main() {
       await new Promise(resolve => setTimeout(resolve, 200))
       try { result = await invoke(userData, request); break } catch (next) { if (!next.unavailable || Date.now() >= deadline) throw next }
     }
+  }
+  if (request.command === 'pending.list' && request.args && request.args.packId) {
+    const wanted = request.args.packId
+    if (Array.isArray(result)) result = result.filter(entry => entry && entry.packId === wanted)
   }
   process.stdout.write(JSON.stringify(result ?? null, null, flags.json ? 0 : 2) + '\n')
 }
