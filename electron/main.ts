@@ -10,6 +10,9 @@ import type { AppSettings, OfficialPackRelease, OfficialPackStatus, PackInstallR
 import { ACP_RUNTIME_DIRNAME, CREDENTIALS_LOCK_DIRNAME, createAiInstaller, healCredentialsLock, type AiInstaller } from './ai-install'
 import { registerAppearanceProtocol, registerAppearanceScheme } from './appearance-protocol'
 import { registerBackupsIpc } from './backups-ipc'
+import { registerLauncherPluginsIpc } from './launcher-plugins-ipc'
+import { createWorkspaceSkillsService } from './workspace-skills'
+import { registerWorkspaceSkillsIpc } from './workspace-skills-ipc'
 import { createApplicationAddonManager, type ApplicationAddonManager } from './application-addons'
 import { applyWindowMode, createMainWindow, createRendererChannel } from './app-window'
 import { createCatalogSyncService, type CatalogSyncService } from './catalog-sync'
@@ -1191,6 +1194,26 @@ app.whenReady().then(async () => {
     app.quit()
     return
   }
+  // 启动器插件：目录可能不存在，先建出来再装配；代码插件最多跑 10 秒，不挡开窗。
+  const pluginsDirectory = path.join(app.getPath('userData'), 'launcher-plugins')
+  mkdirSync(pluginsDirectory, { recursive: true })
+  const launcherPlugins = registerLauncherPluginsIpc({
+    ipcMain,
+    directory: pluginsDirectory,
+    openFolder: async directory => {
+      mkdirSync(directory, { recursive: true })
+      await shell.openPath(directory)
+    },
+  })
+  void launcherPlugins.refresh()
+  // 工作区 skill 的根是 DSH 家目录（<dshHome>/skills 与 <dshHome>/storages/workspace.json），
+  // 家目录可在设置里改，所以每次调用都取当前值而不是启动快照。
+  let workspaceSkillsHome = startupSettings.dshHome
+  registerWorkspaceSkillsIpc({
+    ipcMain,
+    service: createWorkspaceSkillsService({ home: () => workspaceSkillsHome }),
+    revealPath: target => shell.showItemInFolder(target),
+  })
   // 启动时按设置校正一次登录项：缺省 false 会主动注销历史遗留的旧注册项。
   syncLaunchAtLogin(startupSettings, services.loginRegistration)
   controlServer = await createLauncherControlServer({ userData: app.getPath('userData'), execute: request => services!.launcherControl(request) })
@@ -1205,6 +1228,8 @@ app.whenReady().then(async () => {
     storage: { ...storageController, relaunch: relaunchLauncher },
     getWindow,
     setWindowMode: (mode: WindowMode) => applyWindowMode(mainWindow, mode),
+    // 家目录换了以后工作区 skill 必须跟着换根，否则会继续列旧目录。
+    onSettingsSaved: saved => { workspaceSkillsHome = saved.dshHome },
   })
   await services.profilePoolReady
   void services.packControl.autoStart()

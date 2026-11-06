@@ -106,6 +106,8 @@ export interface IpcDependencies {
   storage: StorageController & { relaunch: () => void }
   getWindow: () => BrowserWindow | null
   setWindowMode: (mode: WindowMode) => void
+  /** 设置落盘后的副作用钩子（如工作区 skill 换根）。 */
+  onSettingsSaved?: (settings: AppSettings) => void
 }
 
 export function registerIpcHandlers(deps: IpcDependencies): void {
@@ -162,6 +164,7 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
     const saved = await settings.save(next)
     // 自启开关保存即生效：与整合包 autoStart 无关，只看 settings.launchAtLogin。
     syncLaunchAtLogin(saved, deps.loginRegistration)
+    deps.onSettingsSaved?.(saved)
     return saved
   })
   ipcMain.handle(IPC.dshDetect, () => installer.detectDsh())
