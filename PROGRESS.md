@@ -53,8 +53,23 @@
 - 解析优先级（命中即返回）：`--data-dir=<绝对路径>` / `--user-data-dir=<绝对路径>`（也支持空格形式，`--data-dir` 优先）→ EXE 同级 `launcher-storage.json` 的 `{"dataDir":"…"}` → 便携版 `PORTABLE_EXECUTABLE_DIR/launcher-data` → 安装版 `dirname(execPath)/launcher-data` → 开发态 `%APPDATA%/dsh-launcher`（保持 vite 传给 dev 的隔离参数有效）。
 - `app.setPath('userData')` 与 `app.setPath('sessionData', <数据目录>/browser-data)` 都在 `requestSingleInstanceLock` 之前执行，因此单实例锁、log、CLI 元数据都跟着所选目录走；建目录失败退回 `%APPDATA%/dsh-launcher` 并给出中文警告，不阻断启动。
 - 切换目录只写指针文件 `launcher-storage.json`，需重启生效；`relaunchLauncher` 用 `PORTABLE_EXECUTABLE_FILE || process.execPath` 并剔除 `--data-dir`/`--user-data-dir`，避免旧参数把新目录覆盖回去。
-- 界面：设置页「DSH版本」tab 末尾的「存储位置」区块提供当前路径与复制、来源说明、指针文件行、警告与重启提示、选择文件夹／接管旧版数据（把 `%APPDATA%/dsh-launcher` 作为默认目录带入选择框）／恢复默认位置。
+- 界面：设置页「存储位置」区块（原挂在「DSH版本」tab 末尾，2026-11-06 迁到新的「设置」tab）提供当前路径与复制、来源说明、指针文件行、警告与重启提示、选择文件夹／接管旧版数据（把 `%APPDATA%/dsh-launcher` 作为默认目录带入选择框）／恢复默认位置。
 - CLI：`storage info` / `storage set <dir>` / `storage reset`，支持 `--user-data` 指定要查询的实例；`storage set` 写指针并返回 `restartRequired: true`。
 - 实机验收（2026-11-05，Windows）：新便携包复制到 `D:\DSH-Launcher\DSH-Launcher.exe`（92,544,598 字节）运行后，同级生成 `launcher-data`（packs.json、launcher-control.json、settings.json、browser-data 等），`storage info` 报 `source: "portable"`；`storage set` 写指针后重启，`source: "pointer"` 且数据落到新目录；两个不同数据目录的实例可同时运行；强杀后再次启动可正常接管。
 - 回归：`npx tsc --noEmit` 通过，`npm run build` 通过，`npm test` 为 **1027 passed、11 skipped（104 文件通过、9 跳过）**；storage 相关定向用例 46 例全绿。
 - 交付副本：`D:\DSH-Launcher\DSH-Launcher.exe`（目录内不要再手写 `--user-data-dir`，默认即 EXE 同级）。构建产物仍不可在 `D:\engine\DSH` 树内直接运行，见上一节。
+
+## 设置主页 tab 与启动器级 API 库（2026-11-06）
+
+- 顶栏新增第 7 个 tab「设置」（`src/lib/nav.ts` 的 HOME_TABS，`HomeTab` 加 `'settings'`）：外观 → 启动器 → 存储位置 → API 库 → 网络 → 关于；旧的「启动器设置」弹窗 `SettingsDialog` 与其 `settingsOpen` 状态整体删除，齿轮入口改为切到该 tab，避免两套设置并存。
+- 启动器图标 = 界面/窗口图标，复用现有的 `appearance.logo`（运行时可换）；EXE 文件图标需重新打包签名，不在本轮范围。
+- 开机自启语义拆分：`AppSettings.launchAtLogin` 只负责「启动器随 Windows 登录启动」（Run 项 `electron.app.DSH Launcher`，参数 `--background`，路径优先 `PORTABLE_EXECUTABLE_FILE`）；整合包自己的 `autoStart` 只在启动器起来后由 `packControl.autoStart()` 拉起对应包。原来「任一包 autoStart 为真就注册登录项」的 `onAutoStartChange` 三条调用已删除；`launchAtLogin` 一律默认关，不做旧数据迁移。
+- 启动器级 API 库（`electron/api-library.ts`，`<userData>/api-library.json` v1 + 密钥进 `<userData>/.credentials.yaml`）：库里登记一次，再在「整合包配置 → API」按包勾选授予。授予记录在 `<userData>/pack-api-grants.json`（`{version,grants,errors}`）。
+- 唯一来源语义：勾选后由启动器把 provider 写进该包自己的 `settings.yaml`、把密钥写进该包的 `.credentials.yaml`；库条目改名称/端点/协议/模型会重新同步进所有已授予的包；改 route 名按 `originalRoute` 语义把 provider 与包侧密钥一起迁移；删库条目级联撤销所有已授予包的 provider 与包侧密钥。组合点在 `electron/launcher-control.ts` 的 `apiLibrary` facade，`api-library.ts` 与 `pack-apis.ts` 互不 import，IPC 与 CLI 走同一实现。
+- 安全边界：停用一个从未授予过的 route 是 no-op（不碰用户手配的 provider）；包内同步失败回滚授予记录并把原因记进 `errors[packId]`，可经 `pack api list <packId>.error` 读到；`restartRequired` 只在「本次真的改了授予且该包正在运行」时为真，`getState` 恒为 false，不再每次打开 API 子页都挂重启横幅。
+- CLI 新增：`api list` / `api add <route> --name --base-url --protocol --models [--api-key]` / `api remove <route>`（级联撤销）/ `pack api list <pack-id>` / `pack api enable|disable <pack-id> <route>` / `settings launch-at-login [on|off]`，文档见 `docs/launcher-cli.md`。
+- 回归：`npm run build` 通过（`dist-electron/preload.mjs` 18.63 kB）；`npm test` **1073 passed / 11 skipped（112 文件通过、9 跳过）**；`npx tsc --noEmit` 通过。新增用例覆盖 api-library 7、pack-apis 11（含未授予 no-op、restartRequired 真值语义）、launch-at-login 7、launcher-control-api-cli 7（含库改元数据跟随、改名迁移、删除级联且未授予包两文件仍 ENOENT）、ipc-launch-at-login 2，前端 SettingsHomeView 3 / ApiLibraryCard 4 / PackControlDialog 5。
+- 实机验收（2026-11-06，Windows，便携单文件 EXE 从 `D:\DML-Smoke2\` 与 `D:\DSH-Launcher\` 两处各跑一次）：同级自建 `launcher-data`，`storage info` 报 `source:"portable"`，`pack list` 返回默认 web 包；`api add smoke-openai` → `pack api enable web smoke-openai` 后，该包家目录（本例 `C:\Users\kewu0\.dsh`）`settings.yaml` 出现 provider 且 `.credentials.yaml` 出现 `SMOKE_OPENAI_API_KEY`；改库端点/协议/模型后该 provider 跟着变；`request api.save` 改名到 `smoke-two` 后 provider 与密钥名一起迁移、旧密钥消失、grants 跟着改名；`api remove smoke-two` 后 `settings.yaml` 回到 `{ llm-pi-ai: {} }`、包侧密钥清空、grants 为 `{"web":[]}`；`pack api disable web never-granted` 返回 `enabled:[]` 且不碰包；`settings launch-at-login on` 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写入 `electron.app.DSH Launcher : "D:\DML-Smoke2\DSH-Launcher.exe" --background`，`off` 后该值消失且其它自启项未受影响。
+- 交付副本：`D:\DSH-Launcher\DSH-Launcher.exe`（92,561,829 字节，SHA256 `A09E039AE8116AA9AC803B266F8F360EEC1F97B47F27DE29FA565947A25187C4`，目录内只有这一个文件）；该副本已实机启动验证并清空了测试产生的 `launcher-data`，首次双击会重新生成。
+- 未验证：真实 UAC 提权启动、Windows 登录后自启的实际触发（只验证了注册表项写入与移除）、以及打包 EXE 的窗口截图（工具截屏对 Electron 窗口取不到画面）。
+
