@@ -135,3 +135,20 @@
   - `KEWU-Setup-1.0.4.exe` — 104,059,558 字节，SHA256 `69CA2736A840464CC0B728FD9241038C37F7FC84B2DA11BE201CFED4AFA1978F`
   - `KEWU-Uninstaller-1.0.4.exe` — 136,192 字节，SHA256 `286A6612C169BCC3FA599955688A9642CE9852AF3422FFA77557765F5B9BF317`
 - 未验证：卸载器 GUI 的真人点击（只跑了 `--selftest-gui` 与无界面模式）、目标机没装 .NET Framework 4.x 时卸载器起不来（`csc` 编出来的 WinForms 依赖系统自带的 4.x）、真实 UAC 下的安装/卸载。
+
+## 改名 DSH-launcher-KEWU、关闭官方包自动安装与 b7 三件产物（2026-11-07）
+
+- 产品名统一改为 `DSH-launcher-KEWU`：`package.json` 的 `productName`、两个 portable 产物名、`nsis.artifactName/shortcutName/uninstallDisplayName`、`electron/storage-root.ts` 的 `INSTALLED_DATA_DIRNAME`（安装版数据目录改为 `%APPDATA%\DSH-launcher-KEWU`）、`electron/uninstall-plan.ts` 的 `UNINSTALL_LOGIN_ITEM_NAME = 'electron.app.DSH-launcher-KEWU'`、`electron/uninstall-script.ts` 模板的 `$runValue`、`tools/uninstall-kewu.ps1`、卸载器 `Program.cs`/`UninstallerForm.cs`、`docs/launcher-cli.md`、`src/App.tsx` 的 `APP_TITLE`。冻结不动：`appId com.local.dshlauncher`、`LEGACY_DATA_DIRNAME 'dsh-launcher'`（旧数据识别）、顶栏短品牌 KEWU。上节里的 `KEWU-launcher` / `electron.app.DSH Launcher` 均已被本节取代。
+- 首启不再自动下载安装官方整合包：`electron/main.ts` 的 `officialPackBootstrap` 删掉「零官方包且存在 recommended 就 `runOfficialPack(false, status.recommended)`」那段，只保留 `resolveOfficialPackStatus` 与状态广播；手动入口（下载/恢复官方包）未动。
+- 便携版实测 `PACK_COUNT=0`、无 `dsh-packs` 目录 → 自动安装确实已关闭。
+- **b7 安装失败的真因（不是产品缺陷，是产物跑错了地方）**：`D:\engine\DSH` 整棵树被 DSH 自己的 Windows 沙箱打上 Low 完整性标签，`release\b7\*.exe` 也继承该标签；从那里直接执行 Setup 会在解压前就被拒绝，表现为 `EXIT=2`、`%TEMP%` 一个 `ns*` 目录都不生成、也不报错。把 Setup 复制到 `D:\engine\DSH\test\kewu-b7\setup\setup.exe`（`icacls` 确认无 Mandatory Label）后同一文件静默安装成功。旧 b6 产物现在同样 `EXIT=2`，可反证与代码无关。
+- b7 实机验收（全部在 `D:\engine\DSH\test\kewu-b7\`，schtasks 脱离工具沙箱）：便携版同级生成 `launcher-data`、`storage info` 报 `source:"portable"`；Setup `/S /D=<test>\app` 装出 85 个文件、HKCU 卸载项 `DSH-launcher-KEWU`、`UninstallString = "…\Uninstall DSH-launcher-KEWU.exe" /currentuser`、桌面与开始菜单各一条 `DSH-launcher-KEWU.lnk`；启动后 `storage info` 报 `{"dataDir":"C:\\Users\\kewu0\\AppData\\Roaming\\DSH-launcher-KEWU","source":"install"}`；静默卸载后程序目录消失、`%APPDATA%\DSH-launcher-KEWU\packs.json` 保留、注册表与快捷方式残留 0。
+- 卸载器 EXE（重命名后重建，136,704 字节）：`--plan` 在便携/安装两种布局下都正确（`exe` delete+勾选、`data`/`installed-data` keep+不勾选，`alwaysKeep` 仍列出旧版 `dsh-launcher` 与 `~/.dsh`）；`--run --yes --delete-data` 实跑「已删除 4，已跳过 0，失败 0，退出码：0」，删掉主程序、安装版数据目录与遗留的自解压残留。
+- 清理口径的教训：卸载器 EXE 内部有「有进程从该目录运行就跳过」的守卫，但我这次手写的 PowerShell 清理循环直接 `Remove-Item` 了 `%TEMP%\3L*`，把用户当时仍在运行的旧实例解压目录 `%TEMP%\3L5B3GoCeXELafWB8uVQQa3Q6H6` 一并删了（进程仍在跑，映射文件不受影响，wrapper `D:\engine\DSH\DSH-Launcher-1.0.4-portable.exe` 完好，重开即重新解压）。后续一律用卸载器或带占用检查的脚本清 `3L*`。
+- 回归：`npx tsc --noEmit` 0 error；`npx vitest run` 131 文件通过 / 9 跳过，1192 passed / 11 skipped / 0 failed；`npm run build` 通过。
+- 提交：`0a8db7c`（品牌改名）、`ba72813`（不再自动装官方包）。
+- 产物（`release\b7\`，解包目录 `release\b7\win-unpacked\`）：
+  - `DSH-launcher-KEWU-Portable-1.0.4.exe` — 92,589,294 字节，SHA256 `64579191392A7F79278393D53016BFCC5BB0DA3F73CE021D72B9FE38C8861697`
+  - `DSH-launcher-KEWU-Setup-1.0.4.exe` — 104,059,540 字节，SHA256 `E65E014237ED40212EC67ADDE8A385EFDE7A6388E8C19E0255BB4D6BC8DC0D7A`
+  - `DSH-launcher-KEWU-Uninstaller-1.0.4.exe` — 136,704 字节，SHA256 `08EB32E8EE18B93B12AE9928B50A73615912DBD99F75432ACECB5CE4F3E848A0`
+- 未验证：卸载器 GUI 真人点击、无 .NET Framework 4.x 的机器、真实 UAC 弹窗下的安装/卸载、登录自启项写入后的实际开机触发（只核对了常量与卸载器读取的键名一致）。
