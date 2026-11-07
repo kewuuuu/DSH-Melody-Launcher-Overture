@@ -6,6 +6,7 @@ import { ApiLibraryCard } from '../components/ApiLibraryCard'
 import { BackupManager } from '../components/backup/BackupManager'
 import { PathMigrationSection } from '../components/path-migration/PathMigrationSection'
 import { StorageLocationCard } from '../components/StorageLocationCard'
+import { UninstallPanel } from '../components/uninstall/UninstallPanel'
 import { GITHUB_MIRROR_PRESETS } from '../constants'
 import {
   ACCENT_PRESETS,
@@ -330,6 +331,8 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
           </Section>
 
           <StorageLocationCard />
+
+          <UninstallPanel />
 
           <ApiLibraryCard onChanged={() => { /* 包配置页每次进入都会重新读取，这里无需广播。 */ }} />
 

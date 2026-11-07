@@ -1,0 +1,141 @@
+/* 「清理与卸载」区块：删除/保留两组列表 + 三步动作。只用全局变量，跟随亮/暗主题。 */
+
+.uninstall-group + .uninstall-group { margin-top: 14px; }
+
+.uninstall-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  color: var(--quiet);
+  font-size: 11.5px;
+}
+
+.uninstall-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.uninstall-row {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  font-size: 12px;
+}
+
+.uninstall-row.is-keep { border-style: dashed; }
+
+.uninstall-row-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink);
+}
+
+.uninstall-row-main strong { font-size: 12.5px; font-weight: 600; }
+.uninstall-row-main span { font-variant-numeric: tabular-nums; }
+
+.uninstall-row code {
+  color: var(--quiet);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.uninstall-row-meta {
+  margin: 0;
+  color: var(--quiet);
+  font-size: 11px;
+}
+
+.uninstall-row-reason {
+  margin: 0;
+  color: var(--amber);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.uninstall-empty { margin: 10px 0 0; color: var(--quiet); font-size: 12px; }
+
+.uninstall-warnings {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: 11.5px;
+  line-height: 1.7;
+  list-style: none;
+}
+
+.uninstall-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 14px;
+  font-size: 12px;
+}
+
+.uninstall-summary div { display: flex; align-items: baseline; gap: 6px; }
+.uninstall-summary span { color: var(--quiet); }
+.uninstall-summary strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+.uninstall-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.uninstall-actions button { min-height: 32px; padding: 0 12px; font-size: 12.5px; }
+
+.uninstall-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.uninstall-confirm span { flex: 1 1 220px; line-height: 1.7; }
+.uninstall-confirm strong { font-variant-numeric: tabular-nums; }
+.uninstall-confirm button { min-height: 30px; padding: 0 12px; font-size: 12px; }
+.uninstall-confirm .danger-button { border-color: var(--danger); }
+
+.uninstall-script {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 11.5px;
+}
+
+.uninstall-script code { flex: 1 1 260px; color: var(--quiet); overflow-wrap: anywhere; }
+.uninstall-script button { min-height: 30px; padding: 0 12px; font-size: 12px; }
+
+.uninstall-started {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  color: var(--quiet);
+  font-size: 12px;
+}
