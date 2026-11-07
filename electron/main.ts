@@ -1017,16 +1017,12 @@ function createServices(): Services {
   }
 
   /**
-   * 启动核对两段式：
-   * - 本机**一个官方包都没有**（全新用户）→ 自动导入推荐版本，保证开箱可用；
-   * - 已有官方包但存在更新版本 → **只写状态并通知渲染层**挂「有新版本」，不静默拉几百 MB。
+   * 启动核对：**首启不自动安装官方整合包**，只解析状态并广播给渲染层，让「有新版本」提示继续工作。
+   * 是否安装由用户在整合包页手动触发（restoreOfficialPack / installOfficialPackVersion）。
    */
   const officialPackBootstrap = async () => {
     try {
-      const status = await resolveOfficialPackStatus(true)
-      if (status.installedVersions.length === 0 && status.recommended) {
-        await runOfficialPack(false, status.recommended)
-      }
+      await resolveOfficialPackStatus(true)
       events.officialPackStatus(await resolveOfficialPackStatus(false))
     } catch (error) {
       events.output('plugin', 'error', `官方整合包自动获取失败：${error instanceof Error ? error.message : String(error)}`)
