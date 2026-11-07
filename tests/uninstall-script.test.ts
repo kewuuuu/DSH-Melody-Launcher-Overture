@@ -34,6 +34,9 @@ describe('uninstall script template', () => {
     expect(script).toContain('这是旧版启动器数据，按规则保留')
     expect(script).toContain('DSH 的家目录')
     expect(script).toContain("'3L*'")
+    // 有进程正从自解压目录里跑（例如另一个启动器实例）就跳过，别把别人的实例删崩
+    expect(script).toContain('function Test-InUse')
+    expect(script).toContain('if (Test-InUse $residue.FullName)')
   })
 
   it('没有危险的删除动作：Remove-Item 不带通配符，也没有 del/rd 直接删', () => {

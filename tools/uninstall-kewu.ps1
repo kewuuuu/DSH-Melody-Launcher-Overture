@@ -76,6 +76,21 @@ function Test-ParentOf([string]$parent, [string]$child) {
   return $child.TrimEnd('\').ToLowerInvariant().StartsWith($prefix)
 }
 
+function Test-InUse([string]$target) {
+  # 有进程正住在目录里（例如另一个便携版启动器实例）时不能删：删了那个实例随时会崩。
+  try {
+    foreach ($process in Get-Process -ErrorAction SilentlyContinue) {
+      $path = $null
+      try { $path = $process.Path } catch { $path = $null }
+      if (-not $path) { continue }
+      if ((Test-SamePath $path $target) -or (Test-ParentOf $target $path)) { return $true }
+    }
+  } catch {
+    return $false
+  }
+  return $false
+}
+
 function Get-TreeSize([string]$target) {
   if (-not $target -or -not (Test-Path -LiteralPath $target)) { return [int64]0 }
   try {
@@ -178,6 +193,10 @@ if ($env:TEMP -and (Test-Path -LiteralPath $env:TEMP)) {
   $tempResidues = @(Get-ChildItem -LiteralPath $env:TEMP -Filter '3L*' -Force -ErrorAction SilentlyContinue)
 }
 foreach ($residue in $tempResidues) {
+  if (Test-InUse $residue.FullName) {
+    [void]$keepSteps.Add([pscustomobject]@{ Label = '便携版自解压残留'; Path = $residue.FullName; Reason = '有进程正从这个目录运行（可能是另一个启动器实例），跳过删除' })
+    continue
+  }
   [void]$deleteSteps.Add([pscustomobject]@{ Label = '便携版自解压残留'; Path = $residue.FullName; Kind = 'directory' })
 }
 if ($tempResidues.Count -gt 0) {
