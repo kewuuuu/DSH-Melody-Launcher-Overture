@@ -21,3 +21,6 @@ design-skills/
 
 # 出包体积实测的临时输出目录（--config.directories.output 指到这里，量完删）
 /release-*-probe*/
+
+# 卸载程序的 csc 产物：scripts/build-uninstaller.ps1 每次本地生成，不进版本库。
+tools/uninstaller/bin/

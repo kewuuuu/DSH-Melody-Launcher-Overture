@@ -41,13 +41,15 @@ Resource kinds are plugins, skills, presets. resource <operation> <id> maps to p
 
 ## Storage location
 
-The packaged launcher keeps all of its data in a launcher-data directory next to its own executable: <EXE directory>/launcher-data (the portable build uses PORTABLE_EXECUTABLE_DIR, so a portable EXE carries its data in its own folder). packs.json, launcher settings, the plugin store and the managed DSH runtime all live there, and Chromium's cache is isolated in launcher-data/browser-data. Two launchers in different folders on the same machine therefore never share packs or a single-instance lock. A development build (not packaged) keeps the historical <appData>/dsh-launcher directory and cannot switch it.
+A portable build keeps all of its data in a launcher-data directory next to its own executable: <EXE directory>/launcher-data (it uses PORTABLE_EXECUTABLE_DIR, so a portable EXE carries its data in its own folder). packs.json, launcher settings, the plugin store and the managed DSH runtime all live there, and Chromium's cache is isolated in launcher-data/browser-data. Two portable launchers in different folders on the same machine therefore never share packs or a single-instance lock.
+
+An installed build (the NSIS setup) puts its data in <appData>/KEWU-launcher instead, so upgrading or uninstalling the program never touches packs and settings; %APPDATA%/dsh-launcher stays reserved for the historical launcher and is never reused. A development build (not packaged) keeps that historical <appData>/dsh-launcher directory and cannot switch it.
 
 Resolution order, first match wins:
 
 1. --data-dir=<absolute-directory> or --data-dir <absolute-directory> on the launcher command line (a relative path is ignored with a warning). Electron's --user-data-dir is honored at the same level when --data-dir is absent, which is how a development launcher keeps the isolation vite hands it; --data-dir wins when both are present because it is the launcher's own switch.
 2. <EXE directory>/launcher-storage.json containing {"dataDir":"<absolute-directory>"} (a corrupt file is ignored with a warning).
-3. <EXE directory>/launcher-data.
+3. <EXE directory>/launcher-data for a portable build, <appData>/KEWU-launcher for an installed one.
 
 Switching the data directory writes that pointer file, and requires a launcher restart to take effect. The launcher UI exposes the same switch through launcher:storage:choose|reset|relaunch, which use a native directory picker. launcher:storage:choose takes an optional defaultPath (for example %APPDATA%/dsh-launcher, to take over legacy data in one click); it only positions the picker, a relative or empty value is ignored, and it is never written to the pointer file. The CLI is a separate Node process with no access to Electron dialogs, so it only writes the pointer file:
 

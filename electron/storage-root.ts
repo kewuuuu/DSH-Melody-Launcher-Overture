@@ -26,6 +26,8 @@ export const STORAGE_POINTER_FILENAME = 'launcher-storage.json'
 export const STORAGE_BROWSER_DATA_DIRNAME = 'browser-data'
 /** 旧版启动器固定的数据目录名（%APPDATA% 下的 dsh-launcher）。 */
 export const LEGACY_DATA_DIRNAME = 'dsh-launcher'
+/** 安装版（NSIS 装到用户目录）的数据目录名：压进 %APPDATA%，升级和卸载都不会连坐程序目录。 */
+export const INSTALLED_DATA_DIRNAME = 'KEWU-launcher'
 
 export interface StorageResolution {
   dataDir: string
@@ -86,12 +88,12 @@ function exeDirectory(options: { execPath: string; env: Record<string, string | 
   return portable ? portable : path.dirname(options.execPath)
 }
 
-/** EXE 决定的默认数据目录：portable/安装版落在 EXE 旁，开发态保持 %APPDATA% 下的老位置。 */
+/** EXE 决定的默认数据目录：portable 落在 EXE 旁，安装版落在 %APPDATA%，开发态保持老位置。 */
 function defaultLocation(options: ResolveStorageOptions): { dataDir: string; source: 'portable' | 'install' | 'development' } {
   if (!options.isPackaged) return { dataDir: path.join(options.appDataPath, LEGACY_DATA_DIRNAME), source: 'development' }
   const portable = options.env.PORTABLE_EXECUTABLE_DIR?.trim()
   if (portable) return { dataDir: path.join(portable, STORAGE_DATA_DIRNAME), source: 'portable' }
-  return { dataDir: path.join(path.dirname(options.execPath), STORAGE_DATA_DIRNAME), source: 'install' }
+  return { dataDir: path.join(options.appDataPath, INSTALLED_DATA_DIRNAME), source: 'install' }
 }
 
 type PointerParse = { dataDir: string } | { error: string }

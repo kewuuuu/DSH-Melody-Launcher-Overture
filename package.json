@@ -89,9 +89,32 @@
     "win": {
       "icon": "build/icon.ico",
       "target": [
-        "portable"
+        "portable",
+        "nsis"
       ],
-      "artifactName": "DSH-Launcher-${version}-portable.${ext}"
+      "artifactName": "KEWU-Portable-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "KEWU-Portable-${version}.${ext}"
+    },
+    "nsis": {
+      "artifactName": "KEWU-Setup-${version}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "DSH启动器 KEWU",
+      "uninstallDisplayName": "DSH启动器：KEWU",
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "runAfterFinish": true
     }
   }
 }

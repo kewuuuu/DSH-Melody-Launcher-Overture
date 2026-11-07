@@ -59,11 +59,11 @@ describe('resolveStorage', () => {
     expect(resolution.warning).toBeNull()
   })
 
-  it('打包但非 portable（安装版）同样落在 EXE 旁，来源是 install', () => {
-    const { options, exeDir } = fixture()
+  it('打包但非 portable（安装版）落在 %APPDATA% 下，不再压进程序目录', () => {
+    const { options, exeDir, appDataPath } = fixture()
     const resolution = resolveStorage(options)
     expect(resolution.source).toBe('install')
-    expect(resolution.dataDir).toBe(path.join(exeDir, 'launcher-data'))
+    expect(resolution.dataDir).toBe(path.join(appDataPath, 'KEWU-launcher'))
     expect(resolution.portableDir).toBe(exeDir)
   })
 
