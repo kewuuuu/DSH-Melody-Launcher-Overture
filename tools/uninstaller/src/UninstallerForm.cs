@@ -39,12 +39,14 @@ namespace KewuUninstaller
             _selfPath = selfPath;
             _log = LogSink.Open(selfDir, false);
 
+            // AutoScaleMode.None：本窗体的坐标全由代码按 96 DPI 手工算，交给 WinForms 再按 DPI 缩放
+            // 会让子控件的坐标与 ClientSize 脱节（实测高 DPI 下底部按钮被推出窗口），统一不缩放。
+            AutoScaleMode = AutoScaleMode.None;
             Text = "DSH-launcher-KEWU 卸载程序";
-            ClientSize = new Size(760, 620);
-            MinimumSize = new Size(660, 520);
-            StartPosition = FormStartPosition.CenterScreen;
             Font = SystemFonts.MessageBoxFont;
-            AutoScaleMode = AutoScaleMode.Dpi;
+            ClientSize = new Size(780, 640);
+            MinimumSize = new Size(700, 560);
+            StartPosition = FormStartPosition.CenterScreen;
 
             BuildLayout();
             LogLine("DSH-launcher-KEWU 卸载程序已启动。");
@@ -67,40 +69,52 @@ namespace KewuUninstaller
             title.Location = new Point(16, 12);
             top.Controls.Add(title);
 
+            // 路径区与右侧按钮都用停靠布局：手算的右边界坐标在窗口被缩放时会落到窗口外面。
+            Panel fields = new Panel();
+            fields.Dock = DockStyle.Fill;
+            fields.Padding = new Padding(16, 0, 0, 0);
+
             Label exeCaption = new Label();
             exeCaption.Text = "启动器 EXE：";
             exeCaption.AutoSize = true;
-            exeCaption.Location = new Point(16, 56);
-            top.Controls.Add(exeCaption);
+            exeCaption.Location = new Point(0, 56);
+            fields.Controls.Add(exeCaption);
 
             _txtExe.ReadOnly = true;
-            _txtExe.Location = new Point(112, 52);
-            _txtExe.Width = 508;
+            _txtExe.Location = new Point(96, 52);
+            _txtExe.Width = 560;
             _txtExe.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            top.Controls.Add(_txtExe);
+            fields.Controls.Add(_txtExe);
 
             Label dataCaption = new Label();
             dataCaption.Text = "数据目录：";
             dataCaption.AutoSize = true;
-            dataCaption.Location = new Point(16, 82);
-            top.Controls.Add(dataCaption);
+            dataCaption.Location = new Point(0, 82);
+            fields.Controls.Add(dataCaption);
 
             _txtData.ReadOnly = true;
-            _txtData.Location = new Point(112, 78);
-            _txtData.Width = 508;
+            _txtData.Location = new Point(96, 78);
+            _txtData.Width = 560;
             _txtData.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            top.Controls.Add(_txtData);
+            fields.Controls.Add(_txtData);
+
+            Panel rescanHost = new Panel();
+            rescanHost.Dock = DockStyle.Right;
+            rescanHost.Width = 132;
+            rescanHost.Padding = new Padding(0, 52, 16, 0);
 
             _btnRescan.Text = "重新扫描";
-            _btnRescan.Size = new Size(100, 30);
-            _btnRescan.Location = new Point(640, 52);
-            _btnRescan.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnRescan.Dock = DockStyle.Top;
+            _btnRescan.Height = 32;
             _btnRescan.Click += delegate { Rescan(); };
-            top.Controls.Add(_btnRescan);
+            rescanHost.Controls.Add(_btnRescan);
+
+            top.Controls.Add(fields);
+            top.Controls.Add(rescanHost);
 
             Panel keep = new Panel();
             keep.Dock = DockStyle.Top;
-            keep.Height = 62;
+            keep.Height = 68;
             keep.Padding = new Padding(16, 2, 16, 2);
 
             Label keepTitle = new Label();
@@ -108,12 +122,12 @@ namespace KewuUninstaller
             keepTitle.Font = new Font(Font.FontFamily, 9f, FontStyle.Bold);
             keepTitle.AutoSize = true;
             keepTitle.Dock = DockStyle.Top;
-            keep.Controls.Add(keepTitle);
-
+            // 先加 Fill、再加 Top：WinForms 按相反顺序停靠，Fill 最后加会把 Top 压住（实测标题与正文重叠）。
             _keepLabel.AutoSize = false;
             _keepLabel.Dock = DockStyle.Fill;
             _keepLabel.ForeColor = SystemColors.GrayText;
             keep.Controls.Add(_keepLabel);
+            keep.Controls.Add(keepTitle);
 
             Panel itemsHost = new Panel();
             itemsHost.Dock = DockStyle.Top;
@@ -153,29 +167,37 @@ namespace KewuUninstaller
 
             Panel bottom = new Panel();
             bottom.Dock = DockStyle.Bottom;
-            bottom.Height = 46;
+            bottom.Height = 52;
 
             _logPathLabel.AutoSize = false;
-            _logPathLabel.Dock = DockStyle.Left;
-            _logPathLabel.Width = 420;
+            _logPathLabel.Dock = DockStyle.Fill;
             _logPathLabel.TextAlign = ContentAlignment.MiddleLeft;
             _logPathLabel.Padding = new Padding(16, 0, 0, 0);
             _logPathLabel.ForeColor = SystemColors.GrayText;
-            bottom.Controls.Add(_logPathLabel);
 
-            _btnClose.Text = "关闭";
-            _btnClose.Size = new Size(88, 30);
-            _btnClose.Location = new Point(ClientSize.Width - 16 - 88, 8);
-            _btnClose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            _btnClose.Click += delegate { Close(); };
-            bottom.Controls.Add(_btnClose);
+            // 按钮交给靠右的 FlowLayoutPanel 自己排：不再用 ClientSize 手算坐标，
+            // 窗口被缩放或改尺寸时也不会跑到窗口外面去。
+            FlowLayoutPanel buttons = new FlowLayoutPanel();
+            buttons.Dock = DockStyle.Right;
+            buttons.FlowDirection = FlowDirection.LeftToRight;
+            buttons.WrapContents = false;
+            buttons.AutoSize = true;
+            buttons.Padding = new Padding(0, 11, 16, 0);
 
             _btnUninstall.Text = "开始卸载";
-            _btnUninstall.Size = new Size(112, 30);
-            _btnUninstall.Location = new Point(ClientSize.Width - 16 - 88 - 8 - 112, 8);
-            _btnUninstall.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnUninstall.Size = new Size(124, 32);
+            _btnUninstall.Margin = new Padding(8, 0, 0, 0);
             _btnUninstall.Click += delegate { StartUninstall(); };
-            bottom.Controls.Add(_btnUninstall);
+            buttons.Controls.Add(_btnUninstall);
+
+            _btnClose.Text = "关闭";
+            _btnClose.Size = new Size(96, 32);
+            _btnClose.Margin = new Padding(8, 0, 0, 0);
+            _btnClose.Click += delegate { Close(); };
+            buttons.Controls.Add(_btnClose);
+
+            bottom.Controls.Add(_logPathLabel);
+            bottom.Controls.Add(buttons);
 
             Controls.Add(logHost);
             Controls.Add(itemsHost);

@@ -1068,6 +1068,7 @@ namespace KewuUninstaller
                 bool confirmed = false;
                 bool deleteData = false;
                 bool guiSelfTest = false;
+                bool layoutSelfTest = false;
                 for (int i = 0; i < args.Length; i++)
                 {
                     string arg = args[i];
@@ -1101,6 +1102,11 @@ namespace KewuUninstaller
                         guiSelfTest = true;
                         continue;
                     }
+                    if (string.Equals(arg, "--selftest-layout", StringComparison.OrdinalIgnoreCase))
+                    {
+                        layoutSelfTest = true;
+                        continue;
+                    }
                     if (string.Equals(arg, "--help", StringComparison.OrdinalIgnoreCase) || string.Equals(arg, "-h", StringComparison.OrdinalIgnoreCase) || string.Equals(arg, "/?", StringComparison.Ordinal))
                     {
                         headless = true;
@@ -1113,7 +1119,7 @@ namespace KewuUninstaller
                 string selfName = string.IsNullOrEmpty(selfPath) ? "" : System.IO.Path.GetFileName(selfPath);
                 string selfDir = ResolveSelfDir(selfPath);
                 string exeDir = ResolveExeDir(dirArg);
-                headless = headless || runMode || !string.IsNullOrEmpty(planPath) || guiSelfTest;
+                headless = headless || runMode || !string.IsNullOrEmpty(planPath) || guiSelfTest || layoutSelfTest;
 
                 // 无人值守自检：只构建窗体并强制创建句柄，不显示窗口、不删任何东西，用来验证 GUI 代码路径没崩。
                 if (guiSelfTest)
@@ -1127,6 +1133,25 @@ namespace KewuUninstaller
                         controls = form.Controls.Count;
                     }
                     Console.Error.WriteLine("[selftest-gui] ok controls=" + controls + " dir=" + exeDir);
+                    return 0;
+                }
+
+                // 布局自检：打印窗体实际客户区与 DPI，用来定位「控件被推出窗口」这类缩放问题。
+                if (layoutSelfTest)
+                {
+                    System.Windows.Forms.Application.EnableVisualStyles();
+                    System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
+                    using (UninstallerForm form = new UninstallerForm(exeDir, selfName, selfPath, selfDir))
+                    {
+                        form.CreateControl();
+                        System.Drawing.Rectangle screen = System.Windows.Forms.Screen.PrimaryScreen.Bounds;
+                        Console.Error.WriteLine("[selftest-layout] client=" + form.ClientSize.Width + "x" + form.ClientSize.Height
+                            + " size=" + form.Size.Width + "x" + form.Size.Height
+                            + " mode=" + form.AutoScaleMode
+                            + " font=" + form.Font.Name + "/" + form.Font.SizeInPoints.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            + " dpi=" + form.DeviceDpi
+                            + " screen=" + screen.Width + "x" + screen.Height);
+                    }
                     return 0;
                 }
 

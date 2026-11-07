@@ -268,3 +268,14 @@ describe.skipIf(!canRun)('KEWU Uninstaller EXE', () => {
     expect(existsSync(uninstallerExe), '卸载器自身也不该被选中').toBe(true)
   })
 })
+
+// 只在源码层面断言，不依赖 Windows：防止有人把停靠布局改回按宽度手算坐标。
+describe('uninstaller form layout guard', () => {
+  it('窗体关闭自动缩放，右侧控件用停靠布局', () => {
+    const source = readFileSync(path.join(repoRoot, 'tools', 'uninstaller', 'src', 'UninstallerForm.cs'), 'utf8')
+    expect(source).toContain('AutoScaleMode.None')
+    expect(source).not.toContain('AutoScaleMode.Dpi')
+    expect(source).toContain('new FlowLayoutPanel()')
+    expect(source).toContain('Dock = DockStyle.Right')
+  })
+})

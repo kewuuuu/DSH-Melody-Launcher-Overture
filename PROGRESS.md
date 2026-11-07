@@ -152,3 +152,15 @@
   - `DSH-launcher-KEWU-Setup-1.0.4.exe` — 104,059,540 字节，SHA256 `E65E014237ED40212EC67ADDE8A385EFDE7A6388E8C19E0255BB4D6BC8DC0D7A`
   - `DSH-launcher-KEWU-Uninstaller-1.0.4.exe` — 136,704 字节，SHA256 `08EB32E8EE18B93B12AE9928B50A73615912DBD99F75432ACECB5CE4F3E848A0`
 - 未验证：卸载器 GUI 真人点击、无 .NET Framework 4.x 的机器、真实 UAC 弹窗下的安装/卸载、登录自启项写入后的实际开机触发（只核对了常量与卸载器读取的键名一致）。
+
+## 卸载器窗口按钮跑到窗口外（2026-11-08）
+
+- 用户反馈「卸载程序没有确认取消等按钮，没法卸载」。实测：窗口内根本看不到按钮，只有一块内容区。
+- 根因：`tools/uninstaller/src/UninstallerForm.cs` 用 `AutoScaleMode.Dpi` + 按 `ClientSize.Width` 手算的按钮坐标，本机缩放把子控件按另一套尺寸摆放，两个按钮落到窗口右侧外面（量到的按钮屏幕坐标 1341..1431，窗口右边界 1079）。
+- 修复（`UninstallerForm.cs`）：①`AutoScaleMode = AutoScaleMode.None`，顺序改为先设 AutoScaleMode/Font 再设 `ClientSize`（780x640）、`MinimumSize` 700x560；②底部按钮条改成靠右停靠的 `FlowLayoutPanel`（`开始卸载` 124x32、`关闭` 96x32），日志路径标签改 `Dock = Fill`；③顶部 `重新扫描` 与两个路径框改为 `DockStyle.Fill` + `DockStyle.Right` 容器；④`始终保留` 区块先加 Fill 再加 Top，避免标题与正文重叠（WinForms 按相反顺序停靠）。
+- 新增 `--selftest-layout`：不显示窗口，打印 `client=780x640 size=798x687 mode=None dpi=96 screen=1920x1080`，用于回归这类缩放问题。
+- 验收方式（真窗口）：`SetProcessDPIAware` 后 `PrintWindow` 截图 + `EnumChildWindows` 量矩形——三个按钮都在窗口内（`重新扫描` 1218..1334 / `开始卸载` 1106..1230 / `关闭` 1238..1334，窗口右边界 1359），截图存 `Workspace\_cache\uninstaller-fixed2.png`；`BM_CLICK` 点「开始卸载」弹出 `#32770 确认卸载`（是/否），取消后主程序与数据都在，点「是」后 `EXE_DELETED=True POINTER_DELETED=True DATA_KEPT=True`。
+- 测量教训：Windows PowerShell 5.1 默认 DPI 不感知，`GetWindowRect`/`PrintWindow` 拿到的是 0.8 倍虚拟坐标，会把正常布局误判成「按钮在窗口外」；脚本开头先调 `SetProcessDPIAware()` 再量。
+- 测试：`tests/uninstaller-exe.test.ts` 增加源码守卫（含 `AutoScaleMode.None`、不含 `AutoScaleMode.Dpi`、含 `FlowLayoutPanel` 与 `DockStyle.Right`）；`--selftest-layout` 的进程内 GUI 断言在 vitest 里会超时不退出，故不入测试。全量 `npx vitest run` 131 文件通过 / 9 跳过，1193 passed / 11 skipped。
+- 产物：`release\b7\DSH-launcher-KEWU-Uninstaller-1.0.4.exe` 与交付副本 `D:\DSH-launcher-KEWU\DSH-launcher-KEWU-Uninstaller-1.0.4.exe` 均为 137,728 字节，SHA256 `5FE98949233E062CC7D431C2490BFEC3E8B7D483088840AB3DE061F259F67C11`（csc 每次编译 PE 时间戳不同，两份副本取的是同一次编译输出）。
+- 未验证：真人点击（用 `BM_CLICK`/`WM_CLOSE` 程序化模拟）、其它 DPI 缩放比例下的显示。
