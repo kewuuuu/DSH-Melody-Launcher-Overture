@@ -65,7 +65,7 @@ export function registerUninstallIpc(deps: UninstallIpcDeps): void {
     if (picked.canceled) return null
     const outDir = picked.filePaths[0]
     if (!outDir) return null
-    return service.exportScript(outDir)
+    return service.exportScript(outDir, { deleteData: false })
   })
 
   ipcMain.handle(IPC.uninstallRun, async (_event, options?: unknown) => {

@@ -42,7 +42,7 @@ async function fixture() {
       if (request.command === 'uninstall.script') {
         const out = request.args?.out
         if (typeof out !== 'string') throw new Error('缺少 out')
-        return service.exportScript(out, { deleteData: request.args?.keepData !== true })
+        return service.exportScript(out, { deleteData: request.args?.deleteData === true })
       }
       if (request.command === 'uninstall.run') {
         runs.push(request.args)
@@ -93,7 +93,7 @@ describe('uninstall CLI', () => {
     })
   })
 
-  it('uninstall script --out 写出 ps1 与 cmd，--keep-data 时不含 -DeleteData', async () => {
+  it('uninstall script --out 写出 ps1 与 cmd，默认不含 -DeleteData，--delete-data 才带', async () => {
     const f = await fixture()
     const out = path.join(f.root, 'export')
     const result = JSON.parse((await f.run('uninstall', 'script', '--out', out, '--json')).stdout)
@@ -106,14 +106,14 @@ describe('uninstall CLI', () => {
     expect(script).toContain('Get-Process -Id $WaitPid')
     const command = await readFile(result.commandPath, 'utf8')
     expect(command).toContain('%~dp0uninstall-kewu.ps1')
-    expect(command).toContain('-DeleteData')
+    expect(command).not.toContain('-DeleteData')
 
-    const keepOut = path.join(f.root, 'export-keep')
-    const keepResult = JSON.parse(
-      (await f.run('uninstall', 'script', '--out', keepOut, '--keep-data', '--json')).stdout,
+    const deleteOut = path.join(f.root, 'export-delete')
+    const deleteResult = JSON.parse(
+      (await f.run('uninstall', 'script', '--out', deleteOut, '--delete-data', '--json')).stdout,
     )
-    const keepCommand = await readFile(keepResult.commandPath, 'utf8')
-    expect(keepCommand).not.toContain('-DeleteData')
+    const deleteCommand = await readFile(deleteResult.commandPath, 'utf8')
+    expect(deleteCommand).toContain('-DeleteData')
   })
 
   it('uninstall now 缺 --yes 时拒绝执行', async () => {
@@ -125,14 +125,16 @@ describe('uninstall CLI', () => {
     expect(f.runs).toEqual([])
   })
 
-  it('uninstall now --yes --keep-data 把确认与保留数据意图交给服务', async () => {
+  it('uninstall now 默认保留数据，--delete-data 才把删除意图交给服务', async () => {
     const f = await fixture()
-    const result = JSON.parse((await f.run('uninstall', 'now', '--keep-data', '--yes', '--json')).stdout)
-    expect(result).toEqual({ started: true })
-    expect(f.runs).toEqual([{ keepData: true, confirm: true }])
     const plain = JSON.parse((await f.run('uninstall', 'now', '--yes', '--json')).stdout)
     expect(plain).toEqual({ started: true })
-    expect(f.runs[1]).toEqual({ confirm: true })
+    expect(f.runs).toEqual([{ confirm: true }])
+    const result = JSON.parse(
+      (await f.run('uninstall', 'now', '--delete-data', '--yes', '--json')).stdout,
+    )
+    expect(result).toEqual({ started: true })
+    expect(f.runs[1]).toEqual({ deleteData: true, confirm: true })
   })
 
   it('未知的 uninstall 子命令给出中文用法', async () => {

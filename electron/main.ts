@@ -5,6 +5,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { createLauncherControl } from './launcher-control'
 import { createLauncherControlServer } from './launcher-control-server'
+import { createUninstallService } from './uninstall'
+import { registerUninstallIpc } from './uninstall-ipc'
+import type { UninstallPlanInput } from './uninstall-plan'
 import { fileURLToPath } from 'node:url'
 import type { AppSettings, OfficialPackRelease, OfficialPackStatus, PackInstallResult, RuntimeOutput, WindowMode } from '../src/types'
 import { ACP_RUNTIME_DIRNAME, CREDENTIALS_LOCK_DIRNAME, createAiInstaller, healCredentialsLock, type AiInstaller } from './ai-install'
@@ -186,6 +189,9 @@ interface Services {
   restoreOfficialPack: () => Promise<PackInstallResult>
   /** 列出 Release 上所有官方整合包版本（按版本降序）。 */
   listOfficialPackVersions: () => Promise<OfficialPackRelease[]>
+  /** 卸载引擎与它的路径快照（dshHome 等设置读出来之后由 whenReady 填进去）。 */
+  uninstall: ReturnType<typeof createUninstallService>
+  uninstallPlan: UninstallPlanInput
   /** 官方整合包状态；`force` = 强制重新查 GitHub，否则用启动核对的缓存。 */
   readOfficialPackStatus: (force?: boolean) => Promise<OfficialPackStatus>
   /** 下载并导入指定版本的官方整合包；失败抛错给渲染层。 */
@@ -1067,6 +1073,18 @@ function createServices(): Services {
     if (process.platform !== 'win32' || !app.isPackaged) return
     app.setLoginItemSettings(loginItemSettings(enabled, { executablePath: process.execPath, portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE }))
   }
+  // 卸载引擎：计划里的路径是可变快照，dshHome 要等设置读出来（数据目录在模块初始化时已定）。
+  // 便携版的 process.execPath 指向 %TEMP% 解压目录，真正要删的是 PORTABLE_EXECUTABLE_FILE。
+  const executablePath = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath
+  const uninstallPlan: UninstallPlanInput = {
+    executablePath,
+    installDir: path.dirname(executablePath),
+    dataDir: app.getPath('userData'),
+    legacyDataDir: path.join(app.getPath('appData'), LEGACY_DATA_DIRNAME),
+    dshHome: '',
+    tempDir: os.tmpdir(),
+  }
+  const uninstall = createUninstallService({ plan: uninstallPlan, stopAllPacks: () => packControl!.shutdown() })
   packControl = createLauncherControl({
     userData, cliPath: path.join(app.getAppPath(), 'bin/launcher-control.cjs'), settings, packManager: packManager!, storage: storageController,
     prepareNodeRuntime: () => prepareNodeRuntime('runtime'),
@@ -1074,9 +1092,9 @@ function createServices(): Services {
     openExternal: url => shell.openExternal(url), fallbackWorkspace: () => app.getPath('documents'),
     fetchImpl: githubAuth.fetch, emitOutput: text => events.output('runtime', 'info', text),
     legacyRuntimeRunning: () => runtime.isRunning(), prepareOfficeCliTool,
-    loginRegistration,
+    loginRegistration, uninstall,
   })
-  return { packControl, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
+  return { packControl, uninstall, uninstallPlan, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
 }
 
 function openMainWindow(): void {
@@ -1223,6 +1241,14 @@ app.whenReady().then(async () => {
     baseUrlOf: packId => services?.packControl.runtimeUrl(packId) ?? null,
   })
   registerPathMigrationIpc({ ipcMain, migrate: (kind, target) => services!.packControl.paths.migrate(kind, target) })
+  // 卸载：dshHome 决定计划里哪一行算「用户自己的数据」，所以等设置读出来再补上；helper 起来后主进程直接退出。
+  services.uninstallPlan.dshHome = startupSettings.dshHome
+  registerUninstallIpc({
+    ipcMain,
+    service: services.uninstall,
+    dataDir: app.getPath('userData'),
+    onStarted: () => app.quit(),
+  })
   // 启动时按设置校正一次登录项：缺省 false 会主动注销历史遗留的旧注册项。
   syncLaunchAtLogin(startupSettings, services.loginRegistration)
   controlServer = await createLauncherControlServer({ userData: app.getPath('userData'), execute: request => services!.launcherControl(request) })

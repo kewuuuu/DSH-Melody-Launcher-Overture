@@ -27,8 +27,8 @@ const HELP = `DSH Launcher control (Node >=20)
   pending discard <id>
   path migrate dshHome|dshInstallPath <absolute-directory>
   uninstall plan
-  uninstall script --out <absolute-directory> [--keep-data]
-  uninstall now --yes [--keep-data]
+  uninstall script --out <absolute-directory> [--delete-data]
+  uninstall now --yes [--delete-data]
   resource <operation> <pack-id> --args '{...}'
   pack <operation> [pack-id] --args '{...}'
   request <dotted.command> [pack-id] --args '{...}'
@@ -53,7 +53,7 @@ function parse(argv) {
     const item = argv[i]
     if (!item.startsWith('--')) { words.push(item); continue }
     const key = item.slice(2)
-    if (['json', 'help', 'keep-data', 'yes'].includes(key)) { flags[key] = true; continue }
+    if (['json', 'help', 'keep-data', 'delete-data', 'yes'].includes(key)) { flags[key] = true; continue }
     if (!FLAG_KEYS.includes(key)) throw new Error('Unknown option: ' + item)
     if (i + 1 >= argv.length || argv[i+1].startsWith('--')) throw new Error('Missing value for ' + item)
     flags[key] = argv[++i]
@@ -168,9 +168,9 @@ function parse(argv) {
   if (pathKind !== undefined) { args.kind = pathKind; args.target = path.resolve(pathTarget) }
   if (flags.out !== undefined && command !== 'uninstall.script') throw new Error('--out 只用于 uninstall script')
   if (uninstallOut !== undefined) args.out = uninstallOut
-  if (flags['keep-data'] !== undefined) {
-    if (!['uninstall.script', 'uninstall.run'].includes(command)) throw new Error('--keep-data 只用于 uninstall script 或 uninstall now')
-    args.keepData = true
+  if (flags['delete-data'] !== undefined) {
+    if (!['uninstall.script', 'uninstall.run'].includes(command)) throw new Error('--delete-data 只用于 uninstall script 或 uninstall now')
+    args.deleteData = true
   }
   if (flags.yes !== undefined) {
     if (command !== 'uninstall.run') throw new Error('--yes 只用于 uninstall now')

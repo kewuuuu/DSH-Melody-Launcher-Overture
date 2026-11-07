@@ -12,7 +12,6 @@ import type { UninstallPlan, UninstallRunOptions, UninstallScriptResult } from '
 import { createUninstallPlan, type UninstallPlanInput } from './uninstall-plan'
 import {
   UNINSTALL_COMMAND_FILENAME,
-  UNINSTALL_LOG_FILENAME,
   UNINSTALL_SCRIPT_BOM,
   UNINSTALL_SCRIPT_FILENAME,
   buildUninstallCommand,
@@ -104,7 +103,7 @@ export function createUninstallService(deps: UninstallServiceDeps): UninstallSer
     await writeFile(scriptPath, UNINSTALL_SCRIPT_BOM + buildUninstallScript(paths), 'utf8')
     await writeFile(
       commandPath,
-      buildUninstallCommand({ ...paths, deleteData: options?.deleteData !== false }),
+      buildUninstallCommand({ ...paths, deleteData: options?.deleteData === true }),
       'utf8',
     )
     return { scriptPath, commandPath }
@@ -120,6 +119,8 @@ export function createUninstallService(deps: UninstallServiceDeps): UninstallSer
     await mkdir(helperDir, { recursive: true })
     const scriptPath = path.join(helperDir, UNINSTALL_SCRIPT_FILENAME)
     const commandPath = path.join(helperDir, UNINSTALL_HELPER_COMMAND_FILENAME)
+    // 日志放 helper 目录外：helper 跑完会自删整个目录，日志要留下来给用户看。
+    const logPath = helperDir + '.log'
     const paths = launcherPaths()
     await writeFile(scriptPath, UNINSTALL_SCRIPT_BOM + buildUninstallScript(paths), 'utf8')
     await writeFile(
@@ -128,7 +129,7 @@ export function createUninstallService(deps: UninstallServiceDeps): UninstallSer
         ...paths,
         waitPid,
         deleteData,
-        logPath: path.join(helperDir, UNINSTALL_LOG_FILENAME),
+        logPath,
       }),
       'utf8',
     )

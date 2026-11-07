@@ -298,11 +298,11 @@ export function createLauncherControl(options: {
         const out = request.args?.out
         if (typeof out !== 'string' || !out.trim()) throw new Error('uninstall script 需要一个导出目录，例如 uninstall script --out D:\\卸载脚本。')
         if (!path.isAbsolute(out)) throw new Error('uninstall script 的 --out 必须是绝对路径，当前收到：' + out + '。')
-        return uninstallService().exportScript(out, { deleteData: request.args?.keepData !== true && request.args?.deleteData !== false })
+        return uninstallService().exportScript(out, { deleteData: request.args?.deleteData === true })
       }
       if (request?.command === 'uninstall.run') {
         if (request.args?.confirm !== true) throw new Error('卸载会删除启动器文件，必须带 --yes 确认：uninstall now --yes')
-        return uninstallService().run({ deleteData: request.args?.keepData !== true })
+        return uninstallService().run({ deleteData: request.args?.deleteData === true })
       }
       return deliverPending(request, await control.execute(request))
     },
