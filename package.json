@@ -76,6 +76,7 @@
       "dist/**/*",
       "dist-electron/**/*",
       "bin/launcher-control.cjs",
+      "tools/uninstall-kewu.ps1",
       "package.json"
     ],
     "extraResources": [

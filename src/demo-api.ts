@@ -1200,6 +1200,23 @@ export const demoApi: LauncherApi = {
   paths: {
     migrate: async (kind, target) => ({ kind, current: target, backupId: null, removedOld: false, warning: null }),
   },
+  uninstall: {
+    plan: async () => ({
+      executablePath: 'C:\\demo\\DSH-Launcher.exe',
+      installDir: 'C:\\demo',
+      dataDir: demoSettings.dshHome ? 'C:\\demo\\launcher-data' : 'C:\\demo\\launcher-data',
+      items: [
+        { id: 'program', label: '启动器程序', path: 'C:\\demo\\DSH-Launcher.exe', kind: 'file' as const, sizeBytes: 92589873, fileCount: 1, action: 'delete' as const },
+        { id: 'data', label: '启动器数据目录', path: 'C:\\demo\\launcher-data', kind: 'directory' as const, sizeBytes: 1048576, fileCount: 42, action: 'delete' as const },
+        { id: 'legacy', label: '旧版启动器数据', path: 'C:\\Users\\demo\\AppData\\Roaming\\dsh-launcher', kind: 'directory' as const, sizeBytes: 0, fileCount: 0, action: 'keep' as const, reason: '不是这个版本创建的数据，一律不动' },
+      ],
+      deleteBytes: 93638673,
+      keepBytes: 0,
+      warnings: [],
+    }),
+    exportScript: async () => null,
+    run: async () => ({ started: false }),
+  },
   readProfile: async () => profile(),
   listProfiles: async () => [{
     id: demoSettings.profileName,

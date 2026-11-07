@@ -113,6 +113,10 @@ export const IPC = {
   pendingResumesDiscard: 'pending-resumes:discard',
   /** 目录迁移。 */
   pathsMigrate: 'paths:migrate',
+  /** 卸载：计划 / 导出脚本 / 立即卸载。 */
+  uninstallPlan: 'uninstall:plan',
+  uninstallScript: 'uninstall:script',
+  uninstallRun: 'uninstall:run',
   profileRead: 'profile:read',
   profilesList: 'profiles:list',
   profilesCreate: 'profiles:create',

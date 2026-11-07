@@ -1343,6 +1343,47 @@ export interface StorageState {
   warning: string | null
 }
 
+/* ===== 卸载：内置卸载程序 + 可导出的卸载脚本 ===== */
+
+export type UninstallItemKind = 'file' | 'directory' | 'registry'
+
+export interface UninstallItem {
+  /** 稳定 id，界面用作 key。 */
+  id: string
+  label: string
+  path: string
+  kind: UninstallItemKind
+  sizeBytes: number
+  fileCount: number
+  /** delete = 这次卸载会删掉；keep = 明确保留（旧版数据、DSH 家目录等）。 */
+  action: 'delete' | 'keep'
+  /** action 为 keep 时说明为什么保留。 */
+  reason?: string
+}
+
+export interface UninstallPlan {
+  /** 用户手里那个 EXE：打包态取 PORTABLE_EXECUTABLE_FILE，开发态取 process.execPath。 */
+  executablePath: string
+  /** EXE 所在目录；只有确认是该启动器独占时才整体删除。 */
+  installDir: string
+  /** 本进程实际在用的数据目录。 */
+  dataDir: string
+  items: UninstallItem[]
+  deleteBytes: number
+  keepBytes: number
+  warnings: string[]
+}
+
+export interface UninstallScriptResult {
+  scriptPath: string
+  commandPath: string
+}
+
+export interface UninstallRunOptions {
+  /** 是否连本版数据目录一起删；false = 只删程序，数据保留。 */
+  deleteData: boolean
+}
+
 /* ===== 备份区：所有可恢复的删除/迁移都压缩成 zip 存在这里 ===== */
 
 /** 一次备份动作的来源，决定界面上怎么称呼它。 */
@@ -1556,6 +1597,14 @@ export interface LauncherApi {
   /** 目录迁移：复制到新位置 → 写设置 → 旧目录进备份区。 */
   paths: {
     migrate(kind: MigratablePath, target: string): Promise<PathMigrationResult>
+  }
+  /** 卸载：先取计划（删什么、留什么），再导出脚本或直接执行。 */
+  uninstall: {
+    plan(): Promise<UninstallPlan>
+    /** 弹目录选择框并生成卸载脚本；取消返回 null。 */
+    exportScript(): Promise<UninstallScriptResult | null>
+    /** 写后台 helper 后退出主进程，由 helper 完成删除；started 为 false 表示未启动。 */
+    run(options: UninstallRunOptions): Promise<{ started: boolean }>
   }
   /** 选择并复制一张外观图片；返回写进 settings 的路径与可直接加载的 URL；取消返回 null。 */
   chooseAppearanceImage(kind: AppearanceImageKind): Promise<AppearanceImageSelection | null>

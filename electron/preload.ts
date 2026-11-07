@@ -109,6 +109,11 @@ const api: LauncherApi = {
   paths: {
     migrate: (kind, target) => ipcRenderer.invoke(IPC.pathsMigrate, { kind, target }),
   },
+  uninstall: {
+    plan: () => ipcRenderer.invoke(IPC.uninstallPlan),
+    exportScript: () => ipcRenderer.invoke(IPC.uninstallScript),
+    run: options => ipcRenderer.invoke(IPC.uninstallRun, options),
+  },
   readProfile: () => ipcRenderer.invoke(IPC.profileRead),
   listProfiles: () => ipcRenderer.invoke(IPC.profilesList),
   createProfile: request => ipcRenderer.invoke(IPC.profilesCreate, request),
