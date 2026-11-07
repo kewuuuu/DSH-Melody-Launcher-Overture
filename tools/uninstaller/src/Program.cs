@@ -354,7 +354,10 @@ namespace KewuUninstaller
         public const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         public const string LoginItemName = "electron.app.DSH Launcher";
         public const string TempResiduePrefix = "3l";
-        public const string UninstallerExeName = "KEWU-Uninstaller.exe";
+        /// <summary>名字里带这些词的一律不是启动器主程序：卸载器自身（真实文件名可能带版本号）或安装包。</summary>
+        public static readonly string[] ExcludedNameTokens = new string[] { "uninstall", "setup" };
+        /// <summary>看起来像启动器主程序的名字线索，按优先级排列：越靠前越优先。</summary>
+        public static readonly string[] LauncherNameHints = new string[] { "kewu", "dsh", "melody", "launcher" };
 
         public static string CurrentExecutablePath()
         {
@@ -371,22 +374,56 @@ namespace KewuUninstaller
             return "";
         }
 
-        /// <summary>同目录里取第一个 *.exe，排除卸载程序自身。</summary>
+        /// <summary>路径规范化：失败时退回原样，避免空串被当成"相等"。</summary>
+        private static string FullPathOrSelf(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return "";
+            try { return System.IO.Path.GetFullPath(path); }
+            catch (Exception) { return path; }
+        }
+
+        /// <summary>
+        /// 在启动器目录里挑出启动器主程序：
+        /// ① 按完整路径排除卸载程序自身（忽略大小写，文件名带不带版本号都成立）；
+        /// ② 排除名字里含 uninstall 的任意文件、含 setup 的安装包；
+        /// ③ 剩下的按 KEWU / DSH / Melody / Launcher 的先后顺序找第一个命中者（同档内按文件名顺序，先匹配到优先）；
+        /// ④ 一个都不像时才回退到第一个非自身、非卸载器、非 setup 的 exe；
+        /// ⑤ 没有合格候选就返回空串，让上层提示"没找到启动器主程序"，绝不删错文件。
+        /// </summary>
         public static string FindLauncherExe(string exeDir, string selfExeName)
         {
+            if (string.IsNullOrEmpty(exeDir)) return "";
             string[] files;
             try { files = Directory.GetFiles(exeDir, "*.exe"); }
             catch (Exception) { return ""; }
             Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+
+            string selfPath = FullPathOrSelf(CurrentExecutablePath());
+            List<string> candidates = new List<string>();
             for (int i = 0; i < files.Length; i++)
             {
                 string name = System.IO.Path.GetFileName(files[i]);
+                string full = FullPathOrSelf(files[i]);
+                if (selfPath.Length > 0 && string.Equals(full, selfPath, StringComparison.OrdinalIgnoreCase)) continue;
                 if (!string.IsNullOrEmpty(selfExeName) && string.Equals(name, selfExeName, StringComparison.OrdinalIgnoreCase)) continue;
-                if (string.Equals(name, UninstallerExeName, StringComparison.OrdinalIgnoreCase)) continue;
-                try { return System.IO.Path.GetFullPath(files[i]); }
-                catch (Exception) { return files[i]; }
+                bool excluded = false;
+                for (int t = 0; t < ExcludedNameTokens.Length; t++)
+                {
+                    if (name.IndexOf(ExcludedNameTokens[t], StringComparison.OrdinalIgnoreCase) >= 0) { excluded = true; break; }
+                }
+                if (excluded) continue;
+                candidates.Add(full);
             }
-            return "";
+
+            for (int h = 0; h < LauncherNameHints.Length; h++)
+            {
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    if (System.IO.Path.GetFileName(candidates[i]).IndexOf(LauncherNameHints[h], StringComparison.OrdinalIgnoreCase) >= 0) return candidates[i];
+                }
+            }
+
+            return candidates.Count > 0 ? candidates[0] : "";
         }
 
         /// <summary>自启项注册表路径：允许用环境变量重定向（自动化测试用，避免碰真实自启项）。</summary>
@@ -486,7 +523,7 @@ namespace KewuUninstaller
             }
             else
             {
-                plan.Warnings.Add("启动器目录里没找到启动器 EXE：" + exeDir + "（本次只能清理数据与自启项。）");
+                plan.Warnings.Add("没找到启动器主程序，请把卸载程序放到启动器 EXE 同目录（本次只能清理数据与自启项：" + exeDir + "）");
             }
 
             // 2. 本版数据目录：默认保留。
