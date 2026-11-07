@@ -114,3 +114,24 @@
 - 产物：`release\b5\DSH-Launcher-1.0.4-portable.exe`（92,594,198 字节，SHA256 `B1E383BC5D2953A8FF08073095FDA82CB234753C71D5825CA08005BBDB357B7E`），解包版 `release\b5\win-unpacked\`；卸载程序 `release\b5\uninstall-kewu.cmd` + `release\b5\uninstall-kewu.ps1`（与 `tools\` 下同源）。
 - 未验证：真实 UAC 提权下的卸载、界面点「立即卸载」这条 UI 链路（只验证了它复用的同一个 service 与同一个 `quitAfterUninstallStarted`）。
 
+
+## 三件交付物：便携 EXE、卸载器 EXE、安装版 Setup（2026-11-07）
+
+- 交付口径：一个 EXE 便携版（数据就在 EXE 同级 `launcher-data`）、一个独立卸载器 EXE（WinForms，勾选界面，可脱离启动器运行）、一个安装版 Setup。卸载器不再是 .cmd+.ps1 那种命令行形式，但仍保留 `tools/uninstall-kewu.ps1`+`.cmd` 作离线兜底。
+- 安装版数据目录改造：`electron/storage-root.ts` 新增 `INSTALLED_DATA_DIRNAME = 'KEWU-launcher'`，`defaultLocation` 的 install 分支由「EXE 旁的 launcher-data」改为 `<appData>/KEWU-launcher`——装在 Program Files/用户目录时，升级和卸载都不会连坐数据；便携版（`PORTABLE_EXECUTABLE_DIR` 存在）与开发态分支不变。`docs/launcher-cli.md` 的 Storage location 同步改写。
+- NSIS 安装包配置（`package.json` 的 `build`）：`win.target` 加 `nsis`；产物名 `KEWU-Portable-${version}.exe` / `KEWU-Setup-${version}.exe`；`oneClick:false`、`perMachine:false`（按用户安装，不需要管理员）、可选安装目录、桌面+开始菜单快捷方式（「DSH启动器 KEWU」）、`uninstallDisplayName`「DSH启动器：KEWU」、`deleteAppDataOnUninstall:false`、中文界面（`language=2052`）、`runAfterFinish:true`。
+- 卸载器 EXE：`tools/uninstaller/src/Program.cs`（计划构建 + `--plan`/`--run`/`--selftest-gui`/`--dir` 无界面模式）、`UninstallerForm.cs`（760x620 中文窗口、逐条复选框、重新扫描、两步确认、实时日志、结束占用进程）、`scripts/build-uninstaller.ps1`（系统 `csc.exe` 离线编译，Framework64 缺失时回退 32 位），产物 `tools/uninstaller/bin/KEWU-Uninstaller.exe`（136,192 字节，已 gitignore，属本地构建物）。
+- 卸载器条目与默认勾选：启动器主程序（删）、EXE 同级 `launcher-data`（默认保留）、`launcher-storage.json`（删）、`HKCU\\...\\Run\\electron.app.DSH Launcher`（删）、`%TEMP%\\3L*` 自解压残留（有进程在里面运行则强制保留并写明原因）、`%APPDATA%\\KEWU-launcher`（安装版数据，默认保留）；`%APPDATA%\\dsh-launcher` 与 `~/.dsh` 只展示、永不可勾选。
+- 主程序挑选规则（本轮 review 退回修掉的缺陷）：一开始按文件名排序取第一个 `*.exe`、只排除硬编码 `KEWU-Uninstaller.exe`，三个交付文件同目录时会把安装包当启动器删掉。现在先按**完整路径**排除自身，再排除文件名含 `uninstall`/`setup` 的，然后按 KEWU → DSH → Melody → Launcher 的档位挑第一个命中者，都不像才回退第一个候选；没有合格候选就只清理数据与自启项并在界面/日志里提示「没找到启动器主程序」，绝不删错。
+- 构建坑：NSIS 目标要执行中间 installer，而 `D:\\engine\\DSH` 整棵树带 Low 完整性标签、EXE 在里面起不来 → 直接在 `release/b6` 构建会失败（只落下 320,104 字节 stub 与 `ERR_ELECTRON_BUILDER_CANNOT_EXECUTE`）。做法是 `-c.directories.output=D:/engine/DSH/test/kewu-b6-nsis` 构建成功后再把 EXE 复制回 `release/b6`。
+- 实机验收（`D:\\engine\\DSH\\test\\kewu-b6\\`）：便携版启动即生成同级 `launcher-data`、`storage info` 报 `source:"portable"`；安装版 `KEWU-Setup-1.0.4.exe /S /D=...` 静默装出 85 个文件（含 `Uninstall DSH Launcher.exe`、HKCU 卸载项、两处快捷方式），启动后 `storage info` 报 `{"dataDir":"C:\\Users\\kewu0\\AppData\\Roaming\\KEWU-launcher","source":"install"}`；静默卸载后程序目录消失、`%APPDATA%\\KEWU-launcher\\packs.json` 仍在、注册表/开始菜单/桌面残留均为 0。
+- 卸载器实测（真实 EXE，schtasks 脱离工具沙箱）：`--plan` 条目与默认勾选全对；`--run --yes` 删主程序/指针/`3L*` 残留、保留 `launcher-data` 与安装版数据；`--run --yes --delete-data` 再把两处数据删掉，两次日志都是「退出码：0」。
+- 本轮实测删掉了旧实例遗留的自解压目录 `%TEMP%\\3L5B3GoCeXELafWB8uVQQa3Q6H6`（当时已无进程从里面运行，日志 0 失败）——这正是「无进程的残留才删」这条规则的效果；用户的 `%APPDATA%\\dsh-launcher`、`~/.dsh` 均未受影响。
+- 环境限制（不是产品缺陷）：从工具沙箱里启动安装版时数据目录从不生成、窗口空转，改用 schtasks 在沙箱外启动就正常——沙箱内子进程只能写自己的根，写 `%APPDATA%` 会被拦。
+- 回归：`npx tsc --noEmit` 0 error；`npx vitest run` 131 文件通过 / 9 跳过，**1192 passed / 11 skipped / 0 failed**；`npm run build` 通过。
+- 提交：`befe152`（卸载器 EXE 首版）、`2b704d0`（主程序挑选规则修复）、`d49d1c7`（安装版数据目录 + NSIS 目标）。
+- 产物（`release\\b6\\`，解包目录 `release\\b6\\win-unpacked\\`）：
+  - `KEWU-Portable-1.0.4.exe` — 92,597,516 字节，SHA256 `5F67B50A515B58EFFE2EBE01E7C61A91A5A03E13842A399219270756972F1859`
+  - `KEWU-Setup-1.0.4.exe` — 104,059,558 字节，SHA256 `69CA2736A840464CC0B728FD9241038C37F7FC84B2DA11BE201CFED4AFA1978F`
+  - `KEWU-Uninstaller-1.0.4.exe` — 136,192 字节，SHA256 `286A6612C169BCC3FA599955688A9642CE9852AF3422FFA77557765F5B9BF317`
+- 未验证：卸载器 GUI 的真人点击（只跑了 `--selftest-gui` 与无界面模式）、目标机没装 .NET Framework 4.x 时卸载器起不来（`csc` 编出来的 WinForms 依赖系统自带的 4.x）、真实 UAC 下的安装/卸载。
