@@ -1,4 +1,4 @@
-// KEWU 启动器卸载程序（独立单文件 WinForms EXE）。
+// DSH-launcher-KEWU 卸载程序（独立单文件 WinForms EXE）。
 //
 // 只用系统自带的 .NET Framework 4.x + csc 编译（C# 5），不引第三方库、不联网。
 // 本文件负责：路径/体积/进程工具、卸载条目扫描、--plan 的 JSON 输出、删除执行。
@@ -348,11 +348,11 @@ namespace KewuUninstaller
     {
         public const string StorageDataDirName = "launcher-data";
         public const string StoragePointerFileName = "launcher-storage.json";
-        public const string InstalledDataDirName = "KEWU-launcher";
+        public const string InstalledDataDirName = "DSH-launcher-KEWU";
         public const string LegacyDataDirName = "dsh-launcher";
         public const string DshHomeName = ".dsh";
         public const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        public const string LoginItemName = "electron.app.DSH Launcher";
+        public const string LoginItemName = "electron.app.DSH-launcher-KEWU";
         public const string TempResiduePrefix = "3l";
         /// <summary>名字里带这些词的一律不是启动器主程序：卸载器自身（真实文件名可能带版本号）或安装包。</summary>
         public static readonly string[] ExcludedNameTokens = new string[] { "uninstall", "setup" };
@@ -929,7 +929,7 @@ namespace KewuUninstaller
             LogSink log = LogSink.Open(selfDir, true);
             try
             {
-                log.Write("[headless] KEWU 启动器卸载程序");
+                log.Write("[headless] DSH-launcher-KEWU 卸载程序");
                 log.Write("[headless] 日志：" + log.LogPath);
                 log.Write("[headless] 启动器目录：" + exeDir);
                 log.Write("[headless] 数据目录：" + System.IO.Path.Combine(exeDir, "launcher-data"));
@@ -1135,7 +1135,7 @@ namespace KewuUninstaller
 
                 if (!string.IsNullOrEmpty(dirArg) && !Directory.Exists(exeDir))
                 {
-                    System.Windows.Forms.MessageBox.Show("指定的目录不存在：" + exeDir, "KEWU 启动器卸载程序",
+                    System.Windows.Forms.MessageBox.Show("指定的目录不存在：" + exeDir, "DSH-launcher-KEWU 卸载程序",
                         System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
                     return 1;
                 }
@@ -1155,7 +1155,7 @@ namespace KewuUninstaller
                 }
                 try
                 {
-                    System.Windows.Forms.MessageBox.Show("卸载程序发生未处理错误：\n" + ex, "KEWU 启动器卸载程序",
+                    System.Windows.Forms.MessageBox.Show("卸载程序发生未处理错误：\n" + ex, "DSH-launcher-KEWU 卸载程序",
                         System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
                 }
                 catch (Exception)
@@ -1179,7 +1179,7 @@ namespace KewuUninstaller
 
         private static void ShowHelp()
         {
-            string text = "KEWU 启动器卸载程序\n\n" +
+            string text = "DSH-launcher-KEWU 卸载程序\n\n" +
                 "无参数：打开图形界面（扫描 + 勾选 + 卸载）。\n" +
                 "KEWU-Uninstaller.exe --plan <输出json路径> [--dir <启动器目录>]\n" +
                 "    只扫描、不删除，把卸载计划写成 JSON 后退出（退出码 0）。\n" +
@@ -1189,7 +1189,7 @@ namespace KewuUninstaller
                 "--dir 缺省为卸载程序自身所在目录。\n";
             try
             {
-                System.Windows.Forms.MessageBox.Show(text, "KEWU 启动器卸载程序", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information);
+                System.Windows.Forms.MessageBox.Show(text, "DSH-launcher-KEWU 卸载程序", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information);
             }
             catch (Exception)
             {

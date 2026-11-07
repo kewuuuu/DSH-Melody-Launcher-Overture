@@ -44,7 +44,7 @@ interface Plan {
 }
 
 const testRunKey = 'HKCU\\Software\\KEWU-Uninstaller-Test\\Run'
-const testRunValue = 'electron.app.DSH Launcher'
+const testRunValue = 'electron.app.DSH-launcher-KEWU'
 
 let workDir = ''
 let launcherDir = ''
@@ -196,7 +196,7 @@ describe.skipIf(!canRun)('KEWU Uninstaller EXE', () => {
     const residueDir = path.join(fixtureTempDir, '3Lsynthetic')
     mkdirSync(residueDir, { recursive: true })
     writeFileSync(path.join(residueDir, 'junk.bin'), 'yy')
-    const installedData = path.join(fixtureAppData, 'KEWU-launcher')
+    const installedData = path.join(fixtureAppData, 'DSH-launcher-KEWU')
     mkdirSync(installedData, { recursive: true })
     writeFileSync(path.join(installedData, 'inst.bin'), 'inst')
     const hasRunValue = createTestRunValue()
@@ -228,12 +228,12 @@ describe.skipIf(!canRun)('KEWU Uninstaller EXE', () => {
     expect(existsSync(pointerFile)).toBe(true)
   })
 
-  // 交付物是同目录三个文件：KEWU-Portable/VERSION.exe、KEWU-Setup/VERSION.exe、KEWU-Uninstaller/VERSION.exe。
+  // 交付物是同目录三个文件：DSH-launcher-KEWU-Portable/VERSION.exe、DSH-launcher-KEWU-Setup/VERSION.exe、KEWU-Uninstaller/VERSION.exe。
   // 卸载器必须按"完整路径排除自身 + 名字含 uninstall/setup 一律排除 + 名字像启动器的优先"来挑主程序，
   // 否则字母顺序会让安装包或卸载器自己顶上。
   it('同目录有安装包与卸载器时，选中的是启动器主程序', { timeout: 120_000 }, () => {
     const realLauncher = path.join(launcherDir, 'DSH Launcher.exe')
-    const setupExe = path.join(launcherDir, 'KEWU-Setup-1.0.4.exe')
+    const setupExe = path.join(launcherDir, 'DSH-launcher-KEWU-Setup-1.0.4.exe')
     const uninstallerExe = path.join(launcherDir, 'KEWU-Uninstaller-1.0.4.exe')
     writeFileSync(realLauncher, 'launcher')
     writeFileSync(setupExe, 'setup')
@@ -248,13 +248,13 @@ describe.skipIf(!canRun)('KEWU Uninstaller EXE', () => {
     expect(exeItem).toMatchObject({ action: 'delete', defaultChecked: true, kind: 'file' })
 
     // --plan 只扫描：三个文件一个都不该被动过。
-    for (const name of ['DSH Launcher.exe', 'KEWU-Setup-1.0.4.exe', 'KEWU-Uninstaller-1.0.4.exe']) {
+    for (const name of ['DSH Launcher.exe', 'DSH-launcher-KEWU-Setup-1.0.4.exe', 'KEWU-Uninstaller-1.0.4.exe']) {
       expect(existsSync(path.join(launcherDir, name)), name + ' 不应被 --plan 动过').toBe(true)
     }
   })
 
   it('目录里只有安装包与卸载器时不选任何 exe，--plan 仍以 0 退出', { timeout: 120_000 }, () => {
-    const setupExe = path.join(launcherDir, 'KEWU-Setup-1.0.4.exe')
+    const setupExe = path.join(launcherDir, 'DSH-launcher-KEWU-Setup-1.0.4.exe')
     const uninstallerExe = path.join(launcherDir, 'KEWU-Uninstaller-1.0.4.exe')
     writeFileSync(setupExe, 'setup')
     writeFileSync(uninstallerExe, 'uninstaller')

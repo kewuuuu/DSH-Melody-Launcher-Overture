@@ -303,7 +303,7 @@ if ($foreign.Count -eq 0 -and (Test-Path -LiteralPath $exeDir)) {
 }
 
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$runValue = 'electron.app.DSH Launcher'
+$runValue = 'electron.app.DSH-launcher-KEWU'
 $hasRunValue = $false
 try {
   if (Test-Path -LiteralPath $runKey) {

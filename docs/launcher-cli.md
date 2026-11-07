@@ -43,13 +43,13 @@ Resource kinds are plugins, skills, presets. resource <operation> <id> maps to p
 
 A portable build keeps all of its data in a launcher-data directory next to its own executable: <EXE directory>/launcher-data (it uses PORTABLE_EXECUTABLE_DIR, so a portable EXE carries its data in its own folder). packs.json, launcher settings, the plugin store and the managed DSH runtime all live there, and Chromium's cache is isolated in launcher-data/browser-data. Two portable launchers in different folders on the same machine therefore never share packs or a single-instance lock.
 
-An installed build (the NSIS setup) puts its data in <appData>/KEWU-launcher instead, so upgrading or uninstalling the program never touches packs and settings; %APPDATA%/dsh-launcher stays reserved for the historical launcher and is never reused. A development build (not packaged) keeps that historical <appData>/dsh-launcher directory and cannot switch it.
+An installed build (the NSIS setup) puts its data in <appData>/DSH-launcher-KEWU instead, so upgrading or uninstalling the program never touches packs and settings; %APPDATA%/dsh-launcher stays reserved for the historical launcher and is never reused. A development build (not packaged) keeps that historical <appData>/dsh-launcher directory and cannot switch it.
 
 Resolution order, first match wins:
 
 1. --data-dir=<absolute-directory> or --data-dir <absolute-directory> on the launcher command line (a relative path is ignored with a warning). Electron's --user-data-dir is honored at the same level when --data-dir is absent, which is how a development launcher keeps the isolation vite hands it; --data-dir wins when both are present because it is the launcher's own switch.
 2. <EXE directory>/launcher-storage.json containing {"dataDir":"<absolute-directory>"} (a corrupt file is ignored with a warning).
-3. <EXE directory>/launcher-data for a portable build, <appData>/KEWU-launcher for an installed one.
+3. <EXE directory>/launcher-data for a portable build, <appData>/DSH-launcher-KEWU for an installed one.
 
 Switching the data directory writes that pointer file, and requires a launcher restart to take effect. The launcher UI exposes the same switch through launcher:storage:choose|reset|relaunch, which use a native directory picker. launcher:storage:choose takes an optional defaultPath (for example %APPDATA%/dsh-launcher, to take over legacy data in one click); it only positions the picker, a relative or empty value is ignored, and it is never written to the pointer file. The CLI is a separate Node process with no access to Electron dialogs, so it only writes the pointer file:
 
@@ -255,7 +255,7 @@ node bin/launcher-control.cjs uninstall now --delete-data --yes
 
 规则来自用户原则「删掉启动这个软件之后新增的内容，之前的都不要动」：
 
-- 删：EXE 本身、EXE 同级 launcher-data（本版数据）、launcher-storage.json 指针文件、HKCU Run 里的 electron.app.DSH Launcher、%TEMP% 下的 3L* 自解压残留，以及「除了本版启动器文件之外空无一物」的安装目录。
+- 删：EXE 本身、EXE 同级 launcher-data（本版数据）、launcher-storage.json 指针文件、HKCU Run 里的 electron.app.DSH-launcher-KEWU、%TEMP% 下的 3L* 自解压残留，以及「除了本版启动器文件之外空无一物」的安装目录。
 - 不删：%APPDATA%\dsh-launcher（旧版启动器数据，机器上有几个 GB）与 ~/.dsh（DSH 家目录）只出现在 keep 里并写明原因；安装目录里混了别人的东西就只删启动器文件、目录保留并写警告；本版数据目录与旧版数据是同一个目录时，数据整体保留、只删程序文件。
 - 仓库里 tools/uninstall-kewu.ps1 是同一段脚本的离线版（不带默认路径，必须显式传 -ExePath），可以脱离启动器直接跑：
 

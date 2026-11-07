@@ -68,7 +68,7 @@
   },
   "build": {
     "appId": "com.local.dshlauncher",
-    "productName": "DSH Launcher",
+    "productName": "DSH-launcher-KEWU",
     "asar": true,
     "directories": {
       "output": "release"
@@ -92,21 +92,21 @@
         "portable",
         "nsis"
       ],
-      "artifactName": "KEWU-Portable-${version}.${ext}"
+      "artifactName": "DSH-launcher-KEWU-Portable-${version}.${ext}"
     },
     "portable": {
-      "artifactName": "KEWU-Portable-${version}.${ext}"
+      "artifactName": "DSH-launcher-KEWU-Portable-${version}.${ext}"
     },
     "nsis": {
-      "artifactName": "KEWU-Setup-${version}.${ext}",
+      "artifactName": "DSH-launcher-KEWU-Setup-${version}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "DSH启动器 KEWU",
-      "uninstallDisplayName": "DSH启动器：KEWU",
+      "shortcutName": "DSH-launcher-KEWU",
+      "uninstallDisplayName": "DSH-launcher-KEWU",
       "deleteAppDataOnUninstall": false,
       "installerLanguages": [
         "zh_CN"

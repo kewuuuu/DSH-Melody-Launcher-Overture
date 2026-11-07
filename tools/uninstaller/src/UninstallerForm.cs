@@ -1,4 +1,4 @@
-// KEWU 启动器卸载程序的图形界面：扫描 → 勾选 → 确认 → 逐条删除 → 汇总。
+// DSH-launcher-KEWU 卸载程序的图形界面：扫描 → 勾选 → 确认 → 逐条删除 → 汇总。
 // 只用 .NET Framework 4.x 自带的 WinForms，C# 5 语法。
 
 using System;
@@ -39,7 +39,7 @@ namespace KewuUninstaller
             _selfPath = selfPath;
             _log = LogSink.Open(selfDir, false);
 
-            Text = "KEWU 启动器卸载程序";
+            Text = "DSH-launcher-KEWU 卸载程序";
             ClientSize = new Size(760, 620);
             MinimumSize = new Size(660, 520);
             StartPosition = FormStartPosition.CenterScreen;
@@ -47,7 +47,7 @@ namespace KewuUninstaller
             AutoScaleMode = AutoScaleMode.Dpi;
 
             BuildLayout();
-            LogLine("KEWU 启动器卸载程序已启动。");
+            LogLine("DSH-launcher-KEWU 卸载程序已启动。");
             LogLine("卸载程序：" + (_selfPath ?? ""));
             LogLine("启动器目录：" + _launcherDir);
             LogLine("日志文件：" + _log.LogPath + (string.IsNullOrEmpty(_log.OpenError) ? "" : "（首选位置不可写：" + _log.OpenError + "）"));
@@ -61,7 +61,7 @@ namespace KewuUninstaller
             top.Height = 104;
 
             Label title = new Label();
-            title.Text = "KEWU 启动器卸载程序";
+            title.Text = "DSH-launcher-KEWU 卸载程序";
             title.Font = new Font(Font.FontFamily, 15f, FontStyle.Bold);
             title.AutoSize = true;
             title.Location = new Point(16, 12);
@@ -347,7 +347,7 @@ namespace KewuUninstaller
             List<UninstallItem> selected = SelectedItems();
             if (selected.Count == 0)
             {
-                MessageBox.Show("没有勾选任何要删除的条目。", "KEWU 启动器卸载程序", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("没有勾选任何要删除的条目。", "DSH-launcher-KEWU 卸载程序", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -435,7 +435,7 @@ namespace KewuUninstaller
                 + "\n已跳过：" + outcome.Skipped.ToString(CultureInfo.InvariantCulture)
                 + "\n失败：" + outcome.Failed.ToString(CultureInfo.InvariantCulture)
                 + "\n\n日志：" + _log.LogPath;
-            MessageBox.Show(summary, "KEWU 启动器卸载程序", MessageBoxButtons.OK,
+            MessageBox.Show(summary, "DSH-launcher-KEWU 卸载程序", MessageBoxButtons.OK,
                 outcome.Failed > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
             Rescan();
         }

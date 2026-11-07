@@ -30,7 +30,7 @@ const PackExportDialog = lazy(() => import('./components/dialogs/PackExportDialo
 const PackVersionCloneDialog = lazy(() => import('./components/dialogs/PackVersionCloneDialog').then(module => ({ default: module.PackVersionCloneDialog })))
 
 /** 产品名：前端可见文案与窗口标题统一用它（electron 主进程标题不在这里改）。 */
-const APP_TITLE = 'DSH启动器：KEWU'
+const APP_TITLE = 'DSH-launcher-KEWU'
 
 /**
  * 应用根。

@@ -12,7 +12,7 @@ import { LEGACY_DATA_DIRNAME, STORAGE_DATA_DIRNAME, STORAGE_POINTER_FILENAME } f
 
 /** 开机自启项的注册表位置与值名。 */
 export const UNINSTALL_LOGIN_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
-export const UNINSTALL_LOGIN_ITEM_NAME = 'electron.app.DSH Launcher'
+export const UNINSTALL_LOGIN_ITEM_NAME = 'electron.app.DSH-launcher-KEWU'
 
 /** %TEMP% 里便携版自解压目录的命名（3L 开头）。 */
 export const UNINSTALL_TEMP_RESIDUE_PREFIX = '3l'

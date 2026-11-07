@@ -24,9 +24,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-uninstaller.ps
 | exe | 同目录下的启动器主程序 | 勾选（删除） |
 | data | `<启动器目录>\launcher-data` | 不勾选（保留） |
 | pointer | `<启动器目录>\launcher-storage.json` | 勾选 |
-| registry-run | `HKCU\...\Run\electron.app.DSH Launcher` | 勾选 |
+| registry-run | `HKCU\...\Run\electron.app.DSH-launcher-KEWU` | 勾选 |
 | temp-residue-3l* | `%TEMP%\3L*` 自解压残留 | 勾选；有进程正从该目录运行则改为保留且不可勾选 |
-| installed-data | `%APPDATA%\KEWU-launcher` | 不勾选 |
+| installed-data | `%APPDATA%\DSH-launcher-KEWU` | 不勾选 |
 
 `%APPDATA%\dsh-launcher` 与 `%USERPROFILE%\.dsh` 固定展示为「始终保留」，不参与删除。
 「开始卸载」先弹确认框，执行前若发现启动器正从启动器目录 / 数据目录运行，会询问是否结束这些进程；

@@ -27,7 +27,7 @@ export const STORAGE_BROWSER_DATA_DIRNAME = 'browser-data'
 /** 旧版启动器固定的数据目录名（%APPDATA% 下的 dsh-launcher）。 */
 export const LEGACY_DATA_DIRNAME = 'dsh-launcher'
 /** 安装版（NSIS 装到用户目录）的数据目录名：压进 %APPDATA%，升级和卸载都不会连坐程序目录。 */
-export const INSTALLED_DATA_DIRNAME = 'KEWU-launcher'
+export const INSTALLED_DATA_DIRNAME = 'DSH-launcher-KEWU'
 
 export interface StorageResolution {
   dataDir: string

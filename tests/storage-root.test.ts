@@ -63,7 +63,7 @@ describe('resolveStorage', () => {
     const { options, exeDir, appDataPath } = fixture()
     const resolution = resolveStorage(options)
     expect(resolution.source).toBe('install')
-    expect(resolution.dataDir).toBe(path.join(appDataPath, 'KEWU-launcher'))
+    expect(resolution.dataDir).toBe(path.join(appDataPath, 'DSH-launcher-KEWU'))
     expect(resolution.portableDir).toBe(exeDir)
   })
 
