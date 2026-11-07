@@ -97,3 +97,20 @@
 - 已知成本：`path migrate dshHome` 会先给整个 DSH 家目录打备份包（本机 67,492 文件 / 2.1 GB → 859 MB zip，耗时数分钟），期间 CLI 会长时间无输出，空间占用短暂翻倍；迁移 2 GB 目录建议单独给足时间，不要用默认超时。
 - 该轮产物：`release\b4\DSH-Launcher-1.0.4-portable.exe`（92,589,873 字节，SHA256 `1F4F947C86400D1A4860EFD13FFA56233F523C4ED5A4669F39D659DCB60A4593`），解包版在 `release\b4\win-unpacked\`。
 - 未验证：真实 UAC 提权启动、Windows 登录后自启的实际触发、打包 EXE 的窗口截图（工具截屏对 Electron 窗口取不到画面）、续接请求对真实运行中 DSH 会话的端到端投递（队列、触发条件与 RPC 协议已分别单测，实机只验证到 `pending list`）。
+
+## 卸载功能（2026-11-07）
+
+- 口径：**只删「启动这个软件之后新增的内容」**。启动器 EXE、EXE 同级 `launcher-data`、`launcher-storage.json` 指针、开机自启项（`HKCU\...\Run\electron.app.DSH Launcher`）、`%TEMP%\3L*` 自解压残留算本版内容；`%APPDATA%\dsh-launcher`（旧启动器数据）与 `~/.dsh`（DSH 家目录）永不删。
+- 三个入口共用一套引擎：设置页「备份与卸载 → 卸载」面板（预览、导出脚本、立即卸载，两步确认）、CLI `uninstall plan|script|now`、以及 `tools/uninstall-kewu.ps1` + `tools/uninstall-kewu.cmd` 离线版（可脱离启动器双击运行）。界面能选择「把卸载脚本导出到某个目录」，导出的就是 ps1 + cmd 一对。
+- 引擎文件：`electron/uninstall-plan.ts`（纯计划，可注入 `existsSync/statTree/readDirNames/processImagePaths`）、`electron/uninstall-script.ts`（脚本模板 + 生成器，单测断言 `tools/uninstall-kewu.ps1` 与模板逐字一致）、`electron/uninstall.ts`（停包 ≤20 秒 → 写 `%TEMP%\kewu-uninstall-<8位hex>\{uninstall-kewu.ps1,run.cmd}` → detached 拉起 → 返回 `{started:true}`）、`electron/uninstall-ipc.ts`（三个 IPC，界面与 CLI 两条路都会通知主进程退出）。
+- **默认保留数据**：IPC 导出一律 `deleteData:false`；CLI 只有显式 `--delete-data` 才删数据（`--keep-data` 仍被接受但已无作用）。
+- 退出链路：`main.ts` 的 `quitAfterUninstallStarted()` 延后 300ms 再 `app.quit()`，先把 IPC/HTTP 回复写完；helper 用 `-WaitPid` 等启动器真正退出（最多 120 秒）再删。**CLI 这条路一开始没接退出**，实测 helper 白等 120 秒后中止、什么都没删，已修并加 `tests/uninstall-quit-hook.test.ts` 三例锁定。
+- **别人的解压目录不许删**：`%TEMP%\3L*` 里如果正有进程从里面运行（典型是用户另一个启动器实例），计划判 `keep` 并写明原因，ps1 侧还有 `Test-InUse` 二次守卫。改了这条以后，计划里 `3L5B3…`（用户实例）判 keep，只有真正的孤儿残留才 delete。
+- 日志：helper 的日志写在 `%TEMP%\kewu-uninstall-<8位hex>.log`（helper 目录旁边，不随目录自删消失）。
+- 实机验收（`D:\engine\DSH\test\uninstall-smoke`，该目录没有 Low 完整性标签，EXE 能跑）：`uninstall plan` 给出 `deleteBytes 910,426,752 / keepBytes 4,103,204,324`，逐项 action 符合预期；`uninstall now --yes --delete-data` 后 CLI 退出码 0，**2 秒后安装目录整棵消失**（EXE、launcher-data、目录本身），日志记录「已删除：安装目录」。同时复核用户数据：用户在跑的旧启动器 7 个进程仍在、`C:\Users\kewu0\.dsh` 67,492 文件、`%APPDATA%\dsh-launcher` 154,465 文件均未动，HKCU Run 键没有 `electron.app.DSH Launcher`。
+- 已知台账：卸载时自己那一份解压目录（正在运行的那个 `3L*`）会被判 keep，卸载后可能留下 1 个残留目录，日志里会写「1 项没有删掉」。这是「不删别人正在用的目录」的同一条规则带来的副作用，用户可手动删。
+- 回归：`npx tsc --noEmit` 0 error；`npx vitest run` 130 文件通过 / 9 跳过，**1186 passed / 11 skipped / 0 failed**；`npm run build` 通过。
+- 提交：`6f4058d`（装配 + 默认保留数据）、`8b4e726`（in-use 守卫）、`93853c1`（CLI 退出 + 计划注入 processImagePaths）、`a46481f`（CLI 文档）。
+- 产物：`release\b5\DSH-Launcher-1.0.4-portable.exe`（92,594,198 字节，SHA256 `B1E383BC5D2953A8FF08073095FDA82CB234753C71D5825CA08005BBDB357B7E`），解包版 `release\b5\win-unpacked\`；卸载程序 `release\b5\uninstall-kewu.cmd` + `release\b5\uninstall-kewu.ps1`（与 `tools\` 下同源）。
+- 未验证：真实 UAC 提权下的卸载、界面点「立即卸载」这条 UI 链路（只验证了它复用的同一个 service 与同一个 `quitAfterUninstallStarted`）。
+
