@@ -33,6 +33,8 @@ export function createLauncherControl(options: {
   prepareOfficeCliTool?: import('./runtime').RuntimeControllerOptions['prepareOfficeCliTool']
   /** 父级接线时可注入同一条队列给 IPC 复用；缺省按 userData 建一条。 */
   pendingResumeQueue?: PendingResumeQueue
+  /** 卸载服务；没有装配时 uninstall.* 命令一律报错而不是静默跳过。 */
+  uninstall?: import('./uninstall').UninstallService
 }) {
   const { userData, settings } = options
   const storage = options.storage
@@ -190,6 +192,11 @@ export function createLauncherControl(options: {
     },
   }
   // 启动器自身随登录启动：设置里的 launchAtLogin 是唯一开关（包 autoStart 只管启动器起来后拉包）。
+  const uninstallService = (): import('./uninstall').UninstallService => {
+    const service = options.uninstall
+    if (!service) throw new Error('当前进程没有装配卸载引擎：主进程没有传入 uninstall 服务。')
+    return service
+  }
   const applyLaunchAtLogin = async (patch: Record<string, unknown>): Promise<{ launchAtLogin: boolean }> => {
     let enabled = (await settings.readStored()).launchAtLogin === true
     if (patch.enabled !== undefined) {
@@ -286,6 +293,17 @@ export function createLauncherControl(options: {
         return { resume: entry, runtime: deliverPending(request, result) }
       }
       if (request?.command === 'storage.reset') return storage.reset()
+      if (request?.command === 'uninstall.plan') return uninstallService().plan()
+      if (request?.command === 'uninstall.script') {
+        const out = request.args?.out
+        if (typeof out !== 'string' || !out.trim()) throw new Error('uninstall script 需要一个导出目录，例如 uninstall script --out D:\\卸载脚本。')
+        if (!path.isAbsolute(out)) throw new Error('uninstall script 的 --out 必须是绝对路径，当前收到：' + out + '。')
+        return uninstallService().exportScript(out, { deleteData: request.args?.keepData !== true && request.args?.deleteData !== false })
+      }
+      if (request?.command === 'uninstall.run') {
+        if (request.args?.confirm !== true) throw new Error('卸载会删除启动器文件，必须带 --yes 确认：uninstall now --yes')
+        return uninstallService().run({ deleteData: request.args?.keepData !== true })
+      }
       return deliverPending(request, await control.execute(request))
     },
   }

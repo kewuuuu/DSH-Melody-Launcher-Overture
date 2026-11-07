@@ -235,3 +235,31 @@ $ node bin/launcher-control.cjs path migrate dshHome 'D:/dsh-home'
 
 返回 {kind,current,backupId,removedOld,warning}：current 是写进设置的新路径；backupId 是旧目录的备份条目，没有旧数据时为 null；removedOld 表示旧目录是否已经删除；warning 是中文提示（有包在跑所以保留旧目录，或旧目录删不掉需要手动清理）。迁移过程中不会启动或停止任何整合包。
 
+## 卸载
+
+~~~sh
+node bin/launcher-control.cjs uninstall plan --json
+node bin/launcher-control.cjs uninstall script --out 'D:/卸载脚本'
+node bin/launcher-control.cjs uninstall now --yes
+node bin/launcher-control.cjs uninstall now --keep-data --yes
+~~~
+
+三条命令都要连到正在运行的启动器（control 端点），走的是同一套 localhost + token 通道。
+
+- uninstall plan 只算不删：返回 {executablePath, installDir, dataDir, items, deleteBytes, keepBytes, warnings}。每个 item 是 {id,label,path,kind,sizeBytes,fileCount,action,reason?}，kind 为 file / directory / registry，action 为 delete / keep；keep 一定带 reason。
+- uninstall script --out <目录> 把 uninstall-kewu.ps1 与 uninstall-kewu.cmd 写进该目录：ps1 里已经填好当前 EXE 与数据目录，cmd 只负责用 --ExecutionPolicy Bypass 把 ps1 拉起来（-ExePath ... -DataDir ... -Yes）。加 --keep-data 导出的是「只删程序、保留数据」的版本。用户在选目录对话框里取消时返回 null。
+- uninstall now --yes [--keep-data] 才真的动手：先停掉所有整合包（最多等 20 秒，超时抛「还有整合包在运行，已中止卸载」），再把 ps1 与 run.cmd 写进 %TEMP%\kewu-uninstall-<8位随机>\，detached 拉起后立刻返回 {started:true}；主进程随即 app.quit()，helper 自己轮询等启动器退出（最多 120 秒）再删，最后删掉自己的临时目录。
+
+规则来自用户原则「删掉启动这个软件之后新增的内容，之前的都不要动」：
+
+- 删：EXE 本身、EXE 同级 launcher-data（本版数据）、launcher-storage.json 指针文件、HKCU Run 里的 electron.app.DSH Launcher、%TEMP% 下的 3L* 自解压残留，以及「除了本版启动器文件之外空无一物」的安装目录。
+- 不删：%APPDATA%\dsh-launcher（旧版启动器数据，机器上有几个 GB）与 ~/.dsh（DSH 家目录）只出现在 keep 里并写明原因；安装目录里混了别人的东西就只删启动器文件、目录保留并写警告；本版数据目录与旧版数据是同一个目录时，数据整体保留、只删程序文件。
+- 仓库里 tools/uninstall-kewu.ps1 是同一段脚本的离线版（不带默认路径，必须显式传 -ExePath），可以脱离启动器直接跑：
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/uninstall-kewu.ps1 -ExePath 'D:/apps/DSH Launcher/DSH Launcher.exe' -DryRun
+~~~
+
+-DryRun 只打印计划；-DeleteData 才会连本版数据一起删；-WaitPid <进程号> 会先等那个进程退出再删；退出码 0/1；日志默认写到脚本同目录的 uninstall-log.txt。仓库里的这份文件由 electron/uninstall-script.ts 生成（UTF-8 带 BOM），测试会断言两者逐字一致，所以别手改。
+
+

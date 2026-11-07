@@ -26,6 +26,9 @@ const HELP = `DSH Launcher control (Node >=20)
   pending retry <id>
   pending discard <id>
   path migrate dshHome|dshInstallPath <absolute-directory>
+  uninstall plan
+  uninstall script --out <absolute-directory> [--keep-data]
+  uninstall now --yes [--keep-data]
   resource <operation> <pack-id> --args '{...}'
   pack <operation> [pack-id] --args '{...}'
   request <dotted.command> [pack-id] --args '{...}'
@@ -38,7 +41,7 @@ Protocols: openai-completions, openai-responses, anthropic-messages
 Set DSH_LAUNCHER_USER_DATA instead of --user-data if desired.
 --launcher starts only the executable supplied, when control is unavailable.
 `
-const FLAG_KEYS = ['user-data','launcher','args','port','port-mode','run-as-admin','auto-start','pinned-at','workspace','launch-args','name','base-url','protocol','models','api-key','resume','session','pack']
+const FLAG_KEYS = ['user-data','launcher','args','port','port-mode','run-as-admin','auto-start','pinned-at','workspace','launch-args','name','base-url','protocol','models','api-key','resume','session','pack','out']
 function objectJSON(value) {
   const result = JSON.parse(value)
   if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('--args requires a JSON object')
@@ -50,14 +53,14 @@ function parse(argv) {
     const item = argv[i]
     if (!item.startsWith('--')) { words.push(item); continue }
     const key = item.slice(2)
-    if (['json', 'help'].includes(key)) { flags[key] = true; continue }
+    if (['json', 'help', 'keep-data', 'yes'].includes(key)) { flags[key] = true; continue }
     if (!FLAG_KEYS.includes(key)) throw new Error('Unknown option: ' + item)
     if (i + 1 >= argv.length || argv[i+1].startsWith('--')) throw new Error('Missing value for ' + item)
     flags[key] = argv[++i]
   }
   if (flags.help) return { help: true }
   const group = words.shift(), action = words.shift()
-  let command, packId, storageDir, apiRoute, apiEnabled, launchAtLogin, pendingPackId, pendingId, pathKind, pathTarget
+  let command, packId, storageDir, apiRoute, apiEnabled, launchAtLogin, pendingPackId, pendingId, pathKind, pathTarget, uninstallOut
   if (group === 'request') { command = action; packId = words.shift() }
   else if (group === 'pack' && action === 'api') {
     const operation = words.shift()
@@ -109,6 +112,20 @@ function parse(argv) {
     if (!pathTarget) throw new Error('path migrate 需要一个目标目录：path migrate <dshHome|dshInstallPath> <绝对路径目录>')
     if (!path.isAbsolute(pathTarget)) throw new Error('path migrate 的目录必须是绝对路径，当前收到：' + pathTarget)
   }
+  else if (group === 'uninstall') {
+    if (!['plan', 'script', 'now'].includes(action)) throw new Error('用法：uninstall plan | uninstall script --out <绝对路径目录> | uninstall now --yes')
+    if (action === 'plan') command = 'uninstall.plan'
+    else if (action === 'script') {
+      command = 'uninstall.script'
+      const out = flags.out
+      if (!out) throw new Error('uninstall script 需要一个导出目录：uninstall script --out <绝对路径目录>')
+      if (!path.isAbsolute(out)) throw new Error('uninstall script 的 --out 必须是绝对路径，当前收到：' + out)
+      uninstallOut = path.resolve(out)
+    } else {
+      if (!flags.yes) throw new Error('卸载会删除启动器文件，必须带 --yes 确认：uninstall now --yes')
+      command = 'uninstall.run'
+    }
+  }
   else if (['pack','settings','resource'].includes(group) && action) { command = (group === 'resource' ? 'pack.resources' : group) + '.' + action; packId = words.shift() }
   else throw new Error('A command is required. Use --help')
   if (words.length) throw new Error('Unexpected positional arguments')
@@ -149,6 +166,16 @@ function parse(argv) {
   if (pendingPackId !== undefined) args.packId = pendingPackId
   if (pendingId !== undefined) args.id = pendingId
   if (pathKind !== undefined) { args.kind = pathKind; args.target = path.resolve(pathTarget) }
+  if (flags.out !== undefined && command !== 'uninstall.script') throw new Error('--out 只用于 uninstall script')
+  if (uninstallOut !== undefined) args.out = uninstallOut
+  if (flags['keep-data'] !== undefined) {
+    if (!['uninstall.script', 'uninstall.run'].includes(command)) throw new Error('--keep-data 只用于 uninstall script 或 uninstall now')
+    args.keepData = true
+  }
+  if (flags.yes !== undefined) {
+    if (command !== 'uninstall.run') throw new Error('--yes 只用于 uninstall now')
+    args.confirm = true
+  }
   if (flags.pack !== undefined && command !== 'pending.list') throw new Error('--pack 只用于 pending list')
   if (flags.resume !== undefined) {
     if (command !== 'pack.restart') throw new Error('--resume 只用于 pack restart <pack-id>')
