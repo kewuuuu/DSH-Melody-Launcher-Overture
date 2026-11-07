@@ -35,6 +35,8 @@ export function createLauncherControl(options: {
   pendingResumeQueue?: PendingResumeQueue
   /** 卸载服务；没有装配时 uninstall.* 命令一律报错而不是静默跳过。 */
   uninstall?: import('./uninstall').UninstallService
+  /** helper 已经起好之后的通知：主进程据此退出，helper 才能删掉被占用的 EXE。 */
+  onUninstallStarted?: () => void
 }) {
   const { userData, settings } = options
   const storage = options.storage
@@ -302,7 +304,10 @@ export function createLauncherControl(options: {
       }
       if (request?.command === 'uninstall.run') {
         if (request.args?.confirm !== true) throw new Error('卸载会删除启动器文件，必须带 --yes 确认：uninstall now --yes')
-        return uninstallService().run({ deleteData: request.args?.deleteData === true })
+        const result = await uninstallService().run({ deleteData: request.args?.deleteData === true })
+        // CLI 和界面走的是两条路：IPC 那条在自己的 handler 里退出，这条只有 facade 能通知父级。
+        options.onUninstallStarted?.()
+        return result
       }
       return deliverPending(request, await control.execute(request))
     },

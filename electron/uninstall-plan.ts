@@ -4,6 +4,7 @@
 // 所以只有本版启动器自己创建的文件进 delete 列表；%APPDATA%\\dsh-launcher（旧版启动器
 // 数据）与用户目录下的 .dsh（DSH 家目录）永远只出现在 keep 里，并且带上原因。
 
+import { execFileSync } from 'node:child_process'
 import { existsSync as defaultExistsSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import type { UninstallItem, UninstallPlan } from '../src/types'
@@ -41,6 +42,8 @@ export interface UninstallPlanInput {
   tempDir: string
   /** 是否连本版数据目录一起删；缺省 true。 */
   deleteData?: boolean
+  /** 正在运行的进程可执行文件路径；用来避开别的启动器实例的解压目录。缺省在 Windows 上问一次 PowerShell。 */
+  processImagePaths?: () => string[]
   existsSync?: (target: string) => boolean
   statTree?: (target: string) => UninstallTreeInfo | null
   readDirNames?: (dir: string) => string[]
@@ -65,6 +68,21 @@ function isInside(child: string, parent: string): boolean {
 
 function isDriveRoot(target: string): boolean {
   return /^[a-zA-Z]:$/.test(target.replace(/[\\/]+$/, ''))
+}
+
+/** 一次性取出所有进程的镜像路径；任何失败都当「查不到」，不影响其余计划。 */
+function defaultProcessImagePaths(): string[] {
+  if (process.platform !== 'win32') return []
+  try {
+    const output = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', 'Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }'],
+      { encoding: 'utf8', windowsHide: true, timeout: 8000, maxBuffer: 8 * 1024 * 1024 },
+    )
+    return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  } catch {
+    return []
+  }
 }
 
 function defaultReadDirNames(dir: string): string[] {
@@ -112,6 +130,7 @@ export function createUninstallPlan(input: UninstallPlanInput): UninstallPlan {
   const exists = input.existsSync ?? defaultExistsSync
   const statTree = input.statTree ?? defaultStatTree
   const readDirNames = input.readDirNames ?? defaultReadDirNames
+  const processImagePaths = input.processImagePaths
   const deleteData = input.deleteData !== false
 
   const executablePath = path.resolve(input.executablePath)
@@ -311,10 +330,13 @@ export function createUninstallPlan(input: UninstallPlanInput): UninstallPlan {
   // %TEMP% 里本版便携版自己解出来的 3L* 目录。
   if (exists(tempDir)) {
     const residues = readDirNames(tempDir).filter((name) => name.toLowerCase().startsWith(UNINSTALL_TEMP_RESIDUE_PREFIX))
+    // 有进程正住在目录里（通常是另一个启动器实例）时不能删：删了那个实例随时会崩。
+    const imagePaths = residues.length > 0 ? (processImagePaths ?? defaultProcessImagePaths)() : []
     for (const name of residues) {
       const target = path.join(tempDir, name)
       if (!exists(target)) continue
       const info = measure(target)
+      const inUse = imagePaths.some((image) => isSamePath(image, target) || isInside(image, target))
       items.push({
         id: 'temp-residue-' + name.toLowerCase(),
         label: '便携版自解压残留',
@@ -322,11 +344,9 @@ export function createUninstallPlan(input: UninstallPlanInput): UninstallPlan {
         kind: 'directory',
         sizeBytes: info.sizeBytes,
         fileCount: info.fileCount,
-        action: 'delete',
+        action: inUse ? 'keep' : 'delete',
+        ...(inUse ? { reason: '有进程正从这个目录运行（可能是另一个启动器实例），按规则保留' } : {}),
       })
-    }
-    if (residues.length > 0) {
-      warnings.push('自解压残留可能正被占用：删不掉只会记进 warnings，不影响其余步骤。')
     }
   }
 

@@ -45,6 +45,8 @@ const planFor = (layout: Layout, overrides: Record<string, unknown> = {}) =>
     legacyDataDir: layout.legacyDataDir,
     dshHome: layout.dshHome,
     tempDir: layout.tempDir,
+    // 默认不查真进程：测试要可重复，需要时用 overrides.processImagePaths 显式给。
+    processImagePaths: () => [],
     ...overrides,
   })
 const byId = (plan: UninstallPlan, id: string): UninstallItem | undefined =>
@@ -121,7 +123,7 @@ describe('uninstall plan', () => {
     expect(byId(planFor(layout), 'pointer')).toBeUndefined()
   })
 
-  it('%TEMP% 下只列 3L* 自解压残留，并提醒可能删不掉', async () => {
+  it('%TEMP% 下只列 3L* 自解压残留', async () => {
     const layout = await sandbox()
     await mkdir(path.join(layout.tempDir, '3Labc123'))
     await writeFile(path.join(layout.tempDir, '3Labc123', 'payload.bin'), 'x')
@@ -132,7 +134,21 @@ describe('uninstall plan', () => {
     expect(byId(plan, 'temp-residue-3labc123')).toMatchObject({ action: 'delete', kind: 'directory' })
     expect(byId(plan, 'temp-residue-3ldef456')).toMatchObject({ action: 'delete' })
     expect(byId(plan, 'temp-residue-unrelated')).toBeUndefined()
-    expect(plan.warnings.join()).toContain('自解压残留可能正被占用')
+  })
+
+  it('有进程正从自解压目录里跑时改判保留，不碰别的启动器实例', async () => {
+    const layout = await sandbox()
+    const live = path.join(layout.tempDir, '3Labc123')
+    await mkdir(live)
+    await mkdir(path.join(layout.tempDir, '3Ldef456'))
+
+    const plan = planFor(layout, {
+      processImagePaths: () => [path.join(live, 'DSH Launcher.exe')],
+    })
+    const kept = byId(plan, 'temp-residue-3labc123')
+    expect(kept).toMatchObject({ action: 'keep' })
+    expect(kept?.reason).toContain('有进程正从这个目录运行')
+    expect(byId(plan, 'temp-residue-3ldef456')).toMatchObject({ action: 'delete' })
   })
 
   it('EXE 不在预期位置时给警告，但计划照旧继续', async () => {

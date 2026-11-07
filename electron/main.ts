@@ -1092,9 +1092,15 @@ function createServices(): Services {
     openExternal: url => shell.openExternal(url), fallbackWorkspace: () => app.getPath('documents'),
     fetchImpl: githubAuth.fetch, emitOutput: text => events.output('runtime', 'info', text),
     legacyRuntimeRunning: () => runtime.isRunning(), prepareOfficeCliTool,
-    loginRegistration, uninstall,
+    loginRegistration, uninstall, onUninstallStarted: quitAfterUninstallStarted,
   })
   return { packControl, uninstall, uninstallPlan, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
+}
+
+// helper 已在 %TEMP% 里跑起来，主进程必须让位：EXE 被自己占着就永远删不掉。
+// 延后一拍是为了先把 IPC/HTTP 的回复写完，别让响应跟着进程一起消失。
+function quitAfterUninstallStarted(): void {
+  setTimeout(() => app.quit(), 300)
 }
 
 function openMainWindow(): void {
@@ -1247,7 +1253,7 @@ app.whenReady().then(async () => {
     ipcMain,
     service: services.uninstall,
     dataDir: app.getPath('userData'),
-    onStarted: () => app.quit(),
+    onStarted: quitAfterUninstallStarted,
   })
   // 启动时按设置校正一次登录项：缺省 false 会主动注销历史遗留的旧注册项。
   syncLaunchAtLogin(startupSettings, services.loginRegistration)
