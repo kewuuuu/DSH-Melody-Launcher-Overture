@@ -216,6 +216,29 @@ describe.skipIf(!canRun)('KEWU Uninstaller EXE', () => {
     expect(existsSync(installedData), '--delete-data 应删除安装版数据目录').toBe(false)
   })
 
+  // 真实用户的 launcher-data 里有 dsh-runtime\node_modules\.pnpm\... 这种超过 260 字符的路径，
+  // .NET 的 DirectoryInfo / File.Delete 会在计划阶段就抛 PathTooLongException，卸载直接失败（2026-11-08 用户实测）。
+  it('数据目录里有超过 260 字符的深路径时，--plan 能算出大小、--delete-data 能删净', { timeout: 180_000 }, () => {
+    const fakeExe = path.join(launcherDir, 'FakeLauncher.exe')
+    writeFileSync(fakeExe, 'x')
+    const dataDir = path.join(launcherDir, 'launcher-data')
+    let deep = path.join(dataDir, 'dsh-runtime')
+    mkdirSync(deep, { recursive: true })
+    const segment = 'nested-dependency-folder-name-that-is-long'
+    for (let level = 0; level < 6; level += 1) deep = path.join(deep, segment)
+    mkdirSync(deep, { recursive: true })
+    const deepFile = path.join(deep, 'index.js')
+    writeFileSync(deepFile, 'deep')
+    expect(deepFile.length, '夹具必须真的超过 260 个字符').toBeGreaterThan(260)
+
+    const plan = runPlanFile()
+    const dataItem = plan.items.find((item) => item.id === 'data')
+    expect(dataItem?.sizeBytes, '深路径也要能算出大小，而不是 0').toBeGreaterThan(0)
+
+    const result = runHeadless(['--dir', launcherDir, '--run', '--yes', '--delete-data'])
+    expect(result.status, `--delete-data 应以 0 退出（stdout: ${result.stdout} stderr: ${result.stderr}）`).toBe(0)
+    expect(existsSync(dataDir), '含深路径的数据目录应被整棵删除').toBe(false)
+  })
   it('缺 --yes 时拒绝执行（退出码 2）且不删任何东西', { timeout: 120_000 }, () => {
     const fakeExe = path.join(launcherDir, 'FakeLauncher.exe')
     writeFileSync(fakeExe, 'x')

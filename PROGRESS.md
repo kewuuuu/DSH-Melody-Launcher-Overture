@@ -164,3 +164,15 @@
 - 测试：`tests/uninstaller-exe.test.ts` 增加源码守卫（含 `AutoScaleMode.None`、不含 `AutoScaleMode.Dpi`、含 `FlowLayoutPanel` 与 `DockStyle.Right`）；`--selftest-layout` 的进程内 GUI 断言在 vitest 里会超时不退出，故不入测试。全量 `npx vitest run` 131 文件通过 / 9 跳过，1193 passed / 11 skipped。
 - 产物：`release\b7\DSH-launcher-KEWU-Uninstaller-1.0.4.exe` 与交付副本 `D:\DSH-launcher-KEWU\DSH-launcher-KEWU-Uninstaller-1.0.4.exe` 均为 137,728 字节，SHA256 `5FE98949233E062CC7D431C2490BFEC3E8B7D483088840AB3DE061F259F67C11`（csc 每次编译 PE 时间戳不同，两份副本取的是同一次编译输出）。
 - 未验证：真人点击（用 `BM_CLICK`/`WM_CLOSE` 程序化模拟）、其它 DPI 缩放比例下的显示。
+
+## 卸载器删不掉深路径数据目录（2026-11-08）
+
+- 用户反馈：在 `D:\engine\DSH\test` 用卸载器删 `launcher-data` 失败（勾选后仍然失败）。
+- 根因：该数据目录里有 `dsh-runtime\versions\0.2.2-rc.1\node_modules\.pnpm\…` 这类深层文件，最长路径 319 字符（>260）。旧版在**计划阶段**就抛 `System.IO.PathTooLongException: 指定的路径或文件名太长…`（栈顶 `KewuUninstaller.TreeMeasure.Measure` → `UninstallPlanBuilder.Build` → `HeadlessRunner.Run`），退出码 1，一个文件都没删。
+- 关键坑：csc 编出来的 .NET Framework 4.0 产物（无 app.config）对 `\\?\D:\…` 前缀的 `Directory.Exists` 返回 **false**，所以「给 .NET API 加长路径前缀」这条路走不通；PowerShell 对同样前缀返回 true（PS 的 app.config 关了 LegacyPathHandling），不能拿 PS 的结论推断卸载器。
+- 修复（`tools/uninstaller/src/Program.cs`）：新增 `NativeFs`（`FindFirstFileW/FindNextFileW/GetFileAttributesW/DeleteFileW/RemoveDirectoryW` + `\?` 前缀，UNC 用 `\?UNC`）与 `FsEntry`；`TreeMeasure.Measure` 与 `TreeDelete` 全量改走 Win32 长路径 API（reparse point 只删自身，不递归）；失败项汇总成「还有 N 项删不掉」或「目录仍然存在」。
+- 实证：同一份 9,768,922 字节 / 292 文件 / 最深 319 字符的数据目录副本，旧 b7 版退出码 1（PathTooLongException），新版 `--run --yes --delete-data` 输出「已删除 2，已跳过 0，失败 0 / 退出码：0」并删净整棵；`--plan` 能算出 `sizeBytes=9768922`（旧版算不出来）。
+- 回归：`tests/uninstaller-exe.test.ts` 新增「数据目录里有超过 260 字符的深路径时，--plan 能算出大小、--delete-data 能删净」；全量 `npx vitest run` 131 文件通过 / 9 跳过，1194 passed / 11 skipped（1205）；`npx tsc --noEmit` 0 error。
+- 卸载器的条目规则（回答「为什么只有几项」）：条目按**当前是否存在**生成——`exe`（默认勾选删）、`本版数据目录`（默认保留）、`launcher-storage.json` 指针（存在才列，默认删）、`开机自启项`（HKCU Run 有值才列，默认删）、`%TEMP%\3L*` 自解压残留（存在才列，默认删；有进程住在里面就改成保留）、`安装版数据目录 %APPDATA%\DSH-launcher-KEWU`（存在才列，默认保留）；另有两条恒保留不可勾选：`%APPDATA%\dsh-launcher`、`%USERPROFILE%\.dsh`。没有任何不列出来却偷偷删的动作。
+- 产物：`release\b7\DSH-launcher-KEWU-Uninstaller-1.0.4.exe` 与 `D:\DSH-launcher-KEWU\DSH-launcher-KEWU-Uninstaller-1.0.4.exe` 均为 139,776 字节，SHA256 `606E33FCF39F249D180D1A8507959EF1B35298C92732FE39EF939CA20B56B68E`。
+- 未完成：`D:\engine\DSH\test` 里那份旧卸载器被用户正在运行的实例锁定（PID 12212），未能覆盖；关掉那个窗口后才能替换。

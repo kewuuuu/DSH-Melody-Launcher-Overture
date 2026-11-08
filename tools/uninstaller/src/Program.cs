@@ -228,6 +228,156 @@ namespace KewuUninstaller
         }
     }
 
+    /// <summary>文件系统枚举/删除：\?\ 前缀 + Win32 API，绕开 .NET 的 260 字符上限。</summary>
+    internal sealed class FsEntry
+    {
+        public string Name = "";
+        public long Size;
+        public bool IsDirectory;
+        public bool IsReparsePoint;
+    }
+
+    internal static class NativeFs
+    {
+        private const uint FileAttributeDirectory = 0x10;
+        private const uint FileAttributeReparsePoint = 0x400;
+        private const uint FileAttributeReadOnly = 0x1;
+        private const uint InvalidFileAttributes = 0xFFFFFFFF;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WIN32_FIND_DATAW
+        {
+            public uint dwFileAttributes;
+            public uint ftCreationLow;
+            public uint ftCreationHigh;
+            public uint ftAccessLow;
+            public uint ftAccessHigh;
+            public uint ftWriteLow;
+            public uint ftWriteHigh;
+            public uint nFileSizeHigh;
+            public uint nFileSizeLow;
+            public uint dwReserved0;
+            public uint dwReserved1;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string cFileName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)]
+            public string cAlternateFileName;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr FindFirstFileW(string pattern, out WIN32_FIND_DATAW data);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool FindNextFileW(IntPtr handle, out WIN32_FIND_DATAW data);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool FindClose(IntPtr handle);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFileAttributesW(string path);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool SetFileAttributesW(string path, uint attributes);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool DeleteFileW(string path);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool RemoveDirectoryW(string path);
+
+        /// <summary>加 \?\ 前缀（UNC 走 \?\UNC\），已经是带前缀的原样返回。</summary>
+        public static string Long(string target)
+        {
+            if (string.IsNullOrEmpty(target)) return target;
+            if (target.StartsWith(@"\\?\", StringComparison.Ordinal)) return target;
+            if (target.StartsWith(@"\\", StringComparison.Ordinal)) return @"\\?\UNC\" + target.Substring(2);
+            return @"\\?\" + target;
+        }
+
+        public static uint Attributes(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return InvalidFileAttributes;
+            return GetFileAttributesW(Long(path));
+        }
+
+        public static bool Exists(string path)
+        {
+            return Attributes(path) != InvalidFileAttributes;
+        }
+
+        public static bool DirectoryExists(string path)
+        {
+            uint attributes = Attributes(path);
+            return attributes != InvalidFileAttributes && (attributes & FileAttributeDirectory) != 0;
+        }
+
+        public static bool FileExists(string path)
+        {
+            uint attributes = Attributes(path);
+            return attributes != InvalidFileAttributes && (attributes & FileAttributeDirectory) == 0;
+        }
+
+        /// <summary>列一层子项；列不出来就返回空表（调用方自己决定算不算失败）。</summary>
+        public static List<FsEntry> List(string dir)
+        {
+            List<FsEntry> entries = new List<FsEntry>();
+            if (string.IsNullOrEmpty(dir)) return entries;
+            string pattern = Long(dir.TrimEnd('\\')) + @"\*";
+            WIN32_FIND_DATAW data;
+            IntPtr handle = FindFirstFileW(pattern, out data);
+            if (handle == new IntPtr(-1)) return entries;
+            try
+            {
+                while (true)
+                {
+                    string name = data.cFileName;
+                    if (!string.IsNullOrEmpty(name) && name != "." && name != "..")
+                    {
+                        FsEntry entry = new FsEntry();
+                        entry.Name = name;
+                        entry.Size = ((long)data.nFileSizeHigh << 32) + data.nFileSizeLow;
+                        entry.IsDirectory = (data.dwFileAttributes & FileAttributeDirectory) != 0;
+                        entry.IsReparsePoint = (data.dwFileAttributes & FileAttributeReparsePoint) != 0;
+                        entries.Add(entry);
+                    }
+                    if (!FindNextFileW(handle, out data)) break;
+                }
+            }
+            finally
+            {
+                FindClose(handle);
+            }
+            return entries;
+        }
+
+        public static bool ClearReadOnly(string path)
+        {
+            uint attributes = Attributes(path);
+            if (attributes == InvalidFileAttributes) return false;
+            if ((attributes & FileAttributeReadOnly) == 0) return true;
+            return SetFileAttributesW(Long(path), attributes & ~FileAttributeReadOnly);
+        }
+
+        public static bool DeleteFile(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            ClearReadOnly(path);
+            return DeleteFileW(Long(path));
+        }
+
+        public static bool RemoveDirectory(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            return RemoveDirectoryW(Long(path));
+        }
+
+        public static string LastError()
+        {
+            int code = Marshal.GetLastWin32Error();
+            return "错误码 " + code;
+        }
+    }
+
     /// <summary>目录树体积；超过 5 万文件就停，不把界面拖死。</summary>
     internal sealed class TreeMeasure
     {
@@ -243,7 +393,7 @@ namespace KewuUninstaller
             if (string.IsNullOrEmpty(target)) return null;
             TreeMeasure info = new TreeMeasure();
 
-            if (File.Exists(target))
+            if (NativeFs.FileExists(target))
             {
                 try
                 {
@@ -255,7 +405,7 @@ namespace KewuUninstaller
                 }
                 return info;
             }
-            if (!Directory.Exists(target)) return null;
+            if (!NativeFs.DirectoryExists(target)) return null;
 
             bool touched = false;
             int visited = 0;
@@ -270,44 +420,25 @@ namespace KewuUninstaller
                 string key = PathUtil.Normalize(current);
                 if (!seen.Add(key)) continue;
 
-                DirectoryInfo dir = new DirectoryInfo(current);
-                if (!dir.Exists) continue;
+                if (!NativeFs.DirectoryExists(current)) continue;
                 touched = true;
 
-                FileInfo[] files;
-                try { files = dir.GetFiles(); }
-                catch (Exception) { files = new FileInfo[0]; }
-                for (int i = 0; i < files.Length; i++)
+                List<FsEntry> entries = NativeFs.List(current);
+                for (int i = 0; i < entries.Count; i++)
                 {
-                    try
+                    FsEntry entry = entries[i];
+                    if (entry.IsDirectory)
                     {
-                        info.Bytes += files[i].Length;
-                        info.Files++;
+                        // 不跟符号链接/联接点走，避免成环。
+                        if (!entry.IsReparsePoint) pending.Push(current.TrimEnd('\\') + "\\" + entry.Name);
+                        continue;
                     }
-                    catch (Exception)
-                    {
-                    }
+                    info.Bytes += entry.Size;
+                    info.Files++;
                     visited++;
                     if (visited >= EntryLimit) { info.Truncated = true; break; }
                 }
                 if (info.Truncated) break;
-
-                DirectoryInfo[] children;
-                try { children = dir.GetDirectories(); }
-                catch (Exception) { children = new DirectoryInfo[0]; }
-                for (int i = 0; i < children.Length; i++)
-                {
-                    try
-                    {
-                        // 不跟符号链接/联接点走，避免成环。
-                        if ((children[i].Attributes & FileAttributes.ReparsePoint) != 0) continue;
-                    }
-                    catch (Exception)
-                    {
-                        continue;
-                    }
-                    pending.Push(children[i].FullName);
-                }
             }
 
             if (!touched) return null;
@@ -315,6 +446,43 @@ namespace KewuUninstaller
         }
     }
 
+    /// <summary>递归删除目录树：全程走 Win32 + \?\ 前缀，超过 260 字符的 node_modules 也能删。</summary>
+    internal static class TreeDelete
+    {
+        public static void DeleteTree(string target)
+        {
+            if (string.IsNullOrEmpty(target)) return;
+            if (!NativeFs.DirectoryExists(target)) return;
+            List<string> blocked = new List<string>();
+            DeleteInto(target.TrimEnd('\\'), blocked);
+            if (blocked.Count > 0)
+                throw new IOException("还有 " + blocked.Count + " 项删不掉，第一个是：" + blocked[0]);
+            if (NativeFs.DirectoryExists(target)) throw new IOException("目录仍然存在：" + target);
+        }
+
+        private static void DeleteInto(string dir, List<string> blocked)
+        {
+            List<FsEntry> entries = NativeFs.List(dir);
+            for (int i = 0; i < entries.Count; i++)
+            {
+                FsEntry entry = entries[i];
+                string child = dir + "\\" + entry.Name;
+                if (entry.IsDirectory)
+                {
+                    if (entry.IsReparsePoint)
+                    {
+                        // 联接点/符号链接只删链接本身，不跟进去，避免删到别处。
+                        if (!NativeFs.RemoveDirectory(child)) blocked.Add(child + "（" + NativeFs.LastError() + "）");
+                        continue;
+                    }
+                    DeleteInto(child, blocked);
+                    continue;
+                }
+                if (!NativeFs.DeleteFile(child)) blocked.Add(child + "（" + NativeFs.LastError() + "）");
+            }
+            if (!NativeFs.RemoveDirectory(dir)) blocked.Add(dir + "（" + NativeFs.LastError() + "）");
+        }
+    }
     internal static class JsonText
     {
         public static string Escape(string value)
@@ -739,28 +907,31 @@ namespace KewuUninstaller
 
                 if (string.Equals(item.Kind, "file", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (!File.Exists(item.Path))
+                    if (!NativeFs.FileExists(item.Path))
                     {
                         result.Ok = true;
                         result.Skipped = true;
                         result.Message = "文件已不存在";
                         return result;
                     }
-                    ClearReadOnlyFile(item.Path);
-                    File.Delete(item.Path);
+                    if (!NativeFs.DeleteFile(item.Path))
+                    {
+                        result.Ok = false;
+                        result.Message = "删除文件失败（" + NativeFs.LastError() + "）：" + item.Path;
+                        return result;
+                    }
                     result.Ok = true;
                     return result;
                 }
 
-                if (!Directory.Exists(item.Path))
+                if (!NativeFs.DirectoryExists(item.Path))
                 {
                     result.Ok = true;
                     result.Skipped = true;
                     result.Message = "目录已不存在";
                     return result;
                 }
-                ClearReadOnlyTree(item.Path);
-                Directory.Delete(item.Path, true);
+                TreeDelete.DeleteTree(item.Path);
                 result.Ok = true;
                 return result;
             }
@@ -769,30 +940,6 @@ namespace KewuUninstaller
                 result.Ok = false;
                 result.Message = ex.GetType().Name + ": " + ex.Message;
                 return result;
-            }
-        }
-
-        private static void ClearReadOnlyFile(string file)
-        {
-            try
-            {
-                FileAttributes attributes = File.GetAttributes(file);
-                if ((attributes & FileAttributes.ReadOnly) != 0) File.SetAttributes(file, attributes & ~FileAttributes.ReadOnly);
-            }
-            catch (Exception)
-            {
-            }
-        }
-
-        private static void ClearReadOnlyTree(string dir)
-        {
-            try
-            {
-                string[] files = Directory.GetFiles(dir, "*", SearchOption.AllDirectories);
-                for (int i = 0; i < files.Length; i++) ClearReadOnlyFile(files[i]);
-            }
-            catch (Exception)
-            {
             }
         }
     }
