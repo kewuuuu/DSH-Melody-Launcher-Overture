@@ -96,9 +96,8 @@ describe('workspace skills: 扫描', () => {
     const home = await makeRoot()
     const service = createWorkspaceSkillsService({ home: () => home })
     const overview = await service.list()
-    expect(overview.workspaces).toEqual([
-      { id: 'global', title: '全局', path: path.join(home, 'skills'), missing: true },
-    ])
+    // 全局组由界面按 scope 汇总，不列入 workspaces。
+    expect(overview.workspaces).toEqual([])
     expect(overview.skills).toEqual([])
   })
 
@@ -109,7 +108,7 @@ describe('workspace skills: 扫描', () => {
     await writeBundle(path.join(home, 'skills'), 'only-global', 'only-global', '全局技能')
 
     const overview = await createWorkspaceSkillsService({ home: () => home }).list()
-    expect(overview.workspaces.map(group => group.id)).toEqual(['global'])
+    expect(overview.workspaces.map(group => group.id)).toEqual([])
     expect(overview.skills.map(skill => skill.id)).toEqual(['global/only-global'])
   })
 
@@ -127,7 +126,6 @@ describe('workspace skills: 扫描', () => {
 
     const overview = await createWorkspaceSkillsService({ home: () => home }).list()
     expect(overview.workspaces).toEqual([
-      { id: 'global', title: '全局', path: path.join(home, 'skills'), missing: false },
       { id: WORKSPACE_ID, title: '示例工作区', path: workspaceRoot, missing: false },
       { id: '22222222-2222-4222-8222-222222222222', title: '幽灵工作区', path: path.join(home, 'ghost', '.dsh', 'skills'), missing: true },
     ])
@@ -260,7 +258,7 @@ describe('workspace skills: IPC 装配', () => {
     expect(removed).toHaveLength(4)
 
     const listed = await handlers.get(IPC.workspaceSkillsList)!({}) as WorkspaceSkillsOverview
-    expect(listed.workspaces.map(group => group.id)).toEqual(['global', WORKSPACE_ID])
+    expect(listed.workspaces.map(group => group.id)).toEqual([WORKSPACE_ID])
 
     await handlers.get(IPC.workspaceSkillsReveal)!({}, `${WORKSPACE_ID}/ws-skill`)
     expect(revealPath).toHaveBeenCalledWith(path.join(workspaceRoot, 'ws-skill'))

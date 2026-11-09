@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { readFile, mkdir, symlink, lstat, realpath, rm, readdir, link } from 'node:fs/promises'
+import { readFile, mkdir, symlink, lstat, realpath, rm, readdir, link, rename } from 'node:fs/promises'
 import type { AppSettings, LauncherControlRequest, PackControlConfig } from '../src/types'
 import { readPackRegistry, toPackStatus, type PackRecord } from './pack-registry'
 import { writeFileAtomic } from './fs-atomic'
@@ -49,7 +49,23 @@ export function createPackControl(options: PackControlOptions) {
     return next
   }
   async function configs(): Promise<Record<string, PackControlConfig>> {
-    try { return JSON.parse(await readFile(configPath, 'utf8')) } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw e }
+    let text: string
+    try {
+      text = await readFile(configPath, 'utf8')
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {}
+      throw e
+    }
+    // 记事本一类编辑器会写 BOM，JSON.parse 见到它直接抛，整页整合包列表会跟着变红。
+    try {
+      return JSON.parse(text.replace(/^\uFEFF/, '')) as Record<string, PackControlConfig>
+    } catch (error) {
+      // 手改坏的配置不该连累列表：留档一份再按默认值继续，别让用户丢文件。
+      const backup = configPath + '.corrupt-' + Date.now()
+      await rename(configPath, backup).catch(() => undefined)
+      console.warn('[pack-control] 配置文件解析失败，已留档到 ' + backup, error)
+      return {}
+    }
   }
   async function config(id: string): Promise<PackControlConfig> {
     const base = await options.readSettings()

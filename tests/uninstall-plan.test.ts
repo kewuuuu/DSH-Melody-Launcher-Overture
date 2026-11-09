@@ -107,10 +107,25 @@ describe('uninstall plan', () => {
 
     expect(byId(plan, 'install-dir')).toBeUndefined()
     expect(byId(plan, 'exe')?.action).toBe('delete')
-    const kept = plan.items.find(item => item.path === path.join(layout.installDir, 'notes.txt'))
-    expect(kept).toMatchObject({ action: 'keep' })
+    const kept = byId(plan, 'install-dir-keep-other')
+    expect(kept).toMatchObject({ action: 'keep', path: layout.installDir, fileCount: 1 })
     expect(kept?.reason).toContain('按规则保留')
     expect(plan.warnings.join()).toContain('安装目录里还有不属于本版启动器的内容')
+  })
+
+  it('安装目录里成百上千个别人的文件也只聚合成一行', async () => {
+    const layout = await sandbox()
+    const runtime = path.join(layout.installDir, 'resources')
+    await mkdir(runtime, { recursive: true })
+    for (const name of ['a.bin', 'b.bin', 'c.bin']) await writeFile(path.join(runtime, name), 'xx')
+    await writeFile(path.join(layout.installDir, 'libEGL.dll'), 'dll')
+
+    const plan = planFor(layout)
+    const kept = plan.items.filter(item => item.id.startsWith('install-dir-keep'))
+    expect(kept).toHaveLength(1)
+    expect(kept[0]).toMatchObject({ id: 'install-dir-keep-other', kind: 'directory', path: layout.installDir, fileCount: 4 })
+    expect(kept[0].label).toBe('安装目录里的其他内容（2 项）')
+    expect(kept[0].sizeBytes).toBeGreaterThan(0)
   })
 
   it('指针文件存在才进删除列表', async () => {

@@ -282,35 +282,29 @@ export function createUninstallPlan(input: UninstallPlanInput): UninstallPlan {
       action: 'delete',
     })
   } else if (foreign.length > 0) {
-    const names = foreign.slice(0, FOREIGN_ITEM_LIMIT)
-    for (const name of names) {
-      const target = path.join(installDir, name)
-      const info = measure(target)
-      items.push({
-        id: 'install-dir-keep-' + name.toLowerCase(),
-        label: '安装目录里的其他内容',
-        path: target,
-        kind: 'file',
-        sizeBytes: info.sizeBytes,
-        fileCount: info.fileCount,
-        action: 'keep',
-        reason: '不属于本版启动器创建的内容，按规则保留',
-      })
+    // 安装目录里可能放着 Electron 运行时（几千个文件）：聚合成一行，别把计划刷成文件清单。
+    let keptSize = 0
+    let keptFiles = 0
+    for (const name of foreign) {
+      const info = measure(path.join(installDir, name))
+      keptSize += info.sizeBytes
+      keptFiles += info.fileCount
     }
-    if (foreign.length > names.length) {
-      items.push({
-        id: 'install-dir-keep-rest',
-        label: '安装目录里的其他内容（其余 ' + (foreign.length - names.length) + ' 项）',
-        path: installDir,
-        kind: 'directory',
-        sizeBytes: 0,
-        fileCount: 0,
-        action: 'keep',
-        reason: '不属于本版启动器创建的内容，按规则保留',
-      })
-    }
+    items.push({
+      id: 'install-dir-keep-other',
+      label: '安装目录里的其他内容（' + foreign.length + ' 项）',
+      path: installDir,
+      kind: 'directory',
+      sizeBytes: keptSize,
+      fileCount: keptFiles,
+      action: 'keep',
+      reason: '不属于本版启动器创建的内容，按规则保留',
+    })
+    const shown = foreign.slice(0, FOREIGN_ITEM_LIMIT)
     warnings.push(
-      '安装目录里还有不属于本版启动器的内容（' + names.join('、') + '）：本次只删除启动器文件，目录保留。',
+      '安装目录里还有不属于本版启动器的内容（' + shown.join('、')
+        + (foreign.length > shown.length ? ' 等 ' + foreign.length + ' 项' : '')
+        + '）：本次只删除启动器文件，目录保留。',
     )
   } else if (dataBlocksDir) {
     warnings.push('安装目录里留着要保留的本版数据：目录整体保留，只删除程序文件。')

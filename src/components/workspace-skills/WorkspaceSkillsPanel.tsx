@@ -27,6 +27,8 @@ export function groupSkills(overview: WorkspaceSkillsOverview): SkillGroupView[]
     skills: overview.skills.filter(skill => skill.scope === 'global'),
   }]
   for (const workspace of overview.workspaces) {
+    // 旧版后端会把全局组也塞进 workspaces，这里跳过，避免和上面那组撞 key。
+    if (workspace.id === 'global') continue
     groups.push({
       key: workspace.id,
       title: workspace.title,

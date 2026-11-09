@@ -276,7 +276,8 @@ export function createSettingsStore(options: SettingsStoreOptions): SettingsStor
     const defaults = options.createDefaults()
     let parsed: Partial<AppSettings> | null = null
     try {
-      parsed = JSON.parse(await readFile(options.filePath, 'utf8')) as Partial<AppSettings>
+      // BOM 会让 JSON.parse 抛错，随后静默回落成默认设置——用户以为保存过的东西全没了。
+      parsed = JSON.parse((await readFile(options.filePath, 'utf8')).replace(/^\uFEFF/, '')) as Partial<AppSettings>
     } catch {
       parsed = null
     }

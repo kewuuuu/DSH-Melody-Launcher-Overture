@@ -188,7 +188,7 @@ function BalanceBody({ balance, usage, loading }: {
     return (
       <div className="start-state">
         <strong>还没有配置 API Key</strong>
-        <p>到「设置 → API 密钥」里填一个 DeepSeek SK，可用余额与今日 Token 就会显示在这里。</p>
+        <p>到「设置 → API 库」里填一个 DeepSeek SK，可用余额与今日 Token 就会显示在这里。</p>
       </div>
     )
   }

@@ -213,7 +213,8 @@ async function overview(home: string): Promise<WorkspaceSkillsOverview> {
   const groups = await buildGroups(home)
   const skills: WorkspaceSkillEntry[] = []
   for (const group of groups) skills.push(...await scanGroup(group))
-  return { skills, workspaces: groups.map(group => group.group) }
+  // 全局组由界面自己按 scope 汇总，不属于「工作区」列表：混进来会多出一个同名的空分组。
+  return { skills, workspaces: groups.filter(group => group.group.id !== GLOBAL_SKILLS_GROUP).map(group => group.group) }
 }
 
 /** id 形状是 <groupId>/<name>，两段都只允许单个路径段。 */

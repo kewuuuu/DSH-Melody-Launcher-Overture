@@ -23,7 +23,7 @@ beforeEach(() => {
 afterEach(() => {
   setDefaultBackupEngine(null)
 })
-import { mkdtemp, mkdir, writeFile, readFile, rm, lstat } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, lstat, readdir } from 'node:fs/promises'
 import { createServer, connect } from 'node:net'
 import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
@@ -185,5 +185,20 @@ describe('explicit pack control', () => {
     await expect(control.assertPackRemovable('a')).rejects.toThrow('Unlink shared references')
     await control.execute({ command: 'pack.resources.remove', packId: 'b', args: { kind: 'skills', name: 'shared-skill' } })
     expect(await readFile(path.join(source, 'SKILL.md'), 'utf8')).toContain('Hello')
+  })
+  it('reads a config file saved with a BOM instead of failing the whole pack list', async () => {
+    const { root, control } = await fixture()
+    await writeFile(path.join(root, 'pack-control.json'), '\uFEFF' + JSON.stringify({ a: { portMode: 'fixed', port: 46100 } }))
+    const list = await control.execute({ command: 'pack.list' }) as { packs: Array<{ id: string; config: { portMode: string; port: number } }> }
+    expect(list.packs.find(p => p.id === 'a')!.config).toMatchObject({ portMode: 'fixed', port: 46100 })
+  })
+  it('keeps the list usable when the config file is broken and archives the broken file', async () => {
+    const { root, control } = await fixture()
+    await writeFile(path.join(root, 'pack-control.json'), '{"a": {"portMode": "fix')
+    const list = await control.execute({ command: 'pack.list' }) as { packs: Array<{ id: string; config: { portMode: string } }> }
+    expect(list.packs.map(p => p.id)).toEqual(['a', 'b'])
+    expect(list.packs[0].config.portMode).toBe('auto')
+    expect((await readdir(root)).some(name => name.startsWith('pack-control.json.corrupt-'))).toBe(true)
+    await expect(readFile(path.join(root, 'pack-control.json'), 'utf8')).rejects.toThrow()
   })
 })
