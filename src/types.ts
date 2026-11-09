@@ -55,6 +55,11 @@ export interface AppSettings {
   openAfterLaunch: boolean
   /** 启动器自身是否随 Windows 登录启动（隐藏窗口进托盘）；与整合包的 autoStart 无关。 */
   launchAtLogin?: boolean
+  /**
+   * 停止以管理员权限运行的整合包时，允许弹一次 UAC 去结束它。
+   * 默认 true：监督进程不在时这是唯一能停下来的路径；关掉则只给可复制的命令。
+   */
+  elevatedStopPrompt?: boolean
   /** 启动器界面配色；主表面由同一基色的明暗层级构成。 */
   uiTheme?: UiTheme
   /** 外观自定义（主题色/透明度/背景图/头像）；旧存档无此字段。 */
@@ -1072,6 +1077,26 @@ export interface PackExportPrivacy {
   sessions?: boolean
 }
 
+/**
+ * 启动器之外仍在运行的 DSH 实例：启动器退出/重启、提权监督进程消失后留下的进程。
+ * 它不属于任何内存中的运行控制器，所以只能靠扫描进程认领。
+ */
+export interface ExternalRuntime {
+  /** 真正承载 DSH 的 node 进程。 */
+  pid: number
+  /** 从命令行读到的监听端口；读不到为 null。 */
+  port: number | null
+  startedAt: string | null
+  /** 由端口拼出的本地地址；没有端口时为 null。 */
+  url: string | null
+  /** 命令行里的 profile，等于整合包 id。 */
+  profileName: string
+  /** 结束它是否需要管理员权限（本进程探测不到 PROCESS_TERMINATE 即为 true）。 */
+  requiresElevation: boolean
+  /** 停止它时可用的提权会话记录；没有记录时为 null。 */
+  elevatedSession: string | null
+}
+
 export interface PackStatus {
   id: string
   name: string
@@ -1091,6 +1116,8 @@ export interface PackStatus {
   native?: boolean
   /** 官方默认整合包的版本号（有值 = 官方包，可删可恢复）。 */
   officialVersion?: string
+  /** 这个包有一份启动器没在托管的运行实例（遗留进程）；没有就是 null/省略。 */
+  externalRuntime?: ExternalRuntime | null
   state: 'complete' | 'partial' | 'failed'
   plugins: PackInstalledPlugin[]
   skills?: PackInstalledSkill[]
