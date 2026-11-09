@@ -40,6 +40,8 @@ export function PackDashboard(props: Props) {
   const nameInputRef = useRef<HTMLInputElement>(null)
   const packs = useMemo(() => sortPacks(control.packs.filter(pack => pack.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())), sort, descending), [control.packs, query, sort, descending])
   const selectedPack = control.packs.find(pack => pack.id === selected)
+  /** 不是本启动器托管的运行实例（启动器退出、提权监督进程消失后留下的进程）：单独计数，不算进「正在运行」。 */
+  const externalCount = control.packs.filter(pack => pack.externalRuntime).length
   const patch = (pack: ControlledPack, values: Partial<PackControlConfig>) => control.run('pack.config.set', pack.id, values)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
@@ -95,11 +97,19 @@ export function PackDashboard(props: Props) {
     <div className="pack-table-scroll"><table className="pack-table"><thead><tr><th><Pin size={13} aria-label="置顶" /></th><th>整合包名称</th><th>端口</th><th>运行操作</th><th>管理员</th><th>配置</th><th>自启</th><th>删除</th></tr></thead><tbody>
       {packs.map(pack => {
         const busy = control.busy.includes(pack.id)
+        const external = pack.externalRuntime ?? null
         return <tr key={pack.id} className={pack.config.pinnedAt ? 'pack-pinned' : undefined}>
           <td><button className={'icon-button ' + (pack.config.pinnedAt ? 'is-pinned' : '')} title={pack.config.pinnedAt ? '取消置顶' : '置顶'} aria-label={(pack.config.pinnedAt ? '取消置顶 ' : '置顶 ') + pack.name} aria-pressed={Boolean(pack.config.pinnedAt)} disabled={busy} onClick={() => void patch(pack, { pinnedAt: pack.config.pinnedAt ? null : new Date().toISOString() })}><Pin size={15} /></button></td>
-          <td><button className="pack-name" onClick={() => setSelected(pack.id)}>{pack.name}</button><small><i className={pack.runtime.running ? 'running' : ''} />{busy ? '正在处理' : pack.runtime.running ? '运行中' : '未运行'} · DSH {pack.dshVersion ?? '未指定'}{pack.native ? ' · 共用家目录' : ''}</small></td>
+          <td><button className="pack-name" onClick={() => setSelected(pack.id)}>{pack.name}</button><small><i className={pack.runtime.running ? 'running' : external ? 'external' : ''} />{busy ? '正在处理' : pack.runtime.running ? '运行中' : external ? '外部运行中' : '未运行'} · DSH {pack.dshVersion ?? '未指定'}{pack.native ? ' · 共用家目录' : ''}</small></td>
           <td><PortEditor key={pack.id + ':' + pack.config.port + ':' + pack.config.portMode} pack={pack} disabled={busy} onSave={values => void patch(pack, values)} /></td>
-          <td><div className="pack-row-actions">{busy ? <LoaderCircle size={16} className="spin" /> : pack.runtime.running ? <><button className="secondary-button" onClick={() => void control.run('pack.stop', pack.id)} title="停止"><Square size={13} />停止</button><button className="icon-button" aria-label={'重启 ' + pack.name} onClick={() => void control.run('pack.restart', pack.id)}><RefreshCw size={15} /></button><button className="icon-button" aria-label={'打开网页 ' + pack.name} disabled={!pack.runtime.url} onClick={() => void control.run('pack.openWeb', pack.id)}><ExternalLink size={15} /></button></> : <button className="primary-button" onClick={() => void control.run('pack.start', pack.id)}><Play size={13} />启动</button>}</div></td>
+          <td><div className="pack-row-actions">{busy ? <LoaderCircle size={16} className="spin" /> : pack.runtime.running ? <><button className="secondary-button" onClick={() => void control.run('pack.stop', pack.id)} title="停止"><Square size={13} />停止</button><button className="icon-button" aria-label={'重启 ' + pack.name} onClick={() => void control.run('pack.restart', pack.id)}><RefreshCw size={15} /></button><button className="icon-button" aria-label={'打开网页 ' + pack.name} disabled={!pack.runtime.url} onClick={() => void control.run('pack.openWeb', pack.id)}><ExternalLink size={15} /></button></> : <button className="primary-button" disabled={external !== null} title={external ? '先停止未托管的实例' : '启动'} onClick={() => void control.run('pack.start', pack.id)}><Play size={13} />启动</button>}</div>
+            {/* 未托管实例不在内存里的运行控制器里，只能就地认领再停：给它单独一行状态和一个停止按钮。 */}
+            {external && !busy && <div className="pack-external">
+              <span className="pack-external-state" title="不是本启动器托管的实例，停止会中断它上面正在进行的对话">外部运行中 · PID {external.pid}{external.port === null ? '' : ' · :' + external.port}</span>
+              <button type="button" className="secondary-button" aria-label={'停止未托管实例 ' + pack.name} title="不是本启动器托管的实例，停止会中断它上面正在进行的对话" onClick={() => void control.run('pack.stop', pack.id, undefined, { inlineError: true })}><Square size={13} />停止</button>
+            </div>}
+            {!busy && control.inlineErrors[pack.id] && <p className="pack-external-error" role="alert">{control.inlineErrors[pack.id]}</p>}
+          </td>
           <td><input type="checkbox" aria-label={'以管理员运行 ' + pack.name} checked={pack.config.runAsAdmin} disabled={busy} onChange={event => void patch(pack, { runAsAdmin: event.target.checked })} /></td>
           <td><button className="icon-button" aria-label={'配置 ' + pack.name} onClick={() => setSelected(pack.id)}><Settings2 size={17} /></button></td>
           <td><input type="checkbox" aria-label={'自动启动 ' + pack.name} checked={pack.config.autoStart} disabled={busy} onChange={event => void patch(pack, { autoStart: event.target.checked })} /></td>
@@ -111,7 +121,7 @@ export function PackDashboard(props: Props) {
     </tbody></table></div>
     {control.loading && <div className="pack-empty"><LoaderCircle className="spin" size={18} />正在读取整合包…</div>}
     {!control.loading && !control.error && packs.length === 0 && <div className="pack-empty">{query ? '没有匹配的整合包' : '还没有整合包。新建一个，或导入一个。'}</div>}
-    <footer className="pack-dashboard-footer"><span>{control.packs.filter(pack => pack.runtime.running).length} 个正在运行</span><span>置顶按时间排列 · 启动参数在下次启动时生效</span></footer>
+    <footer className="pack-dashboard-footer"><span>{control.packs.filter(pack => pack.runtime.running).length} 个正在运行</span>{externalCount > 0 && <span className="pack-external-count">另有 {externalCount} 个未托管实例在运行</span>}<span>置顶按时间排列 · 启动参数在下次启动时生效</span></footer>
     {selectedPack && <PackControlDialog key={selectedPack.id} pack={selectedPack} busy={control.busy.includes(selectedPack.id)} onClose={() => setSelected(null)} onSave={values => patch(selectedPack, values)} onRefresh={control.refresh} onExport={() => props.onExport(selectedPack.id)} onImportSessions={() => props.onImportSessions(selectedPack.id)} onCloneVersion={() => props.onCloneVersion(selectedPack.id)} installedDshVersions={props.installedDshVersions} onUpgradeVersion={version => props.onUpgradeVersion(selectedPack.id, version)} />}
   </section>
 }

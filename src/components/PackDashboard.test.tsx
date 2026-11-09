@@ -88,3 +88,68 @@ it('deletes a pack only after an inline confirmation and stops it first', async 
   expect(requests).toContainEqual({ command: 'pack.stop', packId: 'alpha', args: undefined })
   expect(onRemove).toHaveBeenCalledWith('alpha')
 })
+
+/** 启动器之外仍在跑的实例（pid 3420 / :3080 正是这次报障的那一个）。 */
+const unmanagedRuntime = { pid: 3420, port: 3080, startedAt: '2025-01-02T03:04:05.000Z', url: 'http://127.0.0.1:3080', profileName: 'alpha', requiresElevation: true, elevatedSession: null }
+
+function demoPack(overrides: Record<string, unknown> = {}) {
+  return { id: 'alpha', name: 'Alpha', dshVersion: '1.0', installedAt: '2025-01-01', config: { portMode: 'auto', port: 3080, runAsAdmin: true, autoStart: false, pinnedAt: null }, runtime: { running: false, port: null, url: null }, ...overrides }
+}
+
+/** 最小壳：接了 pack.list / pack.stop，只关心「点了发什么」和「失败显示什么」。 */
+async function mountDashboard(packs: unknown[], stopError?: string) {
+  const requests: Array<{ command: string; packId?: string; args?: Record<string, unknown> }> = []
+  const bridge = vi.fn(async (request: { command: string; packId?: string; args?: Record<string, unknown> }): Promise<unknown> => {
+    requests.push(request)
+    if (request.command === 'pack.stop' && stopError) throw new Error(stopError)
+    if (request.command === 'pack.list') return { packs }
+    return {}
+  })
+  const api = { launcherControl: bridge } as unknown as LauncherApi
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  roots.push(root)
+  await act(async () => root.render(<LauncherApiProvider value={api}><PackDashboard installedDshVersions={['1.0']} onCreate={async () => true} onImport={() => {}} onExport={() => {}} onImportSessions={() => {}} onCloneVersion={() => {}} onRemove={async () => true} onUpgradeVersion={async () => true} onOpenVersions={() => {}} /></LauncherApiProvider>))
+  return { container, requests }
+}
+
+it('reports an unmanaged instance with its pid and port, outside the managed running total', async () => {
+  const { container } = await mountDashboard([
+    demoPack({ externalRuntime: unmanagedRuntime }),
+    demoPack({ id: 'beta', name: 'Beta', externalRuntime: { ...unmanagedRuntime, pid: 99, port: null, profileName: 'beta' } }),
+  ])
+  expect(Array.from(container.querySelectorAll('.pack-external-state')).map(node => node.textContent))
+    .toEqual(['外部运行中 · PID 3420 · :3080', '外部运行中 · PID 99'])
+  const footer = container.querySelector('.pack-dashboard-footer')!.textContent!
+  expect(footer).toContain('0 个正在运行')
+  expect(footer).toContain('另有 2 个未托管实例在运行')
+  expect(container.querySelector('[aria-label="停止未托管实例 Alpha"]')!.getAttribute('title')).toContain('停止会中断它上面正在进行的对话')
+})
+
+it('stops the unmanaged instance through pack.stop with that pack id', async () => {
+  const { container, requests } = await mountDashboard([demoPack({ externalRuntime: unmanagedRuntime })])
+  const stop = container.querySelector<HTMLButtonElement>('[aria-label="停止未托管实例 Alpha"]')
+  expect(stop).not.toBeNull()
+  await act(async () => stop!.click())
+  expect(requests).toContainEqual({ command: 'pack.stop', packId: 'alpha', args: undefined })
+})
+
+it('disables start while an unmanaged instance holds the pack', async () => {
+  const { container } = await mountDashboard([demoPack({ externalRuntime: unmanagedRuntime }), demoPack({ id: 'beta', name: 'Beta' })])
+  const start = (name: string) => Array.from(container.querySelectorAll('tbody tr')).find(row => row.textContent?.includes(name))!.querySelector<HTMLButtonElement>('.primary-button')!
+  expect(start('Alpha').disabled).toBe(true)
+  expect(start('Alpha').getAttribute('title')).toBe('先停止未托管的实例')
+  expect(start('Beta').disabled).toBe(false)
+})
+
+it('reports a failed unmanaged stop inline instead of the page-level alert', async () => {
+  const message = '结束 PID 3420 失败：需要管理员权限'
+  const { container, requests } = await mountDashboard([demoPack({ externalRuntime: unmanagedRuntime })], message)
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="停止未托管实例 Alpha"]')!.click())
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(message)
+  expect(container.querySelector('.pack-error')).toBeNull()
+  expect(requests.filter(request => request.command === 'pack.stop')).toHaveLength(1)
+  // 失败后实例还在，按钮仍可再点一次。
+  expect(container.querySelector('[aria-label="停止未托管实例 Alpha"]')).not.toBeNull()
+})

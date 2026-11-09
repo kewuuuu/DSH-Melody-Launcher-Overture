@@ -119,3 +119,24 @@ it('取消更改把草稿恢复成已保存的设置', async () => {
   expect((container.querySelector('input[aria-label="随 Windows 登录启动"]') as HTMLInputElement).checked).toBe(false)
   expect(saved).toHaveLength(0)
 })
+const ELEVATED_STOP_LABEL = '停止提权整合包时允许弹出一次管理员权限请求'
+const elevatedStopBox = (container: HTMLElement) => container.querySelector('input[aria-label="' + ELEVATED_STOP_LABEL + '"]') as HTMLInputElement
+
+it('默认允许弹一次提权停止请求，关闭后显示为未勾选', async () => {
+  const byDefault = await mount()
+  expect(elevatedStopBox(byDefault.container).checked).toBe(true)
+  expect(byDefault.container.textContent).toContain('在监督进程不在时只能靠提权结束')
+  const turnedOff = await mount({ elevatedStopPrompt: false })
+  expect(elevatedStopBox(turnedOff.container).checked).toBe(false)
+})
+
+it('勾掉提权停止提示后，保存的草稿里 elevatedStopPrompt 为 false', async () => {
+  const { container, saved, button } = await mount()
+  const box = elevatedStopBox(container)
+  await act(async () => { box.click() })
+  expect(box.checked).toBe(false)
+  await act(async () => { button('保存设置').click() })
+  await act(async () => {})
+  expect(saved).toHaveLength(1)
+  expect(saved[0].elevatedStopPrompt).toBe(false)
+})

@@ -292,6 +292,15 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
               <span><strong>随 Windows 登录启动</strong><small>开机后自动把启动器收进托盘，不打开主窗口。</small></span>
             </label>
             <label className="check-field">
+              <input
+                type="checkbox"
+                aria-label="停止提权整合包时允许弹出一次管理员权限请求"
+                checked={draft.elevatedStopPrompt !== false}
+                onChange={event => patch({ elevatedStopPrompt: event.target.checked })}
+              />
+              <span><strong>停止提权整合包时允许弹出一次管理员权限请求</strong><small>以管理员权限运行的整合包，在监督进程不在时只能靠提权结束；关掉后只显示可执行的命令。</small></span>
+            </label>
+            <label className="check-field">
               <input type="checkbox" checked={draft.openAfterLaunch} onChange={event => patch({ openAfterLaunch: event.target.checked })} />
               <span><strong>启动后打开 Harness</strong><small>识别到本地 Web 地址时，在默认浏览器中打开。</small></span>
             </label>
