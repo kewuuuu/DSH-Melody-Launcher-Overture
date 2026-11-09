@@ -165,19 +165,31 @@ export async function clearElevatedSession(root: string, id: string): Promise<vo
   await rm(elevatedSessionPath(root, id), { force: true }).catch(() => undefined)
 }
 
-/** 命令行里的 --profile 值，支持 --profile x / --profile=x / 带引号。 */
+/**
+ * 开关可能被整体引号包住：启动器经 cmd 拉起时为 "--profile" "pack-test"。
+ * 因此引号既可能属于开关、也可能属于值，两种都要吃下：
+ *   --profile x / --profile=x / --profile "x" / "--profile" "x" / "--profile"="x"
+ */
+const PROFILE_FLAG = /--profile"?(?:\s*=\s*|\s+)(?:"([^"]*)"|'([^']*)'|([^\s"]+))/gi
+const PORT_FLAG = /--port"?(?:\s*=\s*|\s+)(?:"(\d{1,5})"|'(\d{1,5})'|(\d{1,5}))/i
+
+/** 命令行里的 --profile 值。 */
 function profileValues(commandLine: string): string[] {
   const values: string[] = []
-  const pattern = /--profile(?:=|\s+)(?:"([^"]*)"|'([^']*)'|(\S+))/g
+  PROFILE_FLAG.lastIndex = 0
   let match: RegExpExecArray | null
-  while ((match = pattern.exec(commandLine)) !== null) values.push(match[1] ?? match[2] ?? match[3] ?? '')
+  while ((match = PROFILE_FLAG.exec(commandLine)) !== null) {
+    const value = match[1] ?? match[2] ?? match[3] ?? ''
+    if (value) values.push(value)
+  }
+  PROFILE_FLAG.lastIndex = 0
   return values
 }
 
 function portValue(commandLine: string): number | null {
-  const match = /--port(?:=|\s+)(\d{1,5})/.exec(commandLine)
+  const match = PORT_FLAG.exec(commandLine)
   if (!match) return null
-  const port = Number(match[1])
+  const port = Number(match[1] ?? match[2] ?? match[3])
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
 }
 
@@ -226,17 +238,28 @@ function describe(row: ProcessSnapshot, profileName: string): ExternalRuntime {
   }
 }
 
+/** 同一个包可能同时命中 cmd 外壳和真正的 node 本体：本体才是能停的那个。 */
+function runtimeScore(row: ProcessSnapshot): number {
+  const commandLine = row.commandLine ?? ''
+  const name = (row.name ?? '').trim()
+  let score = /bin[.]js/i.test(commandLine) ? 1 : 0
+  if (/^node([.]exe)?$/i.test(name)) score += 2
+  else if (name) return score
+  else if (/^"?node([.]exe)?"?\s/i.test(commandLine)) score += 2
+  return score
+}
+
 function pickForProfile(rows: ProcessSnapshot[], profileName: string, exclude: Set<number>): ProcessSnapshot | null {
+  const wanted = profileName.toLowerCase()
   const candidates = rows
     .filter(row => !!row.commandLine)
     .filter(row => !exclude.has(row.pid))
-    .filter(row => profileValues(row.commandLine as string).includes(profileName))
+    .filter(row => profileValues(row.commandLine as string).some(value => value.toLowerCase() === wanted))
     .filter(row => isDshRuntime(row.commandLine as string))
-    .sort((a, b) => a.pid - b.pid)
   if (!candidates.length) return null
-  // 同一个包可能同时命中 cmd 外壳和真正的 node 本体，本体才是能停的那个。
-  const nodeRuntime = candidates.find(row => /bin[.]js/i.test(row.commandLine as string))
-  return nodeRuntime ?? candidates[0]
+  return candidates
+    .map(row => ({ row, score: runtimeScore(row) }))
+    .sort((a, b) => b.score - a.score || a.row.pid - b.row.pid)[0].row
 }
 
 /**

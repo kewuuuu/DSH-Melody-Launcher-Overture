@@ -45,6 +45,54 @@ describe('scanExternalRuntimes', () => {
     expect(target.elevatedSession).toBeNull()
   })
 
+  // 用户报障现场PID 3420 的真实命令行：开关与值各自带引号，bin.js 走 .bin\..\.pnpm 转发路径。
+  const REAL_ELEVATED_LINE = String.raw`node   "D:\engine\DSH\launcher-data\dsh-runtime\versions\0.2.1-rc.3\node_modules\.bin\\..\.pnpm\@deepseek-ai+dsh@0.2.1-rc.3_69264b859931b00ba724a30ed3ade154\node_modules\@deepseek-ai\dsh\lib\bin.js" "--profile" "pack-test" "--no-open" "--port" "3080"`
+
+  it('matches the quoted switch form the launcher itself spawns (real pid 3420 command line)', async () => {
+    __setExternalRuntimeDeps({ runPowerShell: async () => JSON.stringify([
+      { pid: CMD_SHELL, name: 'cmd.exe', commandLine: 'C:\\Windows\\system32\\cmd.exe /d /s /c ' + REAL_ELEVATED_LINE, elevated: true },
+      { pid: DSH_NODE, name: 'node.exe', commandLine: REAL_ELEVATED_LINE, startedAt: '2026-02-11T09:12:44.0000000Z', elevated: true },
+    ]) })
+    const found = await scanExternalRuntimes({ packs: [{ id: 'pack-test', profileName: 'pack-test' }, { id: 'web', profileName: 'web' }] })
+    expect(found.has('web')).toBe(false)
+    const target = found.get('pack-test') as ExternalRuntime
+    expect(target.pid).toBe(DSH_NODE)
+    expect(target.profileName).toBe('pack-test')
+    expect(target.port).toBe(3080)
+    expect(target.url).toBe('http://127.0.0.1:3080/')
+    expect(target.requiresElevation).toBe(true)
+  })
+
+  it('never reports the cmd wrapper even when its pid sorts first', async () => {
+    __setExternalRuntimeDeps({ runPowerShell: async () => JSON.stringify([
+      { pid: 3000, name: 'cmd.exe', commandLine: 'C:\\Windows\\system32\\cmd.exe /d /s /c ' + REAL_ELEVATED_LINE, elevated: true },
+      { pid: DSH_NODE, name: 'node.exe', commandLine: REAL_ELEVATED_LINE, elevated: true },
+    ]) })
+    const found = await scanExternalRuntimes({ packs: [{ id: 'pack-test', profileName: 'pack-test' }] })
+    expect(found.size).toBe(1)
+    expect((found.get('pack-test') as ExternalRuntime).pid).toBe(DSH_NODE)
+  })
+
+  it('accepts every --profile / --port spelling, including quoted switch and value', async () => {
+    const forms = [
+      ' --profile pack-test --port 3080',
+      ' --profile=pack-test --port=3080',
+      ' --profile "pack-test" --port "3080"',
+      ' "--profile" "pack-test" "--port" "3080"',
+      ' "--profile"="pack-test" "--port"="3080"',
+      ' --Profile=PACK-TEST --Port=3080',
+    ]
+    for (const form of forms) {
+      __setExternalRuntimeDeps({ runPowerShell: async () => JSON.stringify([
+        { pid: DSH_NODE, name: 'node.exe', commandLine: NODE_BIN + form, elevated: false },
+      ]) })
+      const found = await scanExternalRuntimes({ packs: [{ id: 'pack-test', profileName: 'pack-test' }] })
+      expect(found.get('pack-test')?.pid, form).toBe(DSH_NODE)
+      expect(found.get('pack-test')?.port, form).toBe(3080)
+      expect(found.get('pack-test')?.profileName, form).toBe('pack-test')
+    }
+  })
+
   it('ignores excluded pids and non dsh processes', async () => {
     __setExternalRuntimeDeps({ runPowerShell: async () => JSON.stringify([
       { pid: DSH_NODE, name: 'node.exe', commandLine: NODE_BIN + ' --profile pack-test --port 3080', elevated: false },
