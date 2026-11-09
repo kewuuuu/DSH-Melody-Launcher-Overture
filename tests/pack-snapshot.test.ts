@@ -327,14 +327,14 @@ describe('导出隐私勾选', () => {
       await mkdir(path.dirname(path.join(home, rel)), { recursive: true })
       await writeFile(path.join(home, rel), 'private-data')
     }
-    // 登记表与投影缓存永远不随包：前者 DSH 自建，后者是缓存。
+    // 投影缓存随「会话」类别走（标题与每会话用量只在它里面）；登记表 workspace.json 按机器绑定，永远不随包。
     await mkdir(path.join(home, 'storages', 'session_projcache', 'sessions'), { recursive: true })
     await writeFile(path.join(home, 'storages', 'workspace.json'), '{"unit":{"version":2}}')
     await writeFile(path.join(home, 'storages', 'session_projcache', 'sessions', 'session-a.json'), '{}')
     return home
   }
 
-  it('黑名单默认剔除；按类别勾选才放行，storages 始终不放开', () => {
+  it('黑名单默认剔除；按类别勾选才放行，storages 只放开投影缓存', () => {
     expect(isSnapshotExcluded('.credentials.yaml')).toBe(true)
     expect(isSnapshotExcluded('sessions/a/b.json')).toBe(true)
     expect(isSnapshotExcluded('attachments/v1/objects/aa/x')).toBe(true)
@@ -347,13 +347,54 @@ describe('导出隐私勾选', () => {
     // 只勾一项时另一项照样被剔除。
     expect(isSnapshotExcluded('.credentials.yaml', { sessions: true })).toBe(true)
     expect(isSnapshotExcluded('sessions/a/b.json', { credentials: true })).toBe(true)
-    // 登记表/缓存不在任何类别里：勾满也不放开。
+    // 登记表不在任何类别里：勾满也不放开。
     for (const include of [{ credentials: true, sessions: true }, {}]) {
       expect(isSnapshotExcluded('storages/workspace.json', include)).toBe(true)
-      expect(isSnapshotExcluded('storages/session_projcache/sessions/a.json', include)).toBe(true)
       expect(isSnapshotExcluded('dsh-usage/totals.json', include)).toBe(true)
       expect(isSnapshotExcluded('task-board/ledger.json', include)).toBe(true)
     }
+  })
+
+  it('投影缓存按路径段放行：子树进、兄弟不进、同名前缀不误伤', () => {
+    // 勾了会话：投影缓存整棵子树放行（目录本身也要放行，遍历才进得去）。
+    expect(isSnapshotExcluded('storages', { sessions: true })).toBe(false)
+    expect(isSnapshotExcluded('storages/session_projcache', { sessions: true })).toBe(false)
+    expect(isSnapshotExcluded('storages/session_projcache/sessions/abc.json', { sessions: true })).toBe(false)
+    // 旧版单文件缓存同样带出。
+    expect(isSnapshotExcluded('storages/session_projcache.json', { sessions: true })).toBe(false)
+    // 同一目录下的登记表与其它文件照样剔除。
+    expect(isSnapshotExcluded('storages/workspace.json', { sessions: true })).toBe(true)
+    expect(isSnapshotExcluded('storages/other.json', { sessions: true })).toBe(true)
+    // 前缀必须按路径段匹配：session_projcacheX 不是子树的一部分。
+    expect(isSnapshotExcluded('storages/session_projcacheX/a.json', { sessions: true })).toBe(true)
+    expect(isSnapshotExcluded('storages/session_projcache.jsonX', { sessions: true })).toBe(true)
+    // 没勾会话：投影缓存连目录一起不进包。
+    expect(isSnapshotExcluded('storages', {})).toBe(true)
+    expect(isSnapshotExcluded('storages/session_projcache', {})).toBe(true)
+    expect(isSnapshotExcluded('storages/session_projcache/sessions/abc.json', {})).toBe(true)
+    expect(isSnapshotExcluded('storages/session_projcache.json', {})).toBe(true)
+    // 只勾凭据也不带。
+    expect(isSnapshotExcluded('storages/session_projcache/sessions/abc.json', { credentials: true })).toBe(true)
+  })
+
+  it('导出件里带上投影缓存、不带登记表；不勾会话时 zip 里没有任何 storages 条目', async () => {
+    const home = await makePrivacyHome()
+
+    const privatePlan = await planSnapshot(home, { packId: 'pack-a', include: { sessions: true } })
+    const privateZip = path.join(home, '..', 'cache-private.zip')
+    await writeSnapshotZip(privatePlan, privateZip, {})
+    const privateNames = new AdmZip(privateZip).getEntries().map(entry => entry.entryName)
+    expect(privateNames).toContain('storages/session_projcache/sessions/session-a.json')
+    expect(privateNames).not.toContain('storages/workspace.json')
+    expect(privateNames.filter(name => name.startsWith('storages/'))).toEqual([
+      'storages/session_projcache/sessions/session-a.json',
+    ])
+
+    const plainPlan = await planSnapshot(home, { packId: 'pack-a' })
+    const plainZip = path.join(home, '..', 'cache-plain.zip')
+    await writeSnapshotZip(plainPlan, plainZip, {})
+    const plainNames = new AdmZip(plainZip).getEntries().map(entry => entry.entryName)
+    expect(plainNames.some(name => name === 'storages' || name.startsWith('storages/'))).toBe(false)
   })
 
   it('settings.yaml 里的密钥只在勾选时保留，onboarding 照删', () => {
@@ -393,8 +434,9 @@ describe('导出隐私勾选', () => {
       expect(existsSync(path.join(privateTarget, rel)), rel).toBe(true)
     }
     expect(await readFile(path.join(privateTarget, 'settings.yaml'), 'utf8')).toContain('sk-secret-value')
-    // 登记表与缓存仍然不在：导入端由 DSH 扫目录自建。
-    expect(existsSync(path.join(privateTarget, 'storages'))).toBe(false)
+    // 勾了会话才带投影缓存（标题与每会话用量靠它），登记表 workspace.json 仍然不在——它按机器绑定。
+    expect(existsSync(path.join(privateTarget, 'storages', 'session_projcache', 'sessions', 'session-a.json'))).toBe(true)
+    expect(existsSync(path.join(privateTarget, 'storages', 'workspace.json'))).toBe(false)
   })
 
   it('别人造的包按黑名单兜底：即使条目里塞了 sessions 也进不来', async () => {

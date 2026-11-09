@@ -79,8 +79,28 @@ export interface SnapshotPrivacyInclude {
 /** 每个类别对应家目录里的哪些顶层条目。settings.yaml 的密钥另算（见 scrubSecrets）。 */
 const PRIVACY_TOP_LEVEL: Record<SnapshotPrivacyCategory, ReadonlySet<string>> = {
   credentials: new Set(['.credentials.yaml']),
-  // 登记表 storages/ 不在这里：DSH 扫 sessions/ 会自建，投影缓存搬过去反而是脏的。
+  // storages/ 整体仍然是黑名单，只有下面 SESSIONS_STORAGE_PATHS 这几条在勾了会话时放行。
   sessions: new Set(['sessions', 'dsh-session-archive', 'attachments']),
+}
+
+/**
+ * `storages/` 里允许随「会话」类别带出的路径（按路径段匹配，不做字符串前缀）。
+ *
+ * 为什么必须带上投影缓存：会话标题与每会话的 token 用量只存在
+ * `session_projcache/sessions/<id>.json` 的 `record.title` / `record.rows.billTurns` 里，
+ * 不搬这棵子树，导入后会话列表全是「未命名」、用量统计为 0——会话日志本身不带标题。
+ * `session_projcache.json` 是 0.1.5 之前的旧版单文件缓存，同样存放标题，一并带上。
+ *
+ * 为什么只带这一棵子树：同一目录下的 `workspace.json` 是工作区登记表，里面写死了
+ * 源机的绝对路径与会话归属，按机器绑定——搬到另一台机器上只会指向不存在的目录，
+ * 所以它（以及 storages/ 下其它任何文件）继续被剔除。
+ */
+const SESSIONS_STORAGE_PATHS = ['storages/session_projcache', 'storages/session_projcache.json']
+
+/** 勾了会话时，`storages` 及其下是否落在放行清单里（祖先目录要放行，遍历才进得去）。 */
+function isSessionsStoragePath(rel: string): boolean {
+  if (rel === 'storages') return true
+  return SESSIONS_STORAGE_PATHS.some(allowed => rel === allowed || rel.startsWith(`${allowed}/`))
 }
 
 export function privacyIncludeFromList(list: SnapshotPrivacyCategory[] | undefined): SnapshotPrivacyInclude {
@@ -150,6 +170,8 @@ export function isSnapshotExcluded(rel: string, include: SnapshotPrivacyInclude 
   const top = segments[0]
   if (EXCLUDED_TOP_LEVEL.has(top)) {
     // 黑名单从"硬剔除"降级成"默认不导出"：只有用户在导出框里勾过的那一类才放行。
+    // storages/ 是唯一按路径段局部放行的顶层：勾了会话也只带出投影缓存那一棵子树。
+    if (include.sessions && isSessionsStoragePath(rel)) return false
     for (const category of Object.keys(PRIVACY_TOP_LEVEL) as SnapshotPrivacyCategory[]) {
       if (include[category] && PRIVACY_TOP_LEVEL[category].has(top)) return false
     }
