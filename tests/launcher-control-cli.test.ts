@@ -181,3 +181,34 @@ describe('launcher control storage command routing', () => {
     await expect(readFile(pointerFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
+
+describe('launcher control pack upgrade routing', () => {
+  it('CLI 把 --dsh-version 随 pack upgrade 发出去，缺参数与错命令在本地就拒绝', async () => {
+    const f = await fixture()
+    expect(JSON.parse((await f.run('pack', 'upgrade', 'pack-a', '--dsh-version', ' 1.1.0 ', '--json')).stdout)).toEqual({ command: 'pack.upgrade', packId: 'pack-a', args: { dshVersion: '1.1.0' } })
+    await expect(f.run('pack', 'upgrade', 'pack-a', '--json')).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('pack upgrade 需要 --dsh-version') })
+    await expect(f.run('pack', 'upgrade', 'pack-a', '--dsh-version', '  ', '--json')).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('--dsh-version 需要一个 DSH 版本号') })
+    await expect(f.run('pack', 'start', 'pack-a', '--dsh-version', '1.1.0', '--json')).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('--dsh-version 只用于 pack upgrade') })
+    expect((await f.run('--help')).stdout).toContain('pack upgrade <pack-id> --dsh-version <version>')
+  })
+  it('facade 把 pack.upgrade 转给 packManager.upgradePackDshVersion 并校验必填参数', async () => {
+    const root = await temporary()
+    const pointerFile = path.join(root, 'launcher-storage.json')
+    const controller = createStorageController({
+      resolution: { dataDir: path.join(root, 'launcher-data'), source: 'install', portableDir: root, pointerFile, warning: null },
+      appDataPath: root,
+    })
+    const upgradePackDshVersion = vi.fn(async () => ({ id: 'pack-a', dshVersion: '1.1.0' }))
+    const control = createLauncherControl({
+      userData: root, cliPath: path.join(root, 'cli.cjs'), settings: { readStored: async () => ({}), read: async () => ({}), save: vi.fn() } as never,
+      packManager: { upgradePackDshVersion } as never, prepareNodeRuntime: vi.fn(), preparePnpmRuntime: vi.fn(), openExternal: vi.fn(), fallbackWorkspace: () => root,
+      fetchImpl: fetch, emitOutput: () => undefined, loginRegistration: vi.fn(), legacyRuntimeRunning: () => false, storage: controller,
+    })
+    expect(await control.execute({ command: 'pack.upgrade', packId: 'pack-a', args: { dshVersion: '1.1.0' } })).toMatchObject({ dshVersion: '1.1.0' })
+    expect(upgradePackDshVersion).toHaveBeenCalledWith('pack-a', '1.1.0')
+    await expect(control.execute({ command: 'pack.upgrade', packId: 'pack-a', args: {} })).rejects.toThrow('缺少 DSH 版本')
+    await expect(control.execute({ command: 'pack.upgrade', packId: 'pack-a', args: { dshVersion: '   ' } })).rejects.toThrow('缺少 DSH 版本')
+    await expect(control.execute({ command: 'pack.upgrade', args: { dshVersion: '1.1.0' } })).rejects.toThrow('缺少整合包 ID')
+  })
+})
+

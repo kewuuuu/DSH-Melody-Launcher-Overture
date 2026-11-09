@@ -18,6 +18,10 @@ interface Props {
   onExport: () => void
   onImportSessions: () => void
   onCloneVersion: () => void
+  /** 本机已安装的 DSH 版本：切换版本只能选这些。 */
+  installedDshVersions: string[]
+  /** 原地切换本包认的 DSH 版本（只能升不能降）；成功返回 true。 */
+  onUpgradeVersion: (version: string) => Promise<boolean>
 }
 export function PackControlDialog(props: Props) {
   const { pack } = props
@@ -31,6 +35,18 @@ export function PackControlDialog(props: Props) {
   const [workspace, setWorkspace] = useState(pack.config.workspace ?? '')
   const [launchArgs, setLaunchArgs] = useState((pack.config.launchArgs ?? []).join('\n'))
   const [saved, setSaved] = useState(false)
+  // 「启动设置 → DSH 版本」：换版本只改记录里的版本号，数据原地不动。
+  const currentVersion = pack.dshVersion ?? ''
+  const [targetVersion, setTargetVersion] = useState(() => currentVersion && props.installedDshVersions.includes(currentVersion) ? currentVersion : props.installedDshVersions[0] ?? '')
+  const [versionBusy, setVersionBusy] = useState(false)
+  const [versionSaved, setVersionSaved] = useState(false)
+  const switchVersion = async () => {
+    if (!targetVersion || targetVersion === currentVersion || versionBusy || pack.runtime.running) return
+    setVersionBusy(true); setVersionSaved(false)
+    try {
+      if (await props.onUpgradeVersion(targetVersion)) { setVersionSaved(true); await props.onRefresh() }
+    } finally { setVersionBusy(false) }
+  }
   // 「API」子页：available 是启动器 API 库全量，enabled 是已授予本包的部分。
   const [apiGrants, setApiGrants] = useState<PackApiGrantState | null>(null)
   const [apiLoading, setApiLoading] = useState(false)
@@ -77,6 +93,15 @@ export function PackControlDialog(props: Props) {
     {error && <div className="pack-error" role="alert">{error}</div>}
     {tab === 'overview' && <div className="pack-overview"><div><span>运行状态</span><strong>{pack.runtime.running ? '运行中' : '未运行'}</strong><small>{pack.runtime.url ?? '启动后可以打开工作台'}</small></div><div><span>DSH 版本</span><strong>{pack.dshVersion ?? '未指定'}</strong><small>{pack.native ? '共用家目录，请留意资源影响范围' : '独立的整合包环境'}</small></div><div><span>创建时间</span><strong>{new Date(pack.installedAt).toLocaleDateString('zh-CN')}</strong><small>{pack.description || '为每一种工作保留合适的环境。'}</small></div></div>}
     {tab === 'settings' && <form className="pack-config-form" onSubmit={event => { event.preventDefault(); setSaved(false); setError(null); void props.onSave({ workspace, launchArgs: launchArgs.split('\n').filter(Boolean) }).then(ok => { setSaved(ok); if (!ok) setError('保存设置失败，请检查参数后重试。') }) }}><label>工作区<input value={workspace} onChange={event => { setWorkspace(event.target.value); setSaved(false) }} placeholder="使用默认工作区" /></label><label>附加启动参数 <small>每行一个参数</small><textarea rows={5} value={launchArgs} onChange={event => { setLaunchArgs(event.target.value); setSaved(false) }} /></label><p>端口、管理员权限和自动启动可在首页直接调整。运行中的整合包将在下次启动时应用设置。</p><button className="primary-button" disabled={props.busy} type="submit">{props.busy ? '正在保存…' : '保存设置'}</button>{saved && <span role="status">设置已保存</span>}</form>}
+    {tab === 'settings' && <div className="pack-config-form pack-version-form">
+      <h3>DSH 版本</h3>
+      <p>当前版本：<strong>{currentVersion || '未指定'}</strong></p>
+      <label>切换到<select aria-label="目标 DSH 版本" value={targetVersion} disabled={props.busy || versionBusy} onChange={event => { setTargetVersion(event.target.value); setVersionSaved(false) }}>{props.installedDshVersions.length === 0 ? <option value="" disabled>暂无已安装版本</option> : props.installedDshVersions.map(version => <option key={version} value={version}>DSH {version}</option>)}</select></label>
+      <button type="button" className="primary-button" disabled={props.busy || versionBusy || pack.runtime.running || targetVersion === '' || targetVersion === currentVersion} onClick={() => void switchVersion()}>{versionBusy ? '正在切换…' : '切换版本'}</button>
+      {pack.runtime.running && <p role="status">整合包正在运行，停止后才能切换版本。</p>}
+      {versionSaved && <span role="status">已切换到 DSH {targetVersion}，下次启动生效。</span>}
+      <p className="settings-hint">只能升级不能降级；切换后插件可能需要重新安装。</p>
+    </div>}
     {tab === 'api' && <div className="pack-resource-panel">
       <div className="pack-resource-heading"><h3>API 授权</h3><div><button className="icon-button" aria-label="刷新 API 库" disabled={working || apiLoading} onClick={() => void loadApis()}><RefreshCw size={15} /></button></div></div>
       <p className="settings-hint">勾选后「{pack.name}」就能使用启动器 API 库里的这个服务；取消勾选立即收回。</p>

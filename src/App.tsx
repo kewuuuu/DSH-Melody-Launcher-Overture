@@ -300,6 +300,8 @@ function LauncherShell() {
                       onExport={setExportTarget}
                       onImportSessions={setSessionImportTarget}
                       onCloneVersion={setCloneTarget}
+                      onRemove={store.removePack}
+                      onUpgradeVersion={store.upgradePackDshVersion}
                       onOpenVersions={() => navigation.goHome('versions')}
                     />
                     {/* 控制面板已经在上面接管了包列表；重命名/导出/会话导入/官方包这些动作仍由设置面板承担，收进折叠区避免同一页出现两份列表。 */}

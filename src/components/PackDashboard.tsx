@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, ExternalLink, LoaderCircle, Pin, Play, RefreshCw, Settings2, Square } from 'lucide-react'
+import { ArrowDown, ArrowUp, ExternalLink, LoaderCircle, Pin, Play, RefreshCw, Settings2, Square, Trash2 } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 import { usePackControl } from '../hooks/use-pack-control'
 import { sortPacks, type ControlledPack, type PackControlConfig, type PackSort } from '../lib/pack-control'
@@ -14,6 +14,10 @@ interface Props {
   onExport: (id: string) => void
   onImportSessions: (id: string) => void
   onCloneVersion: (id: string) => void
+  /** 删除整合包（后端负责先备份进备份区）；成功返回 true。 */
+  onRemove: (id: string) => Promise<boolean>
+  /** 原地切换这个整合包认的 DSH 版本（只能升不能降）；成功返回 true。 */
+  onUpgradeVersion: (id: string, version: string) => Promise<boolean>
   /** 一个版本都没装时的引导：去「DSH版本」页下载。 */
   onOpenVersions: () => void
 }
@@ -37,6 +41,18 @@ export function PackDashboard(props: Props) {
   const packs = useMemo(() => sortPacks(control.packs.filter(pack => pack.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())), sort, descending), [control.packs, query, sort, descending])
   const selectedPack = control.packs.find(pack => pack.id === selected)
   const patch = (pack: ControlledPack, values: Partial<PackControlConfig>) => control.run('pack.config.set', pack.id, values)
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
+  const remove = async (pack: ControlledPack) => {
+    if (removing) return
+    setRemoving(pack.id)
+    try {
+      // 运行中的包先停：后端删除前会检查，这里替用户把「先停止」那一步做掉。
+      if (pack.runtime.running && !await control.run('pack.stop', pack.id)) return
+      if (!await props.onRemove(pack.id)) return
+      setConfirmRemove(null)
+    } finally { setRemoving(null) }
+  }
   const openCreate = () => {
     setCreating(true)
     setNewVersion(current => current || props.installedDshVersions[0] || '')
@@ -76,7 +92,7 @@ export function PackDashboard(props: Props) {
     {creating && props.installedDshVersions.length === 0 && <div className="settings-pack-create-hint"><span>还没有已安装的 DSH 版本，先去下载一个，再创建整合包。</span><button type="button" className="secondary-button" onClick={props.onOpenVersions}>去下载版本</button></div>}
     <div className="pack-list-toolbar"><input aria-label="搜索整合包" placeholder="搜索整合包…" value={query} onChange={event => setQuery(event.target.value)} /><div><label>排序 <select aria-label="整合包排序" value={sort} onChange={event => setSort(event.target.value as PackSort)}><option value="name">名称</option><option value="created">创建时间</option><option value="port">端口</option></select></label><button className="icon-button" aria-label={descending ? '切换为升序' : '切换为降序'} title={descending ? '当前降序' : '当前升序'} onClick={() => setDescending(!descending)}>{descending ? <ArrowDown size={16} /> : <ArrowUp size={16} />}</button><button className="icon-button" aria-label="刷新整合包" onClick={() => void control.refresh()}><RefreshCw size={15} /></button></div></div>
     {control.error && <div role="alert" className="pack-error">{control.error}<button onClick={() => void control.refresh()}>重试</button></div>}
-    <div className="pack-table-scroll"><table className="pack-table"><thead><tr><th><Pin size={13} aria-label="置顶" /></th><th>整合包名称</th><th>端口</th><th>运行操作</th><th>管理员</th><th>配置</th><th>自启</th></tr></thead><tbody>
+    <div className="pack-table-scroll"><table className="pack-table"><thead><tr><th><Pin size={13} aria-label="置顶" /></th><th>整合包名称</th><th>端口</th><th>运行操作</th><th>管理员</th><th>配置</th><th>自启</th><th>删除</th></tr></thead><tbody>
       {packs.map(pack => {
         const busy = control.busy.includes(pack.id)
         return <tr key={pack.id} className={pack.config.pinnedAt ? 'pack-pinned' : undefined}>
@@ -87,13 +103,16 @@ export function PackDashboard(props: Props) {
           <td><input type="checkbox" aria-label={'以管理员运行 ' + pack.name} checked={pack.config.runAsAdmin} disabled={busy} onChange={event => void patch(pack, { runAsAdmin: event.target.checked })} /></td>
           <td><button className="icon-button" aria-label={'配置 ' + pack.name} onClick={() => setSelected(pack.id)}><Settings2 size={17} /></button></td>
           <td><input type="checkbox" aria-label={'自动启动 ' + pack.name} checked={pack.config.autoStart} disabled={busy} onChange={event => void patch(pack, { autoStart: event.target.checked })} /></td>
+          <td><div className="pack-row-actions">{confirmRemove === pack.id
+            ? <><button className="danger-button" disabled={removing === pack.id} onClick={() => void remove(pack)}>{removing === pack.id ? '删除中…' : '确认删除'}</button><button className="secondary-button" disabled={removing === pack.id} onClick={() => setConfirmRemove(null)}>取消</button></>
+            : <button className="icon-button" aria-label={'删除 ' + pack.name} title="删除整合包（先停止运行，再整份备份进备份区）" disabled={busy} onClick={() => setConfirmRemove(pack.id)}><Trash2 size={15} /></button>}</div></td>
         </tr>
       })}
     </tbody></table></div>
     {control.loading && <div className="pack-empty"><LoaderCircle className="spin" size={18} />正在读取整合包…</div>}
     {!control.loading && !control.error && packs.length === 0 && <div className="pack-empty">{query ? '没有匹配的整合包' : '还没有整合包。新建一个，或导入一个。'}</div>}
     <footer className="pack-dashboard-footer"><span>{control.packs.filter(pack => pack.runtime.running).length} 个正在运行</span><span>置顶按时间排列 · 启动参数在下次启动时生效</span></footer>
-    {selectedPack && <PackControlDialog key={selectedPack.id} pack={selectedPack} busy={control.busy.includes(selectedPack.id)} onClose={() => setSelected(null)} onSave={values => patch(selectedPack, values)} onRefresh={control.refresh} onExport={() => props.onExport(selectedPack.id)} onImportSessions={() => props.onImportSessions(selectedPack.id)} onCloneVersion={() => props.onCloneVersion(selectedPack.id)} />}
+    {selectedPack && <PackControlDialog key={selectedPack.id} pack={selectedPack} busy={control.busy.includes(selectedPack.id)} onClose={() => setSelected(null)} onSave={values => patch(selectedPack, values)} onRefresh={control.refresh} onExport={() => props.onExport(selectedPack.id)} onImportSessions={() => props.onImportSessions(selectedPack.id)} onCloneVersion={() => props.onCloneVersion(selectedPack.id)} installedDshVersions={props.installedDshVersions} onUpgradeVersion={version => props.onUpgradeVersion(selectedPack.id, version)} />}
   </section>
 }
 function PortEditor({ pack, disabled, onSave }: { pack: ControlledPack; disabled: boolean; onSave: (patch: Partial<PackControlConfig>) => void }) {

@@ -21,7 +21,7 @@ it('routes row and resource actions to the selected pack while retaining the mar
   const api = { launcherControl: bridge, loadDshMarket: async () => ({ plugins: [], categories: {} }), onDshMarketProgress: () => () => {} } as unknown as LauncherApi
   const container = document.createElement('div'); document.body.append(container)
   const root = createRoot(container); roots.push(root)
-  await act(async () => root.render(<LauncherApiProvider value={api}><PackDashboard installedDshVersions={['1.0']} onCreate={async () => true} onImport={() => {}} onExport={() => {}} onImportSessions={() => {}} onCloneVersion={() => {}} onOpenVersions={() => {}} /></LauncherApiProvider>))
+  await act(async () => root.render(<LauncherApiProvider value={api}><PackDashboard installedDshVersions={['1.0']} onCreate={async () => true} onImport={() => {}} onExport={() => {}} onImportSessions={() => {}} onCloneVersion={() => {}} onRemove={async () => true} onUpgradeVersion={async () => true} onOpenVersions={() => {}} /></LauncherApiProvider>))
   const click = async (selector: string) => { const button = container.querySelector<HTMLButtonElement>(selector); expect(button).not.toBeNull(); await act(async () => button!.click()) }
   await click('tbody tr:nth-child(2) .primary-button')
   expect(requests).toContainEqual({ command: 'pack.start', packId: 'beta', args: undefined })
@@ -45,7 +45,7 @@ it('offers pack creation and import on the dashboard itself', async () => {
   const api = { launcherControl: bridge } as unknown as LauncherApi
   const container = document.createElement('div'); document.body.append(container)
   const root = createRoot(container); roots.push(root)
-  await act(async () => root.render(<LauncherApiProvider value={api}><PackDashboard installedDshVersions={['1.0']} onCreate={onCreate} onImport={onImport} onExport={() => {}} onImportSessions={() => {}} onCloneVersion={() => {}} onOpenVersions={() => {}} /></LauncherApiProvider>))
+  await act(async () => root.render(<LauncherApiProvider value={api}><PackDashboard installedDshVersions={['1.0']} onCreate={onCreate} onImport={onImport} onExport={() => {}} onImportSessions={() => {}} onCloneVersion={() => {}} onRemove={async () => true} onUpgradeVersion={async () => true} onOpenVersions={() => {}} /></LauncherApiProvider>))
   const label = (text: string) => Array.from(container.querySelectorAll('button')).find(button => button.textContent === text) as HTMLButtonElement | undefined
   expect(label('新建整合包')).toBeDefined()
   expect(label('导入整合包')).toBeDefined()
@@ -69,4 +69,22 @@ it('does not overwrite the neutral market cache with a target pack installation 
   const neverLoadingApi = { ...api, loadDshMarket: () => new Promise(() => {}) } as unknown as LauncherApi
   await act(async () => root.render(<LauncherApiProvider value={neverLoadingApi}><DshMarketView key="global" activeProfileName="alpha" /></LauncherApiProvider>))
   expect(container.querySelector('.market-enabled')).toBeNull()
+})
+it('deletes a pack only after an inline confirmation and stops it first', async () => {
+  const requests: Array<{ command: string; packId?: string }> = []
+  const packs = [{ id: 'alpha', name: 'Alpha', dshVersion: '1.0', installedAt: '2025-01-01', config: { portMode: 'auto', port: 3080, runAsAdmin: false, autoStart: false, pinnedAt: null }, runtime: { running: true, port: 3080, url: 'http://127.0.0.1:3080' } }]
+  const bridge = vi.fn(async (request: { command: string; packId?: string }) => { requests.push(request); return request.command === 'pack.list' ? { packs } : {} })
+  const api = { launcherControl: bridge } as unknown as LauncherApi
+  const onRemove = vi.fn(async () => true)
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container); roots.push(root)
+  await act(async () => root.render(<LauncherApiProvider value={api}><PackDashboard installedDshVersions={['1.0']} onCreate={async () => true} onImport={() => {}} onExport={() => {}} onImportSessions={() => {}} onCloneVersion={() => {}} onRemove={onRemove} onUpgradeVersion={async () => true} onOpenVersions={() => {}} /></LauncherApiProvider>))
+  const button = (label: string) => Array.from(container.querySelectorAll('button')).find(item => item.textContent === label || item.getAttribute('aria-label') === label) as HTMLButtonElement
+  await act(async () => button('删除 Alpha').click())
+  // 第一下只是进入确认态：不删、不停。
+  expect(onRemove).not.toHaveBeenCalled()
+  expect(requests.some(request => request.command === 'pack.stop')).toBe(false)
+  await act(async () => button('确认删除').click())
+  expect(requests).toContainEqual({ command: 'pack.stop', packId: 'alpha', args: undefined })
+  expect(onRemove).toHaveBeenCalledWith('alpha')
 })

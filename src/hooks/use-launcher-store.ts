@@ -939,6 +939,15 @@ export function useLauncherStore() {
     return next !== undefined
   }, [api, applyPackUpdate, run])
 
+  const upgradePackDshVersion = useCallback(async (packId: string, version: string): Promise<boolean> => {
+    const next = await run(`pack-upgrade:${packId}`, async () => {
+      const pack = await api.upgradePackDshVersion(packId, version)
+      applyPackUpdate(pack)
+      return pack
+    }, { success: `已切换到 DSH ${version}，下次启动生效。` })
+    return next !== undefined
+  }, [api, applyPackUpdate, run])
+
   const createBlankPack = useCallback(async (request: { name: string; dshVersion: string | null }): Promise<PackStatus | undefined> => {
     const pack = await run('pack-create-blank', async () => {
       const created = await api.createBlankPack(request)
@@ -1348,6 +1357,7 @@ export function useLauncherStore() {
     packDownload,
     packStage,
     renamePack,
+    upgradePackDshVersion,
     createBlankPack,
     packDiskUsage,
     removePack,
