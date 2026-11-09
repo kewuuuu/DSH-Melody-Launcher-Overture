@@ -1,9 +1,10 @@
 import path from 'node:path'
 import { readFile, mkdir, symlink, lstat, realpath, rm, readdir, link, rename } from 'node:fs/promises'
-import type { AppSettings, LauncherControlRequest, PackControlConfig } from '../src/types'
+import type { AppSettings, ExternalRuntime, LauncherControlRequest, PackControlConfig } from '../src/types'
 import { readPackRegistry, toPackStatus, type PackRecord } from './pack-registry'
 import { writeFileAtomic } from './fs-atomic'
 import { createRuntimeController, findAvailableWebPort, type RuntimeController, type RuntimeControllerOptions } from './runtime'
+import { clearElevatedSession, elevatedSessionPath, readElevatedSession, scanExternalRuntimes, stopExternalRuntime } from './external-runtime'
 import { readProfile, togglePlugin, isSafePackageName } from './profile'
 import { readInstalledSkills, toggleInstalledSkill, uninstallInstalledSkill, isSkillName } from './skill-format'
 import { readInstalledPresets, toggleInstalledPreset, uninstallInstalledPreset } from './preset-install'
@@ -19,6 +20,11 @@ export interface PackControlOptions {
   beforeStart?: (record: PackRecord, settings: AppSettings) => Promise<void>
   lifecycle?: (command: string, packId: string | undefined, args: Record<string, unknown>) => Promise<unknown>
   market?: (command: string, settings: AppSettings, args: Record<string, unknown>) => Promise<unknown>
+  /** 外部遗留进程的扫描与停止；默认走 external-runtime 的真实实现，测试注入假实现。 */
+  externalRuntime?: {
+    scan?: typeof scanExternalRuntimes
+    stop?: typeof stopExternalRuntime
+  }
 }
 
 export function validatePackConfig(patch: Record<string, unknown>): Partial<PackControlConfig> {
@@ -42,6 +48,9 @@ export function createPackControl(options: PackControlOptions) {
   const reservations = new Set<number>()
   let closing = false
   const configPath = path.join(options.userData, 'pack-control.json')
+  const elevatedRoot = path.join(options.userData, 'elevated')
+  const scanExternal = options.externalRuntime?.scan ?? scanExternalRuntimes
+  const stopExternal = options.externalRuntime?.stop ?? stopExternalRuntime
   const serial = <T>(key: string, action: () => Promise<T>): Promise<T> => {
     const next = (queues.get(key) ?? Promise.resolve()).catch(() => undefined).then(action)
     queues.set(key, next)
@@ -78,6 +87,17 @@ export function createPackControl(options: PackControlOptions) {
     if (!found) throw new Error('Unknown pack: ' + id)
     return found
   }
+  /** 本进程内存里托管的那些 pid：它们不是「外部」进程，扫描时要排掉。 */
+  function hostedPids(): number[] {
+    return [...controllers.values()].map(c => c.state().pid).filter((pid): pid is number => typeof pid === 'number')
+  }
+  async function findExternal(r: PackRecord, profileName: string): Promise<ExternalRuntime | null> {
+    const found = await scanExternal({ packs: [{ id: r.id, profileName }], excludePids: hostedPids() })
+    const target = found.get(r.id) ?? null
+    if (!target) return null
+    const session = await readElevatedSession(elevatedRoot, r.id).catch(() => null)
+    return { ...target, elevatedSession: session ? elevatedSessionPath(elevatedRoot, r.id) : null }
+  }
   async function reserve(preferred: number, fixed: boolean): Promise<number | null> {
     const next = portQueue.catch(() => undefined).then(async () => {
       const selected = await findAvailableWebPort(preferred, fixed ? 1 : 100, async p => !reservations.has(p) && (await import('./runtime')).isLoopbackPortAvailable(p))
@@ -94,9 +114,21 @@ export function createPackControl(options: PackControlOptions) {
     const settings = await options.resolveSettings(r, c)
     const home = path.resolve(settings.dshHome).toLowerCase()
     if ([...controllerHomes.entries()].some(([id, h]) => id !== r.id && h === home && (controllers.get(id)?.isRunning() || queues.has(id)))) throw new Error('Another pack is already using this home')
+    // 同一个家目录被别的包的外部遗留进程占着，也不能起。
+    const shared: Array<{ id: string; profileName: string }> = []
+    for (const sibling of await readPackRegistry(options.registryPath)) {
+      if (sibling.id === r.id) continue
+      const siblingSettings = await options.resolveSettings(sibling, await config(sibling.id))
+      if (path.resolve(siblingSettings.dshHome).toLowerCase() === home) shared.push({ id: sibling.id, profileName: siblingSettings.profileName })
+    }
+    if (shared.length) {
+      const externals = await scanExternal({ packs: shared, excludePids: hostedPids() })
+      const occupied = [...externals.values()][0]
+      if (occupied) throw new Error('另一个整合包的 DSH 还在用同一个家目录（PID ' + occupied.pid + '）。先停止它再启动。')
+    }
     controllerHomes.set(r.id, home)
     await options.beforeStart?.(r, settings)
-    const runtime = (options.createController ?? createRuntimeController)({ ...options.runtimeOptions(r, settings), readSettings: async () => settings, portMode: c.portMode, portFallbackAttempts: 100, runAsAdmin: c.runAsAdmin, reservePort: reserve, releasePort: p => reservations.delete(p) })
+    const runtime = (options.createController ?? createRuntimeController)({ ...options.runtimeOptions(r, settings), readSettings: async () => settings, portMode: c.portMode, portFallbackAttempts: 100, runAsAdmin: c.runAsAdmin, reservePort: reserve, releasePort: p => reservations.delete(p), elevatedStash: { root: elevatedRoot, packId: r.id } })
     controllers.set(r.id, runtime)
     return runtime
   }
@@ -137,7 +169,24 @@ export function createPackControl(options: PackControlOptions) {
     const args = request.args ?? {}
     if (command === 'pack.list') {
       const base = await options.readSettings()
-      return { packs: await Promise.all((await readPackRegistry(options.registryPath)).map(async r => ({ ...toPackStatus(r, base.activePackId), homePath: r.homePath, config: await config(r.id), runtime: controllers.get(r.id)?.state() ?? { running: false, pid: null, startedAt: null, url: null, port: null } }))) }
+      const items = await Promise.all((await readPackRegistry(options.registryPath)).map(async r => {
+        const c = await config(r.id)
+        const settings = await options.resolveSettings(r, c)
+        return { record: r, config: c, profileName: settings.profileName }
+      }))
+      // 一次扫描覆盖全部包：列表页会被频繁拉取，批处理才不至于每次都起一次 PowerShell。
+      const externals = await scanExternal({ packs: items.map(item => ({ id: item.record.id, profileName: item.profileName })), excludePids: hostedPids() })
+      return { packs: await Promise.all(items.map(async item => {
+        const target = externals.get(item.record.id) ?? null
+        const session = target ? await readElevatedSession(elevatedRoot, item.record.id).catch(() => null) : null
+        return {
+          ...toPackStatus(item.record, base.activePackId),
+          homePath: item.record.homePath,
+          config: item.config,
+          runtime: controllers.get(item.record.id)?.state() ?? { running: false, pid: null, startedAt: null, url: null, port: null },
+          externalRuntime: target ? { ...target, elevatedSession: session ? elevatedSessionPath(elevatedRoot, item.record.id) : null } : null,
+        }
+      })) }
     }
     if (command === 'pack.create') return options.lifecycle?.(command, undefined, args)
     const r = await record(packId)
@@ -159,10 +208,30 @@ export function createPackControl(options: PackControlOptions) {
     return serial(r.id, async () => {
       if (command === 'pack.start' || command === 'pack.restart') {
         if (closing) throw new Error('Launcher is shutting down')
+        const startSettings = await options.resolveSettings(r, await config(r.id))
+        const external = await findExternal(r, startSettings.profileName)
+        if (external) throw new Error('这个整合包已经有一份没被启动器托管的 DSH 在运行（PID ' + external.pid + '，端口 ' + (external.port ?? '未知') + '）。先停止它再启动。')
         if (command === 'pack.restart') { await controllers.get(r.id)?.stop(); controllers.delete(r.id) }
         return (await controller(r)).start()
       }
-      if (command === 'pack.stop') { const runtime = controllers.get(r.id); if (runtime) { const state = await runtime.stop(); controllers.delete(r.id); return state }; return { running: false, pid: null, startedAt: null, url: null, port: null } }
+      if (command === 'pack.stop') {
+        const runtime = controllers.get(r.id)
+        if (runtime) {
+          const state = await runtime.stop()
+          controllers.delete(r.id)
+          await clearElevatedSession(elevatedRoot, r.id)
+          return state
+        }
+        const stopSettings = await options.resolveSettings(r, await config(r.id))
+        const external = await findExternal(r, stopSettings.profileName)
+        // 内存里没有 controller 也不代表没在跑：先扫一遍外部遗留进程，扫不到才算真没跑。
+        if (!external) return { running: false, pid: null, startedAt: null, url: null, port: null }
+        const stored = await options.readSettings()
+        const allowElevation = args.noElevated === true ? false : stored.elevatedStopPrompt !== false
+        const method = await stopExternal(external, { dataDir: options.userData, allowElevation, log: text => console.log('[pack-stop] ' + r.id + ': ' + text) })
+        await clearElevatedSession(elevatedRoot, r.id)
+        return { running: false, pid: null, startedAt: null, url: null, port: null, externalStopped: true, stoppedBy: method }
+      }
       if (command === 'pack.openWeb') {
         const state = controllers.get(r.id)?.state()
         if (!state?.running || !state.url) throw new Error('Pack Web service is not ready')

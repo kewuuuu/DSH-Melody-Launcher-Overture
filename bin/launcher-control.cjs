@@ -8,6 +8,7 @@ const { spawn } = require('node:child_process')
 const HELP = `DSH Launcher control (Node >=20)
   pack list
   pack start|stop|restart <pack-id>
+  pack stop <pack-id> --no-elevated
   pack restart <pack-id> --resume "<prompt>" [--session <session-id>]
   pack config get <pack-id>
   pack config set <pack-id> --port 3081 --port-mode fixed --auto-start true
@@ -34,6 +35,7 @@ const HELP = `DSH Launcher control (Node >=20)
   pack <operation> [pack-id] --args '{...}'
   request <dotted.command> [pack-id] --args '{...}'
 Options: --json --user-data <directory> --launcher <explicit executable>
+          --no-elevated (pack stop only: don't raise UAC, only the silent stop paths)
 Config flags: --port, --port-mode, --run-as-admin, --auto-start, --pinned-at,
               --workspace, --launch-args '["web"]'
 API flags (api add only): --name, --base-url, --protocol, --models, --api-key
@@ -55,7 +57,7 @@ function parse(argv) {
     const item = argv[i]
     if (!item.startsWith('--')) { words.push(item); continue }
     const key = item.slice(2)
-    if (['json', 'help', 'keep-data', 'delete-data', 'yes'].includes(key)) { flags[key] = true; continue }
+    if (['json', 'help', 'keep-data', 'delete-data', 'yes', 'no-elevated'].includes(key)) { flags[key] = true; continue }
     if (!FLAG_KEYS.includes(key)) throw new Error('Unknown option: ' + item)
     if (i + 1 >= argv.length || argv[i+1].startsWith('--')) throw new Error('Missing value for ' + item)
     flags[key] = argv[++i]
@@ -193,6 +195,10 @@ function parse(argv) {
   }
   if (command === 'pack.upgrade' && args.dshVersion === undefined) throw new Error('pack upgrade 需要 --dsh-version <version>')
   if (flags.session !== undefined && flags.resume === undefined) throw new Error('--session 必须与 --resume 一起使用')
+  if (flags['no-elevated'] !== undefined) {
+    if (command !== 'pack.stop') throw new Error('--no-elevated 只用于 pack stop <pack-id>')
+    args.noElevated = true
+  }
   return { flags, request: { command, ...(packId ? { packId } : {}), ...(Object.keys(args).length ? { args } : {}) } }
 }
 function defaultUserData() {

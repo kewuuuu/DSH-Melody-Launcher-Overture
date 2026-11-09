@@ -156,6 +156,8 @@ export interface RuntimeControllerOptions {
    * 返回可执行文件绝对路径或 null（不需要/拿不到）。永不抛异常。
    */
   prepareOfficeCliTool?: (settings: AppSettings, onProgress: (received: number, totalBytes: number | null) => void) => Promise<string | null>
+  /** 提权启动时把会话信息落到 <root>/<packId>.json，监督进程消失后仍能靠它停止。 */
+  elevatedStash?: { root: string; packId: string }
 }
 
 export interface RuntimeController {
@@ -492,7 +494,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
 
       let started: ChildProcessWithoutNullStreams
       try {
-        started = options.runAsAdmin ? await spawnElevatedRuntime(executable, launchArgs, { cwd, env: environment }) : startProcess(executable, launchArgs, { cwd, env: environment })
+        started = options.runAsAdmin ? await spawnElevatedRuntime(executable, launchArgs, { cwd, env: environment, ...(options.elevatedStash ? { stash: options.elevatedStash } : {}) }) : startProcess(executable, launchArgs, { cwd, env: environment })
       } catch (error) {
         // 同步抛错＝进程根本没起来（可执行文件不存在、路径非法、EPERM）。
         // 不记就只剩一条 toast，用户和 agent 都不知道死在哪。

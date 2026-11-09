@@ -62,6 +62,8 @@ async function fixture(real = false) {
       },
       stopProcess: async child => { if (real) { child.kill(); await new Promise<void>(resolve => child.once('exit', () => resolve())) } else child.emit('exit', 0) },
     }), openExternal: async () => undefined,
+    // 外部进程探测在测试里必须注入：真实实现会起 PowerShell 甚至 taskkill。
+    externalRuntime: { scan: async () => new Map(), stop: async (): Promise<'taskkill'> => 'taskkill' },
   })
   return { root, control, settings, spawned }
 }

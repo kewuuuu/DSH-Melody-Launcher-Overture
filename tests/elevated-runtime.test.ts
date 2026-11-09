@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 const mocked = vi.hoisted(() => ({ spawn: vi.fn() }))
@@ -9,6 +10,22 @@ vi.mock('node:child_process', () => ({ spawn: mocked.spawn }))
 import { spawnElevatedRuntime, stopElevatedRuntime } from '../electron/elevated-runtime'
 
 describe('Windows administrator runtime bridge', () => {
+  const stashRoots: string[] = []
+  afterEach(async () => {
+    await Promise.all(stashRoots.splice(0).map(dir => rm(dir, { recursive: true, force: true })))
+    mocked.spawn.mockReset()
+  })
+  async function stashRoot(): Promise<string> {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'elevated-stash-test-'))
+    stashRoots.push(dir)
+    return dir
+  }
+  function fakeChild(pid: number): ChildProcessWithoutNullStreams {
+    const child = new EventEmitter() as ChildProcessWithoutNullStreams
+    Object.assign(child, { pid, exitCode: null, signalCode: null, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() })
+    mocked.spawn.mockReturnValue(child)
+    return child
+  }
   it.skipIf(process.platform !== 'win32')('requests RunAs, supervises its tree, forwards output and acknowledges scoped stop without invoking UAC', async () => {
     const child = new EventEmitter() as ChildProcessWithoutNullStreams
     Object.assign(child, { pid: 123456789, exitCode: null, signalCode: null, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() })
@@ -37,5 +54,35 @@ describe('Windows administrator runtime bridge', () => {
     await vi.waitFor(async () => expect(await readFile(path.join(root, 'stop'), 'utf8')).toBe('stop'))
     Object.assign(child, { exitCode: 0 }); child.emit('exit', 0)
     expect(await stopping).toBe(true)
+  })
+
+  it.skipIf(process.platform !== 'win32')('stashes the elevated session so any later launcher can stop it', async () => {
+    const child = fakeChild(123456789)
+    const root = await stashRoot()
+    const started = await spawnElevatedRuntime('C:/fixture/node.exe', ['entry.js', '--port', '49999'], { cwd: 'C:/fixture', env: { DSH_HOME: 'C:/fixture/pack home' }, stash: { root, packId: 'pack-test' } })
+    expect(started).toBe(child)
+    const file = path.join(root, 'pack-test.json')
+    const session = JSON.parse(await readFile(file, 'utf8'))
+    expect(session).toMatchObject({ version: 1, packId: 'pack-test', outerPid: 123456789 })
+    expect(session.stopFile.endsWith(path.sep + 'stop')).toBe(true)
+    expect(session.logPaths.stdout.endsWith('stdout.log')).toBe(true)
+    // 监督脚本把子进程 pid 落盘，并且用 finally 收尾：脚本自己被中断也不许留孤儿。
+    const script = await readFile(path.join(session.elevatedRoot, 'supervise.ps1'), 'utf8')
+    expect(script).toContain('child.json')
+    expect(script).toContain('} finally {')
+    Object.assign(child, { exitCode: 0 }); child.emit('exit', 0)
+    await vi.waitFor(async () => expect(await readFile(file, 'utf8').catch(() => null)).toBeNull())
+  })
+
+  it.skipIf(process.platform !== 'win32')('leaves a session file that another launcher rewrote alone', async () => {
+    const child = fakeChild(222333)
+    const root = await stashRoot()
+    await spawnElevatedRuntime('C:/fixture/node.exe', ['entry.js'], { cwd: 'C:/fixture', env: {}, stash: { root, packId: 'pack-test' } })
+    const file = path.join(root, 'pack-test.json')
+    const ours = JSON.parse(await readFile(file, 'utf8'))
+    await writeFile(file, JSON.stringify({ version: 1, packId: 'pack-test', outerPid: 999888 }), 'utf8')
+    Object.assign(child, { exitCode: 0 }); child.emit('exit', 0)
+    await vi.waitFor(async () => expect(await readFile(path.join(ours.elevatedRoot, 'supervise.ps1'), 'utf8').catch(() => null)).toBeNull())
+    expect(JSON.parse(await readFile(file, 'utf8')).outerPid).toBe(999888)
   })
 })

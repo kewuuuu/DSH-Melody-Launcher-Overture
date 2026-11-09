@@ -72,6 +72,21 @@ describe('defaultSettings', () => {
   })
 })
 
+describe('elevatedStopPrompt', () => {
+  const defaults = defaultSettings({ homeDirectory: '/home/tester', documentsDirectory: '/home/tester/Documents', platform: 'linux' })
+  it('默认允许为提权整合包弹一次 UAC', () => {
+    expect(defaults.elevatedStopPrompt).toBe(true)
+    expect(validateSettings(baseSettings).elevatedStopPrompt).toBe(true)
+    expect(mergeStoredSettings(baseSettings, {}).elevatedStopPrompt).toBe(true)
+  })
+  it('显式 false 在三条链路上都要保住，脏值回落到默认', () => {
+    expect(validateSettings({ ...baseSettings, elevatedStopPrompt: false }).elevatedStopPrompt).toBe(false)
+    expect(mergeStoredSettings(baseSettings, { elevatedStopPrompt: false }).elevatedStopPrompt).toBe(false)
+    expect(mergeStoredSettings({ ...baseSettings, elevatedStopPrompt: false }, {}).elevatedStopPrompt).toBe(false)
+    expect(mergeStoredSettings(baseSettings, { elevatedStopPrompt: 'no' as unknown as boolean }).elevatedStopPrompt).toBe(true)
+  })
+})
+
 describe('validateSettings', () => {
   it('trims the executable and keeps the remaining fields', () => {
     const validated = validateSettings({ ...baseSettings, launchExecutable: '  npx  ' })

@@ -39,6 +39,22 @@ node bin/launcher-control.cjs pack delete pack-a
 
 Resource kinds are plugins, skills, presets. resource <operation> <id> maps to pack.resources.<operation> with that explicit pack ID; for example resource list pack-a --args '{"kind":"skills"}' calls pack.resources.list. Supported lifecycle commands are pack create with args {name,dshVersion}, pack rename with an explicit pack ID and args {name}, and pack delete with an explicit pack ID. The pack <operation> [id] and request forms forward commands to the backend; forwarding does not add operations. Unsupported commands, including pack.export, return an error. All operations on an existing pack should include its ID; the server enforces it for runtime and config commands, and the backend validates additional commands.
 
+## 停止外部遗留的 DSH（pack stop / --no-elevated）
+
+pack list 的每一项现在带 externalRuntime：说明这份 DSH 在跑，但不是当前启动器进程内存里托管的实例（启动器重启过、提权监督进程已经退出、或者包是上一次以管理员权限启动的）。字段为 {pid, port, startedAt, url, profileName, requiresElevation, elevatedSession}，没有外部实例时是 null。requiresElevation 为 true 表示普通权限结束不了它，elevatedSession 指向落盘的提权会话文件（<dataDir>/elevated/<pack-id>.json），有它就能靠写停止文件让监督进程自己收尾。
+
+pack stop 不再「内存里没有就报成功」：先把托管实例停掉，没有托管实例时先扫描一次外部进程，扫到就按 ① 提权会话停止文件 ② taskkill /pid <pid> /t /f ③ 提权 taskkill（弹一次 UAC）的顺序结束它，每一步都复查 pid 真的消失。全部失败时返回中文错误并给出可直接粘贴的 taskkill 命令，退出码 1，绝不假成功。真正什么都没在跑时才返回 {running:false,...}；停掉外部实例时结果里带 externalStopped:true 和 stoppedBy（session | taskkill | elevated）。
+
+pack start 和 pack restart 会先看一眼外部实例：这个包已经有一份没被启动器托管的 DSH 在跑时直接中文报错（附 PID 和端口），不会另起一个抢端口的。
+
+~~~sh
+node bin/launcher-control.cjs pack list --json
+node bin/launcher-control.cjs pack stop pack-a --json
+# 不想弹 UAC：只走静默路径（停止文件、普通 taskkill），失败即报错
+node bin/launcher-control.cjs pack stop pack-a --no-elevated --json
+~~~
+
+--no-elevated 只用于 pack stop，等价于本次调用把「允许弹 UAC」当成关掉（设置里的 elevatedStopPrompt 只影响是否默认允许，不改变这条命令的语义）。
 ## Storage location
 
 A portable build keeps all of its data in a launcher-data directory next to its own executable: <EXE directory>/launcher-data (it uses PORTABLE_EXECUTABLE_DIR, so a portable EXE carries its data in its own folder). packs.json, launcher settings, the plugin store and the managed DSH runtime all live there, and Chromium's cache is isolated in launcher-data/browser-data. Two portable launchers in different folders on the same machine therefore never share packs or a single-instance lock.

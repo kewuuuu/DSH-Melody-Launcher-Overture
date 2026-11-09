@@ -190,6 +190,9 @@ describe('launcher control pack upgrade routing', () => {
     await expect(f.run('pack', 'upgrade', 'pack-a', '--dsh-version', '  ', '--json')).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('--dsh-version 需要一个 DSH 版本号') })
     await expect(f.run('pack', 'start', 'pack-a', '--dsh-version', '1.1.0', '--json')).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('--dsh-version 只用于 pack upgrade') })
     expect((await f.run('--help')).stdout).toContain('pack upgrade <pack-id> --dsh-version <version>')
+    expect((await f.run('--help')).stdout).toContain('pack stop <pack-id> --no-elevated')
+    expect(JSON.parse((await f.run('pack', 'stop', 'pack-a', '--no-elevated', '--json')).stdout)).toEqual({ command: 'pack.stop', packId: 'pack-a', args: { noElevated: true } })
+    await expect(f.run('pack', 'start', 'pack-a', '--no-elevated', '--json')).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('--no-elevated 只用于 pack stop') })
   })
   it('facade 把 pack.upgrade 转给 packManager.upgradePackDshVersion 并校验必填参数', async () => {
     const root = await temporary()

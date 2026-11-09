@@ -49,6 +49,8 @@ export function defaultSettings(input: DefaultSettingsInput): AppSettings {
     aiPrompt: '',
     recommendedWebUiPrompted: false,
     launchAtLogin: false,
+    // 停止以管理员权限运行的整合包时允许弹一次 UAC：缺省开，用户显式关掉才静默失败。
+    elevatedStopPrompt: true,
   }
 }
 
@@ -192,6 +194,7 @@ export function validateSettings(input: AppSettings): AppSettings {
     recommendedWebUiPrompted: Boolean(input.recommendedWebUiPrompted),
     // 启动器自身随登录启动：缺省关，只有显式 true 才开（与整合包 autoStart 无关）。
     launchAtLogin: input.launchAtLogin === true,
+    elevatedStopPrompt: input.elevatedStopPrompt !== false,
   }
 }
 
@@ -222,6 +225,7 @@ export function mergeStoredSettings(defaults: AppSettings, stored: Partial<AppSe
     network: validNetworkSettings(stored.network) ?? defaults.network,
     recommendedWebUiPrompted: Boolean(stored.recommendedWebUiPrompted),
     launchAtLogin: typeof stored.launchAtLogin === 'boolean' ? stored.launchAtLogin : defaults.launchAtLogin === true,
+    elevatedStopPrompt: typeof stored.elevatedStopPrompt === 'boolean' ? stored.elevatedStopPrompt : defaults.elevatedStopPrompt !== false,
   }
 }
 
