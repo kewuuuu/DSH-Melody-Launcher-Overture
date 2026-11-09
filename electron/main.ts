@@ -67,6 +67,7 @@ import { createSettingsStore, defaultSettings, type SettingsStore } from './sett
 import { createTray, type TrayController } from './tray'
 import { recoverLegacyCredentials } from './dsh-credentials-compat'
 import { createStorageController, LEGACY_DATA_DIRNAME, resolveStorage, STORAGE_BROWSER_DATA_DIRNAME, type StorageResolution } from './storage-root'
+import { captureUiShots, uiShotDirectory } from './ui-shot'
 
 /**
  * 应用入口与装配根。
@@ -1272,6 +1273,14 @@ app.whenReady().then(async () => {
   void services.packControl.autoStart()
   openMainWindow()
   if (process.argv.includes('--background')) mainWindow?.hide()
+  // 开发者自查界面用：传了 --ui-shots=<目录> 才逐栏目截图，正常启动什么都不做。
+  const uiShotDir = uiShotDirectory(process.argv)
+  if (uiShotDir && mainWindow) {
+    void captureUiShots(mainWindow, uiShotDir).then(
+      files => console.log('[ui-shots]', files.length, 'files'),
+      error => console.error('[ui-shots]', error),
+    )
+  }
   // 官方整合包首启/更新核对：后台进行，不挡窗口。
   void services.officialPackBootstrap()
   tray = createTray({ iconPath: launcherIconPath, showMainWindow })
