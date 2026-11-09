@@ -12,6 +12,22 @@ import { defaultSettings } from '../electron/settings'
  * 只能升不能降、运行中拒绝、同版本不写盘、成功时记录与 profile.yaml 一起改。
  */
 
+/** 让包内 profile.yaml 的写入可控失败：注册表不能在自述写失败之后被提前改掉。 */
+const h = vi.hoisted(() => ({ failProfileWrite: false }))
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    writeFile: (async (file: unknown, data: unknown, options?: unknown) => {
+      if (h.failProfileWrite && String(file).endsWith('profile.yaml')) {
+        h.failProfileWrite = false
+        throw Object.assign(new Error('EPERM: operation not permitted, open'), { code: 'EPERM' })
+      }
+      return (actual.writeFile as (...args: unknown[]) => Promise<void>)(file, data, options)
+    }) as typeof actual.writeFile,
+  }
+})
+
 const roots: string[] = []
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }).catch(() => undefined)))
@@ -136,5 +152,15 @@ describe('upgradePackDshVersion', () => {
     expect(registry[0].dshVersion).toBe('1.1.0')
     expect(registry[0].updatedAt).not.toBe('2026-09-09T00:00:00.000Z')
     expect(await readFile(profilePath, 'utf8')).toContain('dshVersion: 1.1.0')
+  })
+
+  it('包内 profile.yaml 写失败时注册表保持旧版本，重试仍能修好', async () => {
+    const { env, manager } = await setup()
+    h.failProfileWrite = true
+    await expect(manager.upgradePackDshVersion('pack-x', '1.1.0')).rejects.toThrow('EPERM')
+    expect((await readPackRegistry(env.registryPath))[0].dshVersion).toBe('1.0.0')
+    // 写盘恢复后重试：不会落进同版本 no-op，自述与记录一起变成 1.1.0。
+    expect((await manager.upgradePackDshVersion('pack-x', '1.1.0')).dshVersion).toBe('1.1.0')
+    expect((await readPackRegistry(env.registryPath))[0].dshVersion).toBe('1.1.0')
   })
 })

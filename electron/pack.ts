@@ -2120,10 +2120,12 @@ export function createPackManager(options: PackManagerOptions): PackManager {
       if (options.isPackRunning?.(packId)) throw new Error('请先停止整合包再切换 DSH 版本。')
       // 先把目标版本装好：下载/校验失败时记录还没动，包仍然停在旧版本上。
       if (options.ensureDshVersionInstalled) await options.ensureDshVersionInstalled(trimmed)
+      // 先写包内的派生自述、后改注册表这条事实：profile.yaml 写失败时记录还停在旧版本，重试能修好；
+      // 反过来则会留下「记录说新版本、包内自述还是旧版本」，而同版本 no-op 会让它永远修不回来。
+      await setProfileDshVersion(await homeOfRecord(record), packId, trimmed)
       const next: PackRecord = { ...record, dshVersion: trimmed, updatedAt: new Date().toISOString() }
       await upsertPackRecord(options.registryPath, next)
       const settings = await options.readSettings()
-      await setProfileDshVersion(await homeOfRecord(record), packId, trimmed)
       return toPackStatus(next, settings.activePackId)
     },
 
