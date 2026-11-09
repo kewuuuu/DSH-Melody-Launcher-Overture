@@ -11,6 +11,7 @@ const HELP = `DSH Launcher control (Node >=20)
   pack restart <pack-id> --resume "<prompt>" [--session <session-id>]
   pack config get <pack-id>
   pack config set <pack-id> --port 3081 --port-mode fixed --auto-start true
+  pack upgrade <pack-id> --dsh-version <version>
   settings get
   settings set --args '{"openAfterLaunch":false}'
   settings launch-at-login [on|off]
@@ -37,11 +38,12 @@ Config flags: --port, --port-mode, --run-as-admin, --auto-start, --pinned-at,
               --workspace, --launch-args '["web"]'
 API flags (api add only): --name, --base-url, --protocol, --models, --api-key
 Resume flags: --resume "<prompt>" --session <id> (both with pack restart only), --pack <id> (pending list only)
+Upgrade flag: --dsh-version <version> (pack upgrade only; upgrades only, the pack must be stopped)
 Protocols: openai-completions, openai-responses, anthropic-messages
 Set DSH_LAUNCHER_USER_DATA instead of --user-data if desired.
 --launcher starts only the executable supplied, when control is unavailable.
 `
-const FLAG_KEYS = ['user-data','launcher','args','port','port-mode','run-as-admin','auto-start','pinned-at','workspace','launch-args','name','base-url','protocol','models','api-key','resume','session','pack','out']
+const FLAG_KEYS = ['user-data','launcher','args','port','port-mode','run-as-admin','auto-start','pinned-at','workspace','launch-args','name','base-url','protocol','models','api-key','resume','session','pack','out','dsh-version']
 function objectJSON(value) {
   const result = JSON.parse(value)
   if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('--args requires a JSON object')
@@ -130,7 +132,7 @@ function parse(argv) {
   else throw new Error('A command is required. Use --help')
   if (words.length) throw new Error('Unexpected positional arguments')
   if (!/^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)+$/.test(command)) throw new Error('Invalid command')
-  if ((/^pack\.(start|stop|restart|config\.(get|set))$/.test(command) || group === 'resource') && !packId) throw new Error('An explicit pack ID is required')
+  if ((/^pack\.(start|stop|restart|upgrade|config\.(get|set))$/.test(command) || group === 'resource') && !packId) throw new Error('An explicit pack ID is required')
   if ((command === 'pack.list' || group === 'settings') && packId) throw new Error('This command does not accept a pack ID')
   const args = flags.args ? objectJSON(flags.args) : {}
   if (storageDir !== undefined) {
@@ -183,6 +185,13 @@ function parse(argv) {
     if (!String(flags.resume).trim()) throw new Error('--resume 需要一段续接内容')
     args.resume = { prompt: flags.resume, ...(flags.session ? { sessionId: flags.session } : {}) }
   }
+  if (flags['dsh-version'] !== undefined) {
+    if (command !== 'pack.upgrade') throw new Error('--dsh-version 只用于 pack upgrade <pack-id>')
+    const version = String(flags['dsh-version']).trim()
+    if (!version) throw new Error('--dsh-version 需要一个 DSH 版本号，例如 0.2.1')
+    args.dshVersion = version
+  }
+  if (command === 'pack.upgrade' && args.dshVersion === undefined) throw new Error('pack upgrade 需要 --dsh-version <version>')
   if (flags.session !== undefined && flags.resume === undefined) throw new Error('--session 必须与 --resume 一起使用')
   return { flags, request: { command, ...(packId ? { packId } : {}), ...(Object.keys(args).length ? { args } : {}) } }
 }

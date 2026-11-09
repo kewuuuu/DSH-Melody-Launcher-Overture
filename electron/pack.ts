@@ -177,6 +177,11 @@ export interface PackManager {
   activatePack(packId: string): Promise<AppSettings>
   removePack(packId: string): Promise<{ removed: number }>
   renamePack(packId: string, name: string): Promise<PackStatus>
+  /**
+   * 原地切换这个整合包认的 DSH 版本：只换记录里的版本号 + profile.yaml 那一行，
+   * 数据原地不动。只能升不能降（降级由 downgradeRejection 拦），运行中拒绝。
+   */
+  upgradePackDshVersion(packId: string, version: string): Promise<PackStatus>
   /** 新建空白整合包：私有家目录 + 选定 DSH 版本，不自动激活。 */
   createBlankPack(request: { name: string; dshVersion: string | null }): Promise<PackStatus>
   /**
@@ -2099,6 +2104,27 @@ export function createPackManager(options: PackManagerOptions): PackManager {
       const next: PackRecord = { ...record, name: trimmed, updatedAt: new Date().toISOString() }
       await upsertPackRecord(options.registryPath, next)
       return toPackStatus(next, (await options.readSettings()).activePackId)
+    },
+
+    /**
+     * 原地换版本：启动时由 resolveSettings 按记录里的 dshVersion 找本体，
+     * 所以改记录就等于换启动版本，包里的数据一个字节都不搬。
+     */
+    async upgradePackDshVersion(packId, version) {
+      const trimmed = normalizePackDshVersion(typeof version === 'string' ? version : '')
+      if (!isValidPackDshVersion(trimmed)) throw new Error('DSH 版本无效：' + trimmed)
+      const record = await findRecord(packId)
+      if ((record.dshVersion ?? '') === trimmed) return toPackStatus(record, (await options.readSettings()).activePackId)
+      const rejection = downgradeRejection(record.dshVersion, trimmed)
+      if (rejection) throw new Error(rejection)
+      if (options.isPackRunning?.(packId)) throw new Error('请先停止整合包再切换 DSH 版本。')
+      // 先把目标版本装好：下载/校验失败时记录还没动，包仍然停在旧版本上。
+      if (options.ensureDshVersionInstalled) await options.ensureDshVersionInstalled(trimmed)
+      const next: PackRecord = { ...record, dshVersion: trimmed, updatedAt: new Date().toISOString() }
+      await upsertPackRecord(options.registryPath, next)
+      const settings = await options.readSettings()
+      await setProfileDshVersion(await homeOfRecord(record), packId, trimmed)
+      return toPackStatus(next, settings.activePackId)
     },
 
     async createBlankPack(request) {

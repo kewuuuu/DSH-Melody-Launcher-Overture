@@ -822,6 +822,7 @@ export const demoApi: LauncherApi = {
     if (command === 'pack.stop') { const state = { running: false, pid: null, startedAt: null, url: null, port: null }; demoPackRuntimes.set(id, state); return state }
     if (command === 'pack.openWeb') return runtime(id)
     if (command === 'pack.rename') return demoApi.renamePack(id, String(args.name))
+    if (command === 'pack.upgrade') return demoApi.upgradePackDshVersion(id, String(args.dshVersion))
     if (command === 'pack.delete') return demoApi.removePack(id)
     let resources = demoPackResources.get(id)
     if (!resources) { resources = { plugins: structuredClone(profile().plugins), skills: structuredClone(demoInstalledSkills), presets: structuredClone(demoInstalledPresets) }; demoPackResources.set(id, resources) }
@@ -2128,6 +2129,13 @@ export const demoApi: LauncherApi = {
     const pack = demoPacks.find(item => item.id === packId)
     if (!pack) throw new Error(`未找到整合包：${packId}`)
     const next = { ...pack, name: name.trim(), updatedAt: new Date().toISOString() }
+    demoPacks = demoPacks.map(item => (item.id === packId ? next : item))
+    return next
+  },
+  upgradePackDshVersion: async (packId, version) => {
+    const pack = demoPacks.find(item => item.id === packId)
+    if (!pack) throw new Error(`未找到整合包：${packId}`)
+    const next = { ...pack, dshVersion: version.trim(), updatedAt: new Date().toISOString() }
     demoPacks = demoPacks.map(item => (item.id === packId ? next : item))
     return next
   },

@@ -244,6 +244,13 @@ export function createLauncherControl(options: {
         if (typeof enabled !== 'boolean') throw new Error('pack.api.set 需要 enabled 布尔值')
         return packApis.setGrant(request.packId, route, enabled)
       }
+      // 原地换版本：pack-control 只把 rename/delete 转给 lifecycle，这条得在这里接住。
+      if (request?.command === 'pack.upgrade') {
+        if (!request.packId) throw new Error('缺少整合包 ID：pack upgrade <pack-id> --dsh-version <version>')
+        const version = request.args?.dshVersion
+        if (typeof version !== 'string' || !version.trim()) throw new Error('缺少 DSH 版本：pack upgrade <pack-id> --dsh-version <version>')
+        return options.packManager.upgradePackDshVersion(request.packId, version)
+      }
       if (request?.command === 'settings.get') {
         const s = await settings.readStored()
         return { openAfterLaunch: s.openAfterLaunch, uiTheme: s.uiTheme, appearance: s.appearance, network: s.network }

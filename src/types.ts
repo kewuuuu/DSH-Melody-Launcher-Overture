@@ -1730,6 +1730,8 @@ export interface LauncherApi {
   getDroppedFilePath(file: File): string
   activatePack(packId: string): Promise<AppSettings>
   renamePack(packId: string, name: string): Promise<PackStatus>
+  /** 原地切换整合包认的 DSH 版本：只能升不能降，运行中拒绝。 */
+  upgradePackDshVersion(packId: string, version: string): Promise<PackStatus>
   createBlankPack(request: { name: string; dshVersion: string | null }): Promise<PackStatus>
   /** 整合包私有目录占用字节数（删除确认框展示）。 */
   packDiskUsage(packId: string): Promise<number>

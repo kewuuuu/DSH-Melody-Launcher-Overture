@@ -213,6 +213,23 @@ $ node bin/launcher-control.cjs pending list --json
 
 pack restart 带 --resume 时先登记续接请求、再执行原来的重启；入队失败就不重启，避免那句话丢失。返回 {resume, runtime}：resume 是新条目，runtime 是原有的 RuntimeState。没有 --resume 时 pack restart 行为不变；--session 必须与 --resume 一起用，省略时启动器会挑该包唯一 running 的会话，零个或多个都会报中文错误并列出候选。自动发送失败会把条目标成 failed、attempts 加一；连试 3 次仍失败就不再自动重发，手动 pending retry 会把计数清零。
 
+## 原地切换 DSH 版本（pack upgrade）
+
+~~~sh
+node bin/launcher-control.cjs pack upgrade <pack-id> --dsh-version 0.2.1
+node bin/launcher-control.cjs pack upgrade <pack-id> --dsh-version 0.2.1 --json
+~~~
+
+把一个整合包认的 DSH 版本原地换掉。启动器启动整合包时按记录里的 dshVersion 找本机已装的 DSH 本体，所以改记录就等于换启动版本：包里的会话记录、插件、工作区一个字节都不搬，换完照常启动即可。返回与 `pack list` 里同一份 PackStatus。
+
+三条规则：
+
+- 只能升不能降。目标版本比当前版本旧时直接拒绝，中文文案说明「新版跑过一次之后聊天记录会被写成旧版读不懂的格式」，并建议新建一个空整合包来跑旧版本；数据格式没有反向迁移边，降级救不回来。
+- 运行中拒绝：整合包还在跑时抛「请先停止整合包再切换 DSH 版本。」，先 `pack stop <pack-id>` 再切。
+- 目标版本必须已经装好，没装时先自动安装；安装失败则记录不动，包仍停在原来的版本上。版本与当前相同时不做任何写入，直接返回当前状态。
+
+切换后插件可能需要重新安装：插件是装在这个包的 profile 里的，换版本后若插件与新本体的 API 不兼容，需要重新装一遍或退回原版本。
+
 ## 目录迁移（path migrate）
 
 把 DSH 数据目录（dshHome）或本体安装目录（dshInstallPath）换到新位置。目标必须是绝对路径，且不能等于当前目录、不能位于当前目录内部、不能是启动器自己的数据目录；这些情况一律中文报错并且不写入任何文件。

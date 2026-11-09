@@ -1156,6 +1156,11 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
     return packManager.renamePack(payload.packId, payload.name)
   })
 
+  ipcMain.handle(IPC.packsUpgradeDshVersion, async (_event, payload: { packId: string; version: string }) => {
+    if (!isSafeProfileName(payload.packId)) throw new Error('整合包标识无效。')
+    return packManager.upgradePackDshVersion(payload.packId, payload.version)
+  })
+
   ipcMain.handle(IPC.packsCreateBlank, async (_event, request: { name: string; dshVersion: string | null }) => {
     assertProfileMutationAvailable()
     return packManager.createBlankPack(request)

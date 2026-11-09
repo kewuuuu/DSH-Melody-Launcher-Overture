@@ -215,6 +215,7 @@ const api: LauncherApi = {
   getDroppedFilePath: (file: File) => webUtils.getPathForFile(file),
   activatePack: packId => ipcRenderer.invoke(IPC.packsActivate, packId),
   renamePack: (packId, name) => ipcRenderer.invoke(IPC.packsRename, { packId, name }),
+  upgradePackDshVersion: (packId, version) => ipcRenderer.invoke(IPC.packsUpgradeDshVersion, { packId, version }),
   createBlankPack: request => ipcRenderer.invoke(IPC.packsCreateBlank, request),
   packDiskUsage: packId => ipcRenderer.invoke(IPC.packsDiskUsage, packId),
   removePack: packId => ipcRenderer.invoke(IPC.packsRemove, packId),

@@ -215,6 +215,7 @@ export const IPC = {
   packsPickFile: 'packs:pick-file',
   packsActivate: 'packs:activate',
   packsRename: 'packs:rename',
+  packsUpgradeDshVersion: 'packs:upgrade-dsh-version',
   packsCreateBlank: 'packs:create-blank',
   packsDiskUsage: 'packs:disk-usage',
   packsRemove: 'packs:remove',
