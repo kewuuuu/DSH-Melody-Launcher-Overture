@@ -796,13 +796,15 @@ function demoSessionImportPreview(sourcePackId: string, targetPackId: string) {
 
 const demoPackConfigs = new Map<string, import('./types').PackControlConfig>()
 const demoPackRuntimes = new Map<string, RuntimeState>()
+/** 启动器退出后留下、启动器不再托管的 DSH 实例：真机上就是「关了启动器 DSH 还在跑」那个现场。 */
+const demoExternalRuntimes = new Map<string, import('./types').ExternalRuntime>([['pack-cc-tui', { pid: 3420, port: 3080, startedAt: '2026-11-10T01:10:00Z', url: 'http://127.0.0.1:3080', profileName: 'pack-cc-tui', requiresElevation: true, elevatedSession: null }]])
 const demoPackResources = new Map<string, Record<'plugins' | 'skills' | 'presets', Array<ManagedPlugin | InstalledSkill | InstalledPreset>>>()
 export const demoApi: LauncherApi = {
   launcherControl: async request => {
     const { command, packId, args = {} } = request
     const config = (id: string): import('./types').PackControlConfig => demoPackConfigs.get(id) ?? { portMode: 'auto', port: 3080, runAsAdmin: false, autoStart: false, pinnedAt: null }
     const runtime = (id: string): RuntimeState => demoPackRuntimes.get(id) ?? { running: false, pid: null, startedAt: null, url: null, port: null }
-    if (command === 'pack.list') return { packs: demoPacks.map(p => ({ ...p, config: config(p.id), runtime: runtime(p.id) })) }
+    if (command === 'pack.list') return { packs: demoPacks.map(p => ({ ...p, config: config(p.id), runtime: runtime(p.id), externalRuntime: demoExternalRuntimes.get(p.id) ?? null })) }
     if (command === 'settings.get') return demoSettings
     if (command === 'settings.set') { demoSettings = { ...demoSettings, ...args }; return demoSettings }
     if (command === 'pack.create') return demoApi.createBlankPack({ name: String(args.name ?? 'New pack'), dshVersion: typeof args.dshVersion === 'string' ? args.dshVersion : null })
@@ -819,7 +821,7 @@ export const demoApi: LauncherApi = {
       const state = { running: true, pid: 4000 + demoPacks.indexOf(pack), startedAt: new Date().toISOString(), port, url: 'http://127.0.0.1:' + port }
       demoPackRuntimes.set(id, state); return state
     }
-    if (command === 'pack.stop') { const state = { running: false, pid: null, startedAt: null, url: null, port: null }; demoPackRuntimes.set(id, state); return state }
+    if (command === 'pack.stop') { const state = { running: false, pid: null, startedAt: null, url: null, port: null }; demoPackRuntimes.set(id, state); const externalStopped = demoExternalRuntimes.delete(id); return externalStopped ? { ...state, externalStopped: true } : state }
     if (command === 'pack.openWeb') return runtime(id)
     if (command === 'pack.rename') return demoApi.renamePack(id, String(args.name))
     if (command === 'pack.upgrade') return demoApi.upgradePackDshVersion(id, String(args.dshVersion))
