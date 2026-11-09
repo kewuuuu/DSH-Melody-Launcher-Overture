@@ -17,6 +17,9 @@ describe('Windows administrator runtime bridge', () => {
     const args = mocked.spawn.mock.calls[0][1] as string[]
     const outer = Buffer.from(args[2], 'base64').toString('utf16le')
     expect(outer).toContain('-Verb RunAs -Wait -PassThru')
+    // 提权出来的 PowerShell 窗口必须自己藏起来：RunAs 会新开一个可见控制台。
+    expect(outer).toContain('-WindowStyle Hidden -Verb RunAs')
+    expect(outer).toContain('"-WindowStyle","Hidden"')
     const match = outer.match(/"([^"]+supervise[.]ps1)"/)
     expect(match).not.toBeNull()
     const root = path.dirname(match![1])
@@ -25,6 +28,8 @@ describe('Windows administrator runtime bridge', () => {
     expect(script).toContain('Get-Process -Id ' + process.pid)
     expect(script).toContain('$ownerStart'); expect(script).toContain('taskkill.exe /pid $p.Id /t /f')
     expect(script).toContain('Test-Path -LiteralPath')
+    expect(script).toContain('ShowWindow')
+    expect(script).toContain('GetConsoleWindow')
     let output = ''; child.stdout.on('data', chunk => { output += chunk.toString() })
     await writeFile(path.join(root, 'stdout.log'), 'http://127.0.0.1:49999')
     await vi.waitFor(() => expect(output).toContain('http://127.0.0.1:49999'))
