@@ -111,6 +111,11 @@ export const IPC = {
   pendingResumesList: 'pending-resumes:list',
   pendingResumesRetry: 'pending-resumes:retry',
   pendingResumesDiscard: 'pending-resumes:discard',
+  /** 空闲自动关机。 */
+  idleShutdownGet: 'idle-shutdown:get',
+  idleShutdownArm: 'idle-shutdown:arm',
+  idleShutdownDisarm: 'idle-shutdown:disarm',
+  idleShutdownCancel: 'idle-shutdown:cancel',
   /** 目录迁移。 */
   pathsMigrate: 'paths:migrate',
   /** 卸载：计划 / 导出脚本 / 立即卸载。 */

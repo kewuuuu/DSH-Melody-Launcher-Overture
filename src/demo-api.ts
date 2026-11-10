@@ -463,6 +463,20 @@ function setDemoAiStatus(partial: Partial<AiInstallStatus>): void {
   emitAiEvent({ kind: 'status', status: demoAiStatus })
 }
 
+function demoIdleShutdown(enabled: boolean): import('./types').IdleShutdownState {
+  return {
+    enabled,
+    phase: enabled ? 'waiting' : 'off',
+    idleMinutes: 10,
+    graceMinutes: 10,
+    stopPacks: true,
+    idleSince: enabled ? new Date().toISOString() : null,
+    shutdownAt: null,
+    busy: enabled ? [{ packId: 'pack-cc-tui', reason: '有会话正在运行' }] : [],
+    message: null,
+  }
+}
+
 function wait(milliseconds: number): Promise<void> {
   return new Promise(resolve => window.setTimeout(resolve, milliseconds))
 }
@@ -1199,6 +1213,12 @@ export const demoApi: LauncherApi = {
     list: async () => [],
     retry: async () => ({ ok: false, error: null, entries: [] }),
     discard: async () => [],
+  },
+  idleShutdown: {
+    get: async () => demoIdleShutdown(false),
+    arm: async () => demoIdleShutdown(true),
+    disarm: async () => demoIdleShutdown(false),
+    cancel: async () => demoIdleShutdown(true),
   },
   paths: {
     migrate: async (kind, target) => ({ kind, current: target, backupId: null, removedOld: false, warning: null }),

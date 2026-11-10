@@ -60,6 +60,14 @@ export interface AppSettings {
    * 默认 true：监督进程不在时这是唯一能停下来的路径；关掉则只给可复制的命令。
    */
   elevatedStopPrompt?: boolean
+  /** 空闲自动关机总开关；默认 false，必须手动打开。 */
+  shutdownWhenIdle?: boolean
+  /** 多久没有任何会话活动算空闲，单位分钟；默认 10。 */
+  shutdownIdleMinutes?: number
+  /** 判定空闲后留给用户取消的时间，单位分钟；默认 10，0 表示立即动手。 */
+  shutdownGraceMinutes?: number
+  /** 关机前是否先把所有整合包停掉；默认 true。 */
+  shutdownStopPacks?: boolean
   /** 启动器界面配色；主表面由同一基色的明暗层级构成。 */
   uiTheme?: UiTheme
   /** 外观自定义（主题色/透明度/背景图/头像）；旧存档无此字段。 */
@@ -1411,6 +1419,31 @@ export interface UninstallRunOptions {
   deleteData: boolean
 }
 
+/* ===== 空闲自动关机 ===== */
+
+/** off = 没开；waiting = 在等所有会话空闲；armed = 已判定空闲，倒计时里。 */
+export type IdleShutdownPhase = 'off' | 'waiting' | 'armed'
+
+export interface IdleShutdownState {
+  /** 设置里的总开关。 */
+  enabled: boolean
+  phase: IdleShutdownPhase
+  /** 空闲阈值（分钟）。 */
+  idleMinutes: number
+  /** 取消窗口（分钟）。 */
+  graceMinutes: number
+  /** 关机前是否先停包。 */
+  stopPacks: boolean
+  /** 本轮连续空闲从什么时候开始；phase 为 waiting 时有值。 */
+  idleSince: string | null
+  /** 预计关机时刻；phase 为 armed 时有值。 */
+  shutdownAt: string | null
+  /** 现在仍算忙的整合包与原因，界面直接显示。 */
+  busy: { packId: string; reason: string }[]
+  /** 最近一次人话说明（例如「已取消本轮关机」）。 */
+  message: string | null
+}
+
 /* ===== 备份区：所有可恢复的删除/迁移都压缩成 zip 存在这里 ===== */
 
 /** 一次备份动作的来源，决定界面上怎么称呼它。 */
@@ -1620,6 +1653,13 @@ export interface LauncherApi {
     list(): Promise<PendingResumeEntry[]>
     retry(id: string): Promise<{ ok: boolean; error: string | null; entries: PendingResumeEntry[] }>
     discard(id: string): Promise<PendingResumeEntry[]>
+  }
+  /** 所有会话都空闲后自动关机：arm 布防，cancel 只取消本轮，disarm 关掉开关。 */
+  idleShutdown: {
+    get(): Promise<IdleShutdownState>
+    arm(): Promise<IdleShutdownState>
+    disarm(): Promise<IdleShutdownState>
+    cancel(): Promise<IdleShutdownState>
   }
   /** 目录迁移：复制到新位置 → 写设置 → 旧目录进备份区。 */
   paths: {

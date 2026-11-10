@@ -106,6 +106,12 @@ const api: LauncherApi = {
     retry: id => ipcRenderer.invoke(IPC.pendingResumesRetry, id),
     discard: id => ipcRenderer.invoke(IPC.pendingResumesDiscard, id),
   },
+  idleShutdown: {
+    get: () => ipcRenderer.invoke(IPC.idleShutdownGet),
+    arm: () => ipcRenderer.invoke(IPC.idleShutdownArm),
+    disarm: () => ipcRenderer.invoke(IPC.idleShutdownDisarm),
+    cancel: () => ipcRenderer.invoke(IPC.idleShutdownCancel),
+  },
   paths: {
     migrate: (kind, target) => ipcRenderer.invoke(IPC.pathsMigrate, { kind, target }),
   },
