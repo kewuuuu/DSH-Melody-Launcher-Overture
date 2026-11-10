@@ -1,4 +1,5 @@
 import { spawnElevatedRuntime, stopElevatedRuntime } from './elevated-runtime'
+import { isProcessElevated } from './process-elevation'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createServer } from 'node:net'
 import path from 'node:path'
@@ -143,6 +144,10 @@ export interface RuntimeControllerOptions {
   resolveApplicationLaunchPlan?: () => Promise<ApplicationLaunchPlan>
   spawnProcess?: typeof spawnCommand
   stopProcess?: (processToStop: ChildProcessWithoutNullStreams) => Promise<void>
+  /** 启动器自己是否已经提权；默认走 process-elevation 的真实检测，测试可注入。 */
+  isElevated?: () => Promise<boolean>
+  /** 提权启动的实现；默认 spawnElevatedRuntime，测试注入假实现来断言「已提权时根本不走它」。 */
+  spawnElevatedProcess?: typeof spawnElevatedRuntime
   /** 启动旧版 DSH 时使用的临时凭据兼容备份目录。 */
   legacyCredentialsBackupRoot?: string
   /** 修正非法凭据引用名时存放原始文件备份的目录（必须在 dshHome 之外）。 */
@@ -170,6 +175,8 @@ export interface RuntimeController {
 
 export function createRuntimeController(options: RuntimeControllerOptions): RuntimeController {
   const startProcess = options.spawnProcess ?? spawnCommand
+  const probeElevation = options.isElevated ?? isProcessElevated
+  const spawnElevated = options.spawnElevatedProcess ?? spawnElevatedRuntime
   const runtimeEnv = (settings: AppSettings, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv =>
     runtimeEnvironment(settings, base, {
       storeRoot: options.packageStoreRoot || undefined,
@@ -480,6 +487,20 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
       broadcast()
     }
 
+    // 启动器自己已经是管理员时，子进程直接继承管理员令牌：不再弹 UAC，也不再多起一个提权看护进程。
+    const startAdministratorProcess = async (): Promise<ChildProcessWithoutNullStreams> => {
+      if (await probeElevation().catch(() => false)) {
+        options.emitOutput('info', '启动器已以管理员身份运行，整合包直接继承管理员权限，不再弹出 UAC。')
+        return startProcess(executable, launchArgs, { cwd, env: environment })
+      }
+      try {
+        return await spawnElevated(executable, launchArgs, { cwd, env: environment, ...(options.elevatedStash ? { stash: options.elevatedStash } : {}) })
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        throw new Error('以管理员模式启动失败：' + reason + '。建议：直接用管理员身份运行启动器，整合包会继承管理员权限、不用再弹 UAC；也可以先取消「以管理员运行」，确认整合包在普通权限下能正常启动。')
+      }
+    }
+
     launchAttempt = async (useLegacyCredentials: boolean): Promise<void> => {
       if (useLegacyCredentials && options.legacyCredentialsBackupRoot) {
         legacyCredentialsSession = await prepareLegacyCredentials(
@@ -494,7 +515,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
 
       let started: ChildProcessWithoutNullStreams
       try {
-        started = options.runAsAdmin ? await spawnElevatedRuntime(executable, launchArgs, { cwd, env: environment, ...(options.elevatedStash ? { stash: options.elevatedStash } : {}) }) : startProcess(executable, launchArgs, { cwd, env: environment })
+        started = options.runAsAdmin ? await startAdministratorProcess() : startProcess(executable, launchArgs, { cwd, env: environment })
       } catch (error) {
         // 同步抛错＝进程根本没起来（可执行文件不存在、路径非法、EPERM）。
         // 不记就只剩一条 toast，用户和 agent 都不知道死在哪。

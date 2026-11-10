@@ -39,7 +39,11 @@ import type { AppSettings, RuntimeState } from '../src/types'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(r => rm(r, { recursive: true, force: true }))) })
-async function fixture(real = false) {
+type FixtureRuntimeHooks = {
+  isElevated?: () => Promise<boolean>
+  spawnElevatedProcess?: typeof import('../electron/elevated-runtime').spawnElevatedRuntime
+}
+async function fixture(real = false, extra: FixtureRuntimeHooks = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pack-control-test-')); roots.push(root)
   const records = ['a', 'b'].map(id => ({ id, name: id, description: '', version: '1', homePath: path.join(root, id), source: 'created', installedAt: '', updatedAt: '', state: 'complete', plugins: [] }) as PackRecord)
   for (const r of records) await mkdir(r.homePath!, { recursive: true })
@@ -52,7 +56,7 @@ async function fixture(real = false) {
   const control = createPackControl({
     userData: root, registryPath, readSettings: async () => settings,
     resolveSettings: async (r,c) => ({ ...settings, dshHome: r.homePath!, webPort: c.port }),
-    runtimeOptions: () => ({ prepareNodeRuntime: async () => ({ node: process.execPath, npm: 'npm', npx: 'npx', root, managed: false }), fallbackWorkspace: () => root, emitOutput: () => undefined, emitState: () => undefined, openExternal: () => undefined,
+    runtimeOptions: () => ({ ...extra, prepareNodeRuntime: async () => ({ node: process.execPath, npm: 'npm', npx: 'npx', root, managed: false }), fallbackWorkspace: () => root, emitOutput: () => undefined, emitState: () => undefined, openExternal: () => undefined,
       spawnProcess: (_exe,args,options) => {
         spawned.push({ home: options.env.DSH_HOME!, args })
         if (real) return spawn(process.execPath, [script, ...args], { cwd: root, env: options.env, stdio: 'pipe' }) as ChildProcessWithoutNullStreams
@@ -66,6 +70,12 @@ async function fixture(real = false) {
     externalRuntime: { scan: async () => new Map(), stop: async (): Promise<'taskkill'> => 'taskkill' },
   })
   return { root, control, settings, spawned }
+}
+
+function runtimeChild(pid: number): ChildProcessWithoutNullStreams {
+  const child = new EventEmitter() as ChildProcessWithoutNullStreams
+  Object.assign(child, { pid, exitCode: null, signalCode: null, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() })
+  return child
 }
 
 describe('explicit pack control', () => {
@@ -202,5 +212,58 @@ describe('explicit pack control', () => {
     expect(list.packs[0].config.portMode).toBe('auto')
     expect((await readdir(root)).some(name => name.startsWith('pack-control.json.corrupt-'))).toBe(true)
     await expect(readFile(path.join(root, 'pack-control.json'), 'utf8')).rejects.toThrow()
+  })
+  it('applies resource changes while the pack is running and leaves the running DSH alone', async () => {
+    const { control, root } = await fixture()
+    const source = path.join(root, 'a', 'skills', 'live-skill'); await mkdir(source, { recursive: true })
+    await writeFile(path.join(source, 'SKILL.md'), '---\nname: live-skill\ndescription: Fixture\n---\nLive')
+    try {
+      const started = await control.execute({ command: 'pack.start', packId: 'a' }) as RuntimeState
+      const list = await control.execute({ command: 'pack.resources.enabled', packId: 'a', args: { kind: 'skills', name: 'live-skill', enabled: false } }) as { items: Array<{ name: string }> }
+      expect(list.items.some(item => item.name === 'live-skill')).toBe(true)
+      // 运行中也真的写进家目录：skill 挪进 .disabled，下次启动生效。
+      await expect(readFile(path.join(root, 'a', 'skills', '.disabled', 'live-skill', 'SKILL.md'), 'utf8')).resolves.toContain('Live')
+      const packs = (await control.execute({ command: 'pack.list' }) as { packs: Array<{ id: string; runtime: RuntimeState }> }).packs
+      expect(packs.find(pack => pack.id === 'a')?.runtime).toMatchObject({ running: true, pid: started.pid })
+    } finally { await control.shutdown() }
+  })
+  it('explains a locked resource write in Chinese instead of failing silently', async () => {
+    const { control, root } = await fixture()
+    const profile = path.join(root, 'a', 'profiles', 'web'); await mkdir(profile, { recursive: true })
+    await writeFile(path.join(profile, 'package.json'), JSON.stringify({ dependencies: { 'fixture-plugin': '1.0.0' }, dsh: { profile: { bundles: ['fixture-plugin'] } } }))
+    const request = { command: 'pack.resources.enabled', packId: 'a', args: { kind: 'plugins', name: 'fixture-plugin', enabled: false } }
+    try {
+      await control.execute({ command: 'pack.start', packId: 'a' })
+      const locked = vi.spyOn(atomic, 'writeFileAtomic').mockImplementation(async () => { throw Object.assign(new Error('Fixture locked write'), { code: 'EPERM' }) })
+      await expect(control.execute(request)).rejects.toThrow('正在运行，这次改动没能写进它的家目录（EPERM）')
+      locked.mockRestore()
+      const other = vi.spyOn(atomic, 'writeFileAtomic').mockImplementation(async () => { throw new Error('Fixture unexpected write failure') })
+      // 只有文件占用类错误才翻译成中文；别的失败保留原文，方便排查。
+      await expect(control.execute(request)).rejects.toThrow('Fixture unexpected write failure')
+      other.mockRestore()
+    } finally { await control.shutdown() }
+  })
+  it('inherits the launcher administrator token instead of raising UAC when already elevated', async () => {
+    const elevated = vi.fn(async (_executable: string, _args: string[], _options: unknown) => runtimeChild(4242))
+    const { control, root } = await fixture(false, { isElevated: async () => true, spawnElevatedProcess: elevated })
+    await writeFile(path.join(root, 'pack-control.json'), JSON.stringify({ a: { runAsAdmin: true } }))
+    try {
+      const state = await control.execute({ command: 'pack.start', packId: 'a' }) as RuntimeState
+      expect(state.running).toBe(true)
+      // 已提权的启动器直接普通 spawn，子进程继承管理员令牌：不再弹 UAC、不再起看护进程。
+      expect(elevated).not.toHaveBeenCalled()
+    } finally { await control.shutdown() }
+  })
+  it('still goes through the UAC bridge when the launcher is not elevated', async () => {
+    const elevated = vi.fn(async (_executable: string, _args: string[], _options: unknown) => runtimeChild(4243))
+    const { control, root, spawned } = await fixture(false, { isElevated: async () => false, spawnElevatedProcess: elevated })
+    await writeFile(path.join(root, 'pack-control.json'), JSON.stringify({ a: { runAsAdmin: true } }))
+    try {
+      const state = await control.execute({ command: 'pack.start', packId: 'a' }) as RuntimeState
+      expect(elevated).toHaveBeenCalledTimes(1)
+      expect(elevated.mock.calls[0][0]).toBe('dsh')
+      expect(spawned).toHaveLength(0)
+      expect(state.pid).toBe(4243)
+    } finally { await control.shutdown() }
   })
 })

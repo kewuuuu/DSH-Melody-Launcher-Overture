@@ -9,6 +9,16 @@ const mocked = vi.hoisted(() => ({ spawn: vi.fn() }))
 vi.mock('node:child_process', () => ({ spawn: mocked.spawn }))
 import { spawnElevatedRuntime, stopElevatedRuntime } from '../electron/elevated-runtime'
 
+/** 括号配平：以前 $hideConsole 少一个 }，整个 supervise.ps1 解析失败，提权会话永远进不了 DSH。 */
+function braceBalance(text: string): number {
+  let depth = 0
+  for (const char of text) {
+    if (char === '{') depth += 1
+    else if (char === '}') depth -= 1
+  }
+  return depth
+}
+
 describe('Windows administrator runtime bridge', () => {
   const stashRoots: string[] = []
   afterEach(async () => {
@@ -70,6 +80,9 @@ describe('Windows administrator runtime bridge', () => {
     const script = await readFile(path.join(session.elevatedRoot, 'supervise.ps1'), 'utf8')
     expect(script).toContain('child.json')
     expect(script).toContain('} finally {')
+    // 回归：脚本块自身必须闭合，否则 PowerShell 直接 ParserError: MissingEndCurlyBrace。
+    expect(braceBalance(script)).toBe(0)
+    expect(script).toContain('} catch {} }')
     Object.assign(child, { exitCode: 0 }); child.emit('exit', 0)
     await vi.waitFor(async () => expect(await readFile(file, 'utf8').catch(() => null)).toBeNull())
   })

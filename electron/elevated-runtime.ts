@@ -46,7 +46,7 @@ export async function spawnElevatedRuntime(executable: string, args: string[], o
   const command = buildWindowsBatchCommand(executable, args)
   const script = [envScript,
     '$ErrorActionPreference="Stop"',
-    '$hideConsole = { try { Add-Type -MemberDefinition ' + quote('[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);') + ' -Name Native -Namespace Kewu | Out-Null; $handle = [Kewu.Native]::GetConsoleWindow(); if ($handle -ne [IntPtr]::Zero) { [void][Kewu.Native]::ShowWindow($handle, 0) } } catch {}',
+    '$hideConsole = { try { Add-Type -MemberDefinition ' + quote('[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);') + ' -Name Native -Namespace Kewu | Out-Null; $handle = [Kewu.Native]::GetConsoleWindow(); if ($handle -ne [IntPtr]::Zero) { [void][Kewu.Native]::ShowWindow($handle, 0) } } catch {} }',
     '& $hideConsole',
     '$owner = Get-Process -Id ' + process.pid + ' -ErrorAction Stop; $ownerStart = $owner.StartTime.ToUniversalTime().Ticks',
     '$p = Start-Process -FilePath $env:ComSpec -ArgumentList @(\'/d\',\'/s\',\'/c\',' + quote(command) + ') -WorkingDirectory ' + quote(options.cwd) + ' -RedirectStandardOutput ' + quote(stdoutPath) + ' -RedirectStandardError ' + quote(stderrPath) + ' -WindowStyle Hidden -PassThru',

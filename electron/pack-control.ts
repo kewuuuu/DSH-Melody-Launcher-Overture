@@ -39,6 +39,17 @@ export function validatePackConfig(patch: Record<string, unknown>): Partial<Pack
   return patch as Partial<PackControlConfig>
 }
 
+/** 家目录文件被别的进程占住时 Windows 抛的那些码：写不进去必须如实说，不能装作改成功了。 */
+const FILE_LOCK_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY', 'EISDIR', 'EROFS'])
+
+function asResourceWriteFailure(error: unknown, packId: string, running: boolean): unknown {
+  if (!running) return error
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  if (typeof code !== 'string' || !FILE_LOCK_CODES.has(code)) return error
+  const reason = error instanceof Error ? error.message : String(error)
+  return new Error('整合包「' + packId + '」正在运行，这次改动没能写进它的家目录（' + code + '）。正在运行的 DSH 不受影响，但这次改动没有生效；先停止整合包再重试。原始错误：' + reason)
+}
+
 export function createPackControl(options: PackControlOptions) {
   const controllers = new Map<string, RuntimeController>()
   const controllerHomes = new Map<string, string>()
@@ -53,6 +64,7 @@ export function createPackControl(options: PackControlOptions) {
   const stopExternal = options.externalRuntime?.stop ?? stopExternalRuntime
   const serial = <T>(key: string, action: () => Promise<T>): Promise<T> => {
     const next = (queues.get(key) ?? Promise.resolve()).catch(() => undefined).then(action)
+      .catch((error: unknown) => { throw asResourceWriteFailure(error, key, controllers.get(key)?.isRunning() === true) })
     queues.set(key, next)
     void next.finally(() => { if (queues.get(key) === next) queues.delete(key) }).catch(() => undefined)
     return next
@@ -240,7 +252,8 @@ export function createPackControl(options: PackControlOptions) {
         await options.openExternal(url.href)
         return state
       }
-      if (controllers.get(r.id)?.isRunning()) throw new Error('Stop this pack before changing its resources')
+      // 运行中的整合包也允许改插件/资源：改动照常写进家目录，下次启动生效（前端自己提示「下次启动生效」）。
+      // 真的写不进去时（Windows 文件被占用）不静默：serial 会把这类错误翻成中文再抛。
       const s = await options.resolveSettings(r, await config(r.id))
       if (command.startsWith('pack.market.') || command.startsWith('pack.skillMarket.')) return options.market?.(command, s, args)
       if (command === 'pack.resources.enabled' || command === 'pack.resources.remove') {
