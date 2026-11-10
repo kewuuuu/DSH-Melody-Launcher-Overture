@@ -11,6 +11,8 @@ export interface IdleShutdownPack {
   name?: string
   /** 该包的 Web 服务地址（含 ?token=…）；拿不到就是 null，按「无法确认」处理。 */
   url: string | null
+  /** url 为空时给用户看的原因（例如「未托管实例」）；缺省用通用文案。 */
+  note?: string
 }
 
 export interface IdleShutdownSettingsStore {
@@ -202,7 +204,7 @@ export function createIdleShutdownService(deps: IdleShutdownDeps): IdleShutdownS
     const failed: BusyReason[] = []
     for (const pack of packs) {
       if (!pack.url) {
-        failed.push({ packId: pack.id, reason: '拿不到 Web 服务地址，无法确认有没有会话在跑' })
+        failed.push({ packId: pack.id, reason: pack.note ?? '拿不到 Web 服务地址，无法确认有没有会话在跑' })
         continue
       }
       try {

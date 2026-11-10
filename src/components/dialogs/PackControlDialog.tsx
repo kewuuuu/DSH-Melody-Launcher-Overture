@@ -32,8 +32,8 @@ export function PackControlDialog(props: Props) {
   const [loading, setLoading] = useState(false)
   const [working, setWorking] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // 改名与打开文件夹：名字以主进程返回的 PackStatus 为准，homePath 只在运行时记录里有。
-  const homePath = (pack as ControlledPack & { homePath?: string | null }).homePath ?? ''
+  // 改名与打开文件夹：名字与家目录都以主进程返回的 PackStatus 为准。
+  const homePath = pack.homePath ?? ''
   const [packName, setPackName] = useState(pack.name)
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState(pack.name)

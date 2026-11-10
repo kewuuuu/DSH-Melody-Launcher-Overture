@@ -1092,10 +1092,18 @@ function createServices(): Services {
   const idleShutdown = createIdleShutdownService({
     settings,
     listRunningPacks: async () => {
-      const records = await readPackRegistry(packsJsonPath)
-      return records
-        .filter(record => packControl?.isPackRunning(record.id) ?? false)
-        .map(record => ({ id: record.id, name: record.name, url: packControl?.runtimeUrl(record.id) ?? null }))
+      // 走 pack.list：一次扫描就同时带回托管运行状态与「未托管实例」。
+      // 未托管实例里可能正有会话在跑，而启动器停不掉它，只能算忙并把原因给用户看。
+      const listed = await packControl!.execute({ command: 'pack.list' }) as {
+        packs?: { id: string; name: string; runtime?: { running?: boolean; url?: string | null }; externalRuntime?: { pid: number } | null }[]
+      }
+      return (listed.packs ?? []).flatMap(pack => {
+        if (pack.runtime?.running === true) return [{ id: pack.id, name: pack.name, url: pack.runtime.url ?? null }]
+        if (pack.externalRuntime) {
+          return [{ id: pack.id, name: pack.name, url: null, note: '有一份启动器没在托管的实例在运行（PID ' + pack.externalRuntime.pid + '），先在控制面板里停止它再关机' }]
+        }
+        return []
+      })
     },
     countRunningSessions: async (url, signal) => (await readRunningSessions({ baseUrl: url, fetch: githubAuth.fetch, signal })).length,
     // 关机前停包不弹 UAC：此刻界面可能已经关了，没人能点确认。

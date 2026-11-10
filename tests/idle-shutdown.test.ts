@@ -127,6 +127,17 @@ describe('idle shutdown', () => {
     expect(h.calls).toEqual([])
   })
 
+  it('未托管实例当成忙，并把原因原样给用户看', async () => {
+    const h = createHarness()
+    h.setPacks([{ id: 'pack-b', name: 'B', url: null, note: '有一份启动器没在托管的实例在运行（PID 3420），先在控制面板里停止它再关机' }])
+    await h.service.arm()
+    h.advance(30 * MINUTE)
+    const state = await h.service.poll()
+    expect(state.phase).toBe('waiting')
+    expect(state.busy).toEqual([{ packId: 'pack-b', reason: '有一份启动器没在托管的实例在运行（PID 3420），先在控制面板里停止它再关机' }])
+    expect(h.calls).toEqual([])
+  })
+
   it('空闲满阈值进入 armed，并只发一次系统通知', async () => {
     const h = createHarness()
     await h.service.arm()

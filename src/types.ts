@@ -1126,6 +1126,8 @@ export interface PackStatus {
   officialVersion?: string
   /** 这个包有一份启动器没在托管的运行实例（遗留进程）；没有就是 null/省略。 */
   externalRuntime?: ExternalRuntime | null
+  /** 包家目录（配置、插件、技能、会话都在这里）；默认包回落到全局家目录时可能为 null。 */
+  homePath?: string | null
   state: 'complete' | 'partial' | 'failed'
   plugins: PackInstalledPlugin[]
   skills?: PackInstalledSkill[]
