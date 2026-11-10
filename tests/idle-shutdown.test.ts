@@ -129,12 +129,14 @@ describe('idle shutdown', () => {
 
   it('未托管实例当成忙，并把原因原样给用户看', async () => {
     const h = createHarness()
-    h.setPacks([{ id: 'pack-b', name: 'B', url: null, note: '有一份启动器没在托管的实例在运行（PID 3420），先在控制面板里停止它再关机' }])
+    h.setPacks([{ id: 'pack-b', name: 'B', url: null, unmanaged: true, note: '有一份启动器没在托管的实例在运行（PID 3420），先在控制面板里停止它再关机' }])
     await h.service.arm()
     h.advance(30 * MINUTE)
     const state = await h.service.poll()
     expect(state.phase).toBe('waiting')
     expect(state.busy).toEqual([{ packId: 'pack-b', reason: '有一份启动器没在托管的实例在运行（PID 3420），先在控制面板里停止它再关机' }])
+    // 未托管实例是「确定在跑」，不能落到「无法确认」那一档。
+    expect(state.message).toBe('还有整合包在运行，暂不关机')
     expect(h.calls).toEqual([])
   })
 

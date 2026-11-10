@@ -13,6 +13,8 @@ export interface IdleShutdownPack {
   url: string | null
   /** url 为空时给用户看的原因（例如「未托管实例」）；缺省用通用文案。 */
   note?: string
+  /** 启动器管不着的实例（例如别的启动器留下的 DSH）：它的活动没法查，只能直接算忙。 */
+  unmanaged?: boolean
 }
 
 export interface IdleShutdownSettingsStore {
@@ -202,7 +204,13 @@ export function createIdleShutdownService(deps: IdleShutdownDeps): IdleShutdownS
     if (!Array.isArray(packs) || packs.length === 0) return { kind: 'no-packs' }
     const sessionBusy: BusyReason[] = []
     const failed: BusyReason[] = []
+    const unmanaged: BusyReason[] = []
     for (const pack of packs) {
+      // 未托管实例没有可信的地址：直接算忙，别让「查不到会话」把它降级成证据不足。
+      if (pack.unmanaged === true) {
+        unmanaged.push({ packId: pack.id, reason: pack.note ?? '有一份启动器没在托管的实例在运行' })
+        continue
+      }
       if (!pack.url) {
         failed.push({ packId: pack.id, reason: pack.note ?? '拿不到 Web 服务地址，无法确认有没有会话在跑' })
         continue
@@ -214,7 +222,7 @@ export function createIdleShutdownService(deps: IdleShutdownDeps): IdleShutdownS
         failed.push({ packId: pack.id, reason: '无法确认有没有会话在跑（' + messageOf(error) + '）' })
       }
     }
-    if (sessionBusy.length > 0) return { kind: 'activity', busy: [...sessionBusy, ...failed] }
+    if (unmanaged.length > 0 || sessionBusy.length > 0) return { kind: 'activity', busy: [...unmanaged, ...sessionBusy, ...failed] }
     if (failed.length > 0) return { kind: 'unknown', busy: failed }
     return { kind: 'idle' }
   }
@@ -310,7 +318,7 @@ export function createIdleShutdownService(deps: IdleShutdownDeps): IdleShutdownS
         status.seenRunning = true
         status.idleSince = null
         status.busy = verdict.busy
-        status.message = verdict.kind === 'activity' ? '整合包里有会话正在运行，暂不关机' : '无法确认整合包状态，暂不关机'
+        status.message = verdict.kind === 'activity' ? '还有整合包在运行，暂不关机' : '无法确认整合包状态，暂不关机'
       }
       if (phaseOf() === 'armed' && status.shutdownAt !== null && now() >= status.shutdownAt) await performShutdown(settings)
     } else if (status.phase === 'armed') {

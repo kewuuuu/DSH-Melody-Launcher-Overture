@@ -1100,7 +1100,7 @@ function createServices(): Services {
       return (listed.packs ?? []).flatMap(pack => {
         if (pack.runtime?.running === true) return [{ id: pack.id, name: pack.name, url: pack.runtime.url ?? null }]
         if (pack.externalRuntime) {
-          return [{ id: pack.id, name: pack.name, url: null, note: '有一份启动器没在托管的实例在运行（PID ' + pack.externalRuntime.pid + '），先在控制面板里停止它再关机' }]
+          return [{ id: pack.id, name: pack.name, url: null, unmanaged: true, note: '有一份启动器没在托管的实例在运行（PID ' + pack.externalRuntime.pid + '），先在控制面板里停止它再关机' }]
         }
         return []
       })
