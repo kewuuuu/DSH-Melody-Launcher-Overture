@@ -10,3 +10,12 @@
 .pack-external-error{margin:7px 0 0;max-width:280px;color:var(--danger);font-size:10px;line-height:1.6;white-space:normal}
 .pack-external-count{color:#c9871b}
 .pack-table i.external{background:#c9871b}
+
+/* 整合包配置浮层：标题区的改名/打开文件夹、行内改名、运行中提示。 */
+.pack-header-actions{display:flex;flex-wrap:wrap;gap:8px;margin:-4px 0 14px}
+.pack-header-actions button{display:inline-flex;align-items:center;gap:5px}
+.pack-rename-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 12px}
+.pack-rename-row input{flex:1 1 220px;min-width:160px;height:34px;padding:0 10px;border:1px solid var(--line-strong);border-radius:5px;color:var(--ink);background:var(--surface);font:inherit;font-size:12px}
+.pack-rename-row input:focus{outline:2px solid color-mix(in srgb,var(--accent) 32%,transparent);outline-offset:1px}
+.pack-rename-error{margin:0 0 12px;padding:8px 10px;border:1px solid var(--danger);border-radius:6px;color:var(--danger);background:var(--danger-soft);font-size:11px}
+.pack-runtime-notice{margin:0 0 14px;padding:9px 11px;border:1px solid var(--line-strong);border-radius:6px;color:var(--muted);background:var(--surface-soft);font-size:11px;line-height:1.5}

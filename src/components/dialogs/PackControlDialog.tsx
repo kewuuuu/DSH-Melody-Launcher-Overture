@@ -1,4 +1,4 @@
-import { ArrowLeft, Download, LoaderCircle, RefreshCw, Settings2, Store, Trash2 } from 'lucide-react'
+import { ArrowLeft, Download, FolderOpen, LoaderCircle, Pencil, RefreshCw, Settings2, Store, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLauncherApi } from '../../api/client'
 import { launcherControl, type ControlledPack, type PackControlConfig } from '../../lib/pack-control'
@@ -32,6 +32,34 @@ export function PackControlDialog(props: Props) {
   const [loading, setLoading] = useState(false)
   const [working, setWorking] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 改名与打开文件夹：名字以主进程返回的 PackStatus 为准，homePath 只在运行时记录里有。
+  const homePath = (pack as ControlledPack & { homePath?: string | null }).homePath ?? ''
+  const [packName, setPackName] = useState(pack.name)
+  const [renaming, setRenaming] = useState(false)
+  const [nameDraft, setNameDraft] = useState(pack.name)
+  const [renameBusy, setRenameBusy] = useState(false)
+  const [renameError, setRenameError] = useState<string | null>(null)
+  useEffect(() => { setPackName(pack.name); setNameDraft(pack.name); setRenameError(null) }, [pack.name])
+  const cancelRename = () => { setRenaming(false); setNameDraft(packName); setRenameError(null) }
+  const commitRename = async () => {
+    const name = nameDraft.trim()
+    if (!name) { setRenameError('整合包名称不能为空。'); return }
+    if (name === packName) { cancelRename(); return }
+    setRenameBusy(true); setRenameError(null)
+    try {
+      const updated = await api.renamePack(pack.id, name)
+      setPackName(updated.name)
+      setRenaming(false)
+      await props.onRefresh()
+    } catch (cause) {
+      setRenameError(cause instanceof Error ? cause.message : String(cause))
+    } finally { setRenameBusy(false) }
+  }
+  const openFolder = async () => {
+    setRenameError(null)
+    try { await api.openPath(homePath) }
+    catch (cause) { setRenameError(`打开文件夹失败：${cause instanceof Error ? cause.message : String(cause)}`) }
+  }
   const [workspace, setWorkspace] = useState(pack.config.workspace ?? '')
   const [launchArgs, setLaunchArgs] = useState((pack.config.launchArgs ?? []).join('\n'))
   const [saved, setSaved] = useState(false)
@@ -87,10 +115,31 @@ export function PackControlDialog(props: Props) {
     finally { setWorking(false) }
   }
   const title = tab === 'plugins' ? '插件' : tab === 'skills' ? '技能' : '预设'
-  return <ModalShell titleId="pack-control-title" title={<>整合包配置 · {pack.name}</>} icon={<Settings2 size={19} />} className="pack-control-modal" onClose={props.onClose} closeDisabled={working || props.busy}>
-    <div className="pack-target-banner"><span className="pack-target-dot" />当前操作对象 <strong>{pack.name}</strong><code>{pack.id}</code></div>
+  return <ModalShell titleId="pack-control-title" title={<>整合包配置 · {packName}</>} icon={<Settings2 size={19} />} className="pack-control-modal" onClose={props.onClose} closeDisabled={working || props.busy}>
+    <div className="pack-target-banner"><span className="pack-target-dot" />当前操作对象 <strong>{packName}</strong><code>{pack.id}</code></div>
+    <div className="pack-header-actions">
+      <button type="button" className="secondary-button" disabled={working || renameBusy} onClick={() => { setRenaming(true); setNameDraft(packName); setRenameError(null) }}><Pencil size={14} />改名</button>
+      <button type="button" className="secondary-button" disabled={!homePath} title={homePath || '这个整合包没有记录安装目录，无法打开文件夹。'} onClick={() => void openFolder()}><FolderOpen size={14} />打开文件夹</button>
+    </div>
+    {renaming && <div className="pack-rename-row">
+      <input
+        aria-label="整合包名称"
+        autoFocus
+        value={nameDraft}
+        disabled={renameBusy}
+        onChange={event => { setNameDraft(event.target.value); setRenameError(null) }}
+        onKeyDown={event => {
+          if (event.key === 'Enter') { event.preventDefault(); void commitRename() }
+          else if (event.key === 'Escape') { event.preventDefault(); cancelRename() }
+        }}
+      />
+      <button type="button" className="primary-button" disabled={renameBusy} onClick={() => void commitRename()}>{renameBusy ? '正在改名…' : '保存名称'}</button>
+      <button type="button" className="secondary-button" disabled={renameBusy} onClick={cancelRename}>取消</button>
+    </div>}
+    {renameError && <div className="pack-rename-error" role="alert">{renameError}</div>}
     <nav className="pack-config-tabs" aria-label="整合包配置">{([['overview', '概览'], ['settings', '启动设置'], ['api', 'API'], ['plugins', '插件'], ['skills', '技能'], ['presets', '预设'], ['export', '导出与迁移']] as const).map(([key, label]) => <button key={key} disabled={working} aria-current={tab === key ? 'page' : undefined} className={tab === key ? 'active' : ''} onClick={() => { setTab(key); setMarket(false); setError(null) }}>{label}</button>)}</nav>
     {error && <div className="pack-error" role="alert">{error}</div>}
+    {(tab === 'plugins' || tab === 'skills') && pack.runtime.running && <div className="pack-runtime-notice" role="status">整合包正在运行：这里的开关与安装会在下次启动时生效。</div>}
     {tab === 'overview' && <div className="pack-overview"><div><span>运行状态</span><strong>{pack.runtime.running ? '运行中' : '未运行'}</strong><small>{pack.runtime.url ?? '启动后可以打开工作台'}</small></div><div><span>DSH 版本</span><strong>{pack.dshVersion ?? '未指定'}</strong><small>{pack.native ? '共用家目录，请留意资源影响范围' : '独立的整合包环境'}</small></div><div><span>创建时间</span><strong>{new Date(pack.installedAt).toLocaleDateString('zh-CN')}</strong><small>{pack.description || '为每一种工作保留合适的环境。'}</small></div></div>}
     {tab === 'settings' && <form className="pack-config-form" onSubmit={event => { event.preventDefault(); setSaved(false); setError(null); void props.onSave({ workspace, launchArgs: launchArgs.split('\n').filter(Boolean) }).then(ok => { setSaved(ok); if (!ok) setError('保存设置失败，请检查参数后重试。') }) }}><label>工作区<input value={workspace} onChange={event => { setWorkspace(event.target.value); setSaved(false) }} placeholder="使用默认工作区" /></label><label>附加启动参数 <small>每行一个参数</small><textarea rows={5} value={launchArgs} onChange={event => { setLaunchArgs(event.target.value); setSaved(false) }} /></label><p>端口、管理员权限和自动启动可在首页直接调整。运行中的整合包将在下次启动时应用设置。</p><button className="primary-button" disabled={props.busy} type="submit">{props.busy ? '正在保存…' : '保存设置'}</button>{saved && <span role="status">设置已保存</span>}</form>}
     {tab === 'settings' && <div className="pack-config-form pack-version-form">
@@ -104,7 +153,7 @@ export function PackControlDialog(props: Props) {
     </div>}
     {tab === 'api' && <div className="pack-resource-panel">
       <div className="pack-resource-heading"><h3>API 授权</h3><div><button className="icon-button" aria-label="刷新 API 库" disabled={working || apiLoading} onClick={() => void loadApis()}><RefreshCw size={15} /></button></div></div>
-      <p className="settings-hint">勾选后「{pack.name}」就能使用启动器 API 库里的这个服务；取消勾选立即收回。</p>
+      <p className="settings-hint">勾选后「{packName}」就能使用启动器 API 库里的这个服务；取消勾选立即收回。</p>
       {apiError && <div className="pack-error" role="alert">{apiError}</div>}
       {apiGrants?.error && <div className="pack-error" role="alert">{apiGrants.error}</div>}
       {apiGrants?.restartRequired && <div className="settings-current" role="status"><span>该包正在运行，重启后生效。</span></div>}
@@ -115,12 +164,12 @@ export function PackControlDialog(props: Props) {
         return <div className="pack-resource-row is-shared" key={entry.route}><div><strong>{entry.displayName}</strong><small>{entry.baseUrl}</small><span className="pack-source shared">来自启动器 API 库 · {entry.route}</span><span className="pack-source">{entry.modelIds.length} 个模型 · {entry.hasApiKey ? '已保存密钥' : '无需鉴权'}</span></div><div><label><input aria-label={'授予 ' + entry.route} type="checkbox" checked={enabled} disabled={working} onChange={event => void toggleApi(entry.route, event.target.checked)} />授予</label></div></div>
       })}
     </div>}
-    {kind && <div className="pack-resource-panel">{market ? <><button className="secondary-button" onClick={() => { setMarket(false); void load() }}><ArrowLeft size={14} />返回 {pack.name} 的{title}列表</button><p className="settings-hint">安装目标：{pack.name} · 完成后返回此列表</p>{kind === 'plugins' ? <DshMarketView embedded activeProfileName={null} targetPackId={pack.id} onProfileChanged={load} /> : <SkillMarketPanel targetPackId={pack.id} installedSkills={items as InstalledSkill[]} busy={working} busyKey={null} onToggleSkill={(item, enabled) => void mutate('pack.resources.enabled', item, enabled)} onUninstallSkill={item => mutate('pack.resources.remove', item)} onInstalled={() => { void load(); void props.onRefresh() }} onRefresh={() => void load()} refreshLocked={working} />}</> : <><div className="pack-resource-heading"><h3>已安装{title}</h3><div>{kind !== 'presets' && <button className="primary-button" onClick={() => setMarket(true)}><Store size={14} />安装{title}</button>}<button className="icon-button" aria-label="刷新资源" disabled={working} onClick={() => void load()}><RefreshCw size={15} /></button></div></div>{loading && <div className="pack-empty"><LoaderCircle size={17} className="spin" />正在读取…</div>}{!loading && items.length === 0 && !error && <div className="pack-empty">这个整合包还没有安装{title}。</div>}{items.map(item => {
+    {kind && <div className="pack-resource-panel">{market ? <><button className="secondary-button" onClick={() => { setMarket(false); void load() }}><ArrowLeft size={14} />返回 {packName} 的{title}列表</button><p className="settings-hint">安装目标：{packName} · 完成后返回此列表</p>{kind === 'plugins' ? <DshMarketView embedded activeProfileName={null} targetPackId={pack.id} onProfileChanged={load} /> : <SkillMarketPanel targetPackId={pack.id} installedSkills={items as InstalledSkill[]} busy={working} busyKey={null} onToggleSkill={(item, enabled) => void mutate('pack.resources.enabled', item, enabled)} onUninstallSkill={item => mutate('pack.resources.remove', item)} onInstalled={() => { void load(); void props.onRefresh() }} onRefresh={() => void load()} refreshLocked={working} />}</> : <><div className="pack-resource-heading"><h3>已安装{title}</h3><div>{kind !== 'presets' && <button className="primary-button" onClick={() => setMarket(true)}><Store size={14} />安装{title}</button>}<button className="icon-button" aria-label="刷新资源" disabled={working} onClick={() => void load()}><RefreshCw size={15} /></button></div></div>{loading && <div className="pack-empty"><LoaderCircle size={17} className="spin" />正在读取…</div>}{!loading && items.length === 0 && !error && <div className="pack-empty">这个整合包还没有安装{title}。</div>}{items.map(item => {
       const name = 'packageName' in item ? item.packageName : item.name
       const shared = item.shared || Boolean(item.sourcePackId)
       const locked = 'locked' in item && item.locked
-      return <div className={shared ? "pack-resource-row is-shared" : "pack-resource-row"} key={name}><div><strong>{'displayName' in item ? item.displayName : name}</strong><small>{'description' in item ? item.description : 'path' in item ? item.path : name}</small><span className={shared ? 'pack-source shared' : 'pack-source'}>{shared ? '共享引用 · ' + (item.sourcePackName ?? item.sourcePackId ?? '共享来源') : 'builtin' in item && item.builtin ? '内置资源' : '本包资源'}</span></div><div><label><input aria-label={'启用 ' + name} type="checkbox" checked={item.enabled} disabled={working || locked} onChange={event => void mutate('pack.resources.enabled', item, event.target.checked)} />启用</label>{!locked && <button className="icon-button" aria-label={'移除 ' + name} disabled={working} onClick={() => { if (window.confirm('从「' + pack.name + '」移除「' + name + '」？')) void mutate('pack.resources.remove', item) }}><Trash2 size={15} /></button>}</div></div>
+      return <div className={shared ? "pack-resource-row is-shared" : "pack-resource-row"} key={name}><div><strong>{'displayName' in item ? item.displayName : name}</strong><small>{'description' in item ? item.description : 'path' in item ? item.path : name}</small><span className={shared ? 'pack-source shared' : 'pack-source'}>{shared ? '共享引用 · ' + (item.sourcePackName ?? item.sourcePackId ?? '共享来源') : 'builtin' in item && item.builtin ? '内置资源' : '本包资源'}</span></div><div><label><input aria-label={'启用 ' + name} type="checkbox" checked={item.enabled} disabled={working || locked} onChange={event => void mutate('pack.resources.enabled', item, event.target.checked)} />启用</label>{!locked && <button className="icon-button" aria-label={'移除 ' + name} disabled={working} onClick={() => { if (window.confirm('从「' + packName + '」移除「' + name + '」？')) void mutate('pack.resources.remove', item) }}><Trash2 size={15} /></button>}</div></div>
     })}{kind === 'presets' && <p className="settings-hint">内置预设仍可在全局「预设」页查看；此处管理本包安装的预设。</p>}</>}</div>}
-    {tab === 'export' && <div className="pack-export-options"><h3>将「{pack.name}」带到下一个环境</h3><p>导出沿用现有打包流程，可在下一步选择是否包含凭据与会话。</p><button className="primary-button" onClick={props.onExport}><Download size={15} />导出整合包</button><button className="secondary-button" onClick={props.onImportSessions}>导入会话到此包</button><button className="secondary-button" onClick={props.onCloneVersion}>创建其他版本副本</button></div>}
+    {tab === 'export' && <div className="pack-export-options"><h3>将「{packName}」带到下一个环境</h3><p>导出沿用现有打包流程，可在下一步选择是否包含凭据与会话。</p><button className="primary-button" onClick={props.onExport}><Download size={15} />导出整合包</button><button className="secondary-button" onClick={props.onImportSessions}>导入会话到此包</button><button className="secondary-button" onClick={props.onCloneVersion}>创建其他版本副本</button></div>}
   </ModalShell>
 }

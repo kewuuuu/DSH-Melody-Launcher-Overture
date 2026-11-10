@@ -47,8 +47,12 @@ async function mount(
 ) {
   const gets: string[] = []
   const sets: Array<{ packId: string; route: string; enabled: boolean }> = []
+  const renames: Array<[string, string]> = []
+  const opened: string[] = []
   let state = initial
   const api = {
+    renamePack: async (packId: string, name: string) => { renames.push([packId, name]); return { ...(options.pack ?? pack), name } },
+    openPath: async (path: string) => { opened.push(path) },
     packApis: {
       get: async (packId: string) => { gets.push(packId); return state },
       set: async (packId: string, route: string, enabled: boolean) => {
@@ -88,7 +92,7 @@ async function mount(
   }
   const openApiTab = () => openTab('API')
   const openSettingsTab = () => openTab('启动设置')
-  return { container, gets, sets, openApiTab, openSettingsTab }
+  return { container, gets, sets, renames, opened, openTab, openApiTab, openSettingsTab }
 }
 
 const buttonByText = (container: HTMLElement, text: string) => Array.from(container.querySelectorAll('button')).find(item => item.textContent === text) as HTMLButtonElement | undefined
@@ -168,6 +172,68 @@ it('停止后切换版本会带着目标版本升级并提示已切换', async (
   await act(async () => {})
   expect(calls).toEqual(['1.0'])
   expect(container.textContent).toContain('已切换到 DSH 1.0，下次启动生效。')
+})
+
+/** 运行时记录的 homePath 只有主进程会下发，测试里按它的真实形状补上。 */
+const packAt = (homePath: string | null): ControlledPack => ({ ...pack, homePath }) as unknown as ControlledPack
+
+function typeInto(input: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+it('「改名」行内输入后 Enter 提交，调用 renamePack 并显示新名字', async () => {
+  const { container, renames } = await mount(grantState(), undefined, { pack: packAt('D:\\packs\\pack-a') })
+  const rename = buttonByText(container, '改名')
+  expect(rename, '「改名」按钮不存在').toBeTruthy()
+  await act(async () => { rename!.click() })
+  const input = container.querySelector('input[aria-label="整合包名称"]') as HTMLInputElement
+  expect(input, '行内输入框不存在').toBeTruthy()
+  await act(async () => { typeInto(input, '  新名字  ') })
+  await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+  await act(async () => {})
+  expect(renames).toEqual([['pack-a', '新名字']])
+  expect(container.textContent).toContain('整合包配置 · 新名字')
+  expect(container.querySelector('input[aria-label="整合包名称"]')).toBeNull()
+})
+
+it('改名输入按 Esc 取消，不发请求', async () => {
+  const { container, renames } = await mount(grantState(), undefined, { pack: packAt('D:\\packs\\pack-a') })
+  await act(async () => { buttonByText(container, '改名')!.click() })
+  const input = container.querySelector('input[aria-label="整合包名称"]') as HTMLInputElement
+  await act(async () => { typeInto(input, '改了一半') })
+  await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+  expect(renames).toHaveLength(0)
+  expect(container.querySelector('input[aria-label="整合包名称"]')).toBeNull()
+  expect(container.textContent).toContain('整合包配置 · 工作包')
+})
+
+it('「打开文件夹」调用 openPath(pack.homePath)，homePath 为空时禁用并给出 title', async () => {
+  const withPath = await mount(grantState(), undefined, { pack: packAt('D:\\packs\\pack-a') })
+  const openButton = buttonByText(withPath.container, '打开文件夹')
+  expect(openButton, '「打开文件夹」按钮不存在').toBeTruthy()
+  expect(openButton!.disabled).toBe(false)
+  await act(async () => { openButton!.click() })
+  await act(async () => {})
+  expect(withPath.opened).toEqual(['D:\\packs\\pack-a'])
+
+  const withoutPath = await mount(grantState(), undefined, { pack: packAt(null) })
+  const disabled = buttonByText(withoutPath.container, '打开文件夹')!
+  expect(disabled.disabled).toBe(true)
+  expect(disabled.getAttribute('title')).toContain('没有记录安装目录')
+  await act(async () => { disabled.click() })
+  expect(withoutPath.opened).toHaveLength(0)
+})
+
+it('运行中时插件与技能子页顶部提示下次启动生效，且不阻塞安装', async () => {
+  for (const label of ['插件', '技能']) {
+    const { container, openTab } = await mount(grantState(), undefined, { pack: packAt('D:\\packs\\pack-a') })
+    await openTab(label)
+    const notice = container.querySelector('.pack-runtime-notice')
+    expect(notice, label + ' 子页缺少运行中提示').toBeTruthy()
+    expect(notice!.textContent).toContain('整合包正在运行：这里的开关与安装会在下次启动时生效。')
+    expect(buttonByText(container, '安装' + label)!.disabled).toBe(false)
+  }
 })
 
 it('库为空且无错误时只显示引导文案', async () => {

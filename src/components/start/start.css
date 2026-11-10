@@ -330,3 +330,132 @@
     padding-top: 18px;
   }
 }
+
+/* 任务完成后自动关机：开关常驻，状态区只在开关打开后出现。 */
+.start-shutdown-toggle {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-soft);
+  cursor: pointer;
+}
+
+.start-shutdown-toggle input {
+  margin-top: 2px;
+  accent-color: var(--accent);
+}
+
+.start-shutdown-toggle strong {
+  display: block;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.start-shutdown-toggle small {
+  display: block;
+  margin-top: 3px;
+  color: var(--quiet);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.start-shutdown-phase {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--quiet);
+  background: var(--surface-soft);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.start-shutdown-phase.waiting {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.start-shutdown-phase.armed {
+  color: #8a5300;
+  background: #fdf0d8;
+}
+
+.start-shutdown-state {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.start-shutdown-state strong {
+  display: block;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.start-shutdown-state p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.start-shutdown-busy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.start-shutdown-busy li {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.start-shutdown-busy code {
+  color: var(--quiet);
+  font-family: Consolas, monospace;
+  font-size: 10.5px;
+}
+
+.start-shutdown-cancel {
+  margin-top: 10px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.start-shutdown-cancel:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.start-shutdown-cancel:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.start-shutdown-message {
+  margin: 8px 0 0;
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.start-shutdown-error {
+  margin: 8px 0 0;
+  color: var(--danger);
+  font-size: 11px;
+}

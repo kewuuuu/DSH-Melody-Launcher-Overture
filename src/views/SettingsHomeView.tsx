@@ -53,6 +53,14 @@ const CUSTOM_MIRROR = '__custom__'
 /** 比较镜像地址时忽略首尾空格与结尾斜杠（手敲的常常少一个 / ）。 */
 const normalizeMirror = (value: string): string => value.trim().replace(/\/+$/, '')
 
+/** 关机参数的默认值与合法区间，与 AppSettings 上的注释同一口径。 */
+const SHUTDOWN_IDLE_DEFAULT = 10
+const SHUTDOWN_IDLE_MIN = 1
+const SHUTDOWN_IDLE_MAX = 1440
+const SHUTDOWN_GRACE_DEFAULT = 10
+const SHUTDOWN_GRACE_MIN = 0
+const SHUTDOWN_GRACE_MAX = 60
+
 /** <dshHome>/profiles/<name>：整合包在 DSH_HOME 里的固定位置，备份按钮备份的就是它。 */
 function profileDirectory(dshHome: string, profileName: string): string {
   const root = dshHome.trim().replace(/[\\/]+$/, '')
@@ -78,6 +86,11 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   const [draft, setDraft] = useState(settings)
   // 参数在界面上是一整行文本，保存时才切成数组。
   const [argsText, setArgsText] = useState(settings.launchArgs.join(' '))
+  // 两个分钟数也是文本态：空串/非数字/越界留在输入框里报错，不写进 draft。
+  const [idleText, setIdleText] = useState(String(settings.shutdownIdleMinutes ?? SHUTDOWN_IDLE_DEFAULT))
+  const [graceText, setGraceText] = useState(String(settings.shutdownGraceMinutes ?? SHUTDOWN_GRACE_DEFAULT))
+  const [idleError, setIdleError] = useState<string | null>(null)
+  const [graceError, setGraceError] = useState<string | null>(null)
   // 选图失败（格式不支持 / 超过 10MB / 文件不存在）时在设置页内就地提示。
   const [imageError, setImageError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -87,6 +100,10 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   useEffect(() => {
     setDraft(settings)
     setArgsText(settings.launchArgs.join(' '))
+    setIdleText(String(settings.shutdownIdleMinutes ?? SHUTDOWN_IDLE_DEFAULT))
+    setGraceText(String(settings.shutdownGraceMinutes ?? SHUTDOWN_GRACE_DEFAULT))
+    setIdleError(null)
+    setGraceError(null)
     setSaved(false)
   }, [settings])
   // 离开设置页时撤掉实时预览：没保存就等于没改过。
@@ -140,10 +157,39 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   const resetDraft = () => {
     setDraft(settings)
     setArgsText(settings.launchArgs.join(' '))
+    setIdleText(String(settings.shutdownIdleMinutes ?? SHUTDOWN_IDLE_DEFAULT))
+    setGraceText(String(settings.shutdownGraceMinutes ?? SHUTDOWN_GRACE_DEFAULT))
+    setIdleError(null)
+    setGraceError(null)
     setImageError(null)
     setSaveError(null)
     setSaved(false)
     onPreview(null)
+  }
+
+  // 分钟数只在合法时写进 draft；非法值留在输入框里，给出行内提示（保存按钮也就拿不到脏值）。
+  const updateIdleMinutes = (raw: string) => {
+    setIdleText(raw)
+    setSaved(false)
+    const value = Number(raw)
+    if (raw.trim() === '' || !Number.isInteger(value) || value < SHUTDOWN_IDLE_MIN || value > SHUTDOWN_IDLE_MAX) {
+      setIdleError('请填 1–1440 之间的整数分钟，当前值不会保存。')
+      return
+    }
+    setIdleError(null)
+    patch({ shutdownIdleMinutes: value })
+  }
+
+  const updateGraceMinutes = (raw: string) => {
+    setGraceText(raw)
+    setSaved(false)
+    const value = Number(raw)
+    if (raw.trim() === '' || !Number.isInteger(value) || value < SHUTDOWN_GRACE_MIN || value > SHUTDOWN_GRACE_MAX) {
+      setGraceError('请填 0–60 之间的整数分钟，当前值不会保存。')
+      return
+    }
+    setGraceError(null)
+    patch({ shutdownGraceMinutes: value })
   }
 
   const save = async () => {
@@ -303,6 +349,60 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
             <label className="check-field">
               <input type="checkbox" checked={draft.openAfterLaunch} onChange={event => patch({ openAfterLaunch: event.target.checked })} />
               <span><strong>启动后打开 Harness</strong><small>识别到本地 Web 地址时，在默认浏览器中打开。</small></span>
+            </label>
+            <label className="check-field">
+              <input
+                type="checkbox"
+                aria-label="任务完成后自动关机"
+                checked={draft.shutdownWhenIdle ?? false}
+                onChange={event => patch({ shutdownWhenIdle: event.target.checked })}
+              />
+              <span><strong>任务完成后自动关机</strong><small>所有整合包都空闲超过下面的判定时间后关闭这台电脑；默认关闭，需要在启动页开关上确认一次。</small></span>
+            </label>
+            <label className="form-field">
+              <span>空闲判定（分钟）</span>
+              <div className="settings-number-field">
+                <input
+                  type="number"
+                  min={SHUTDOWN_IDLE_MIN}
+                  max={SHUTDOWN_IDLE_MAX}
+                  step={1}
+                  aria-label="空闲判定（分钟）"
+                  aria-invalid={idleError !== null}
+                  value={idleText}
+                  onChange={event => updateIdleMinutes(event.target.value)}
+                />
+                <small className="settings-field-note">1–1440，默认 {SHUTDOWN_IDLE_DEFAULT}。</small>
+                {idleError && <small className="settings-field-error" role="alert">{idleError}</small>}
+              </div>
+            </label>
+            <label className="form-field">
+              <span>关机前等待取消（分钟）</span>
+              <div className="settings-number-field">
+                <input
+                  type="number"
+                  min={SHUTDOWN_GRACE_MIN}
+                  max={SHUTDOWN_GRACE_MAX}
+                  step={1}
+                  aria-label="关机前等待取消（分钟）"
+                  aria-invalid={graceError !== null}
+                  value={graceText}
+                  onChange={event => updateGraceMinutes(event.target.value)}
+                />
+                <small className="settings-field-note">
+                  0–60，默认 {SHUTDOWN_GRACE_DEFAULT}{draft.shutdownGraceMinutes === 0 ? '；不等待，立即关机' : ''}。
+                </small>
+                {graceError && <small className="settings-field-error" role="alert">{graceError}</small>}
+              </div>
+            </label>
+            <label className="check-field">
+              <input
+                type="checkbox"
+                aria-label="关机前先停止所有整合包"
+                checked={draft.shutdownStopPacks !== false}
+                onChange={event => patch({ shutdownStopPacks: event.target.checked })}
+              />
+              <span><strong>关机前先停止所有整合包</strong><small>避免关机时留下半截进程；默认打开。</small></span>
             </label>
             <label className="form-field">
               <span>本体安装目录</span>

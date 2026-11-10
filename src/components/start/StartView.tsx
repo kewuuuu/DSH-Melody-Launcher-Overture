@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import packageMetadata from '../../../package.json'
 import { useLauncherApi } from '../../api/client'
 import { pricingPeriod } from '../../lib/deepseek-pricing'
-import type { DeepSeekBalanceResult, DshUsageResult, LauncherUpdateStatus } from '../../types'
+import type { DeepSeekBalanceResult, DshUsageResult, IdleShutdownState, LauncherUpdateStatus } from '../../types'
 import { DataPanels } from './DataPanels'
 import './start.css'
 
@@ -57,6 +57,21 @@ function usageText(usage: DshUsageResult | null): string {
   return '读取失败'
 }
 
+/** 关机卡片的状态刷新间隔：主进程自己算空闲，界面只负责跟上。 */
+const IDLE_SHUTDOWN_POLL_MS = 5000
+
+/** ISO 时刻 → 本地 HH:MM；解析不了就返回空串，由调用方退回不带时间的文案。 */
+function shutdownClock(value: string | null): string {
+  if (!value) return ''
+  const at = new Date(value)
+  if (Number.isNaN(at.getTime())) return ''
+  return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+}
+
+function errorText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause)
+}
+
 /**
  * 「启动」页：左列品牌（品牌图 + 软件名 + 版本号/检查更新），
  * 右列上余额卡（DeepSeek 余额 + 今日 Token + 查看用量），右列下插件数据面板（见 DataPanels）。
@@ -100,6 +115,44 @@ export function StartView({ logoSrc, update, busy, onUpdateChecked, onOpenSettin
       setCheckMessage(`检查更新失败：${cause instanceof Error ? cause.message : String(cause)}`)
     } finally {
       setChecking(false)
+    }
+  }
+
+  // 空闲自动关机：初值与后续状态都来自主进程，界面不自己推断「空闲」。
+  const [shutdown, setShutdown] = useState<IdleShutdownState | null>(null)
+  const [shutdownError, setShutdownError] = useState<string | null>(null)
+  const [shutdownBusy, setShutdownBusy] = useState(false)
+  const shutdownApi = api.idleShutdown
+
+  useEffect(() => {
+    let cancelled = false
+    const read = async () => {
+      try {
+        const next = await shutdownApi.get()
+        // 轮询只负责清掉「读不到」这类错误；操作失败的提示留到用户下一次动手，别 5 秒就消失。
+        if (!cancelled) {
+          setShutdown(next)
+          setShutdownError(current => (current && current.startsWith('自动关机状态读取失败') ? null : current))
+        }
+      } catch (cause) {
+        if (!cancelled) setShutdownError(`自动关机状态读取失败：${errorText(cause)}`)
+      }
+    }
+    void read()
+    const timer = window.setInterval(() => { void read() }, IDLE_SHUTDOWN_POLL_MS)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [shutdownApi])
+
+  const applyShutdown = async (action: () => Promise<IdleShutdownState>, failPrefix: string) => {
+    setShutdownBusy(true); setShutdownError(null)
+    try {
+      setShutdown(await action())
+    } catch (cause) {
+      setShutdownError(`${failPrefix}：${errorText(cause)}`)
+      // 失败后重读一次：界面不能停在用户以为已经生效的那个状态。
+      try { setShutdown(await shutdownApi.get()) } catch { /* 读不到就保住原状态。 */ }
+    } finally {
+      setShutdownBusy(false)
     }
   }
 
@@ -161,6 +214,54 @@ export function StartView({ logoSrc, update, busy, onUpdateChecked, onOpenSettin
           </header>
           <div className="start-panel-body">
             <BalanceBody balance={balance} usage={usage} loading={loading} />
+          </div>
+        </section>
+
+        <section className="start-panel start-shutdown" aria-label="任务完成后自动关机">
+          <header className="start-panel-head">
+            <h2>任务完成后自动关机</h2>
+            {shutdown && <span className={`start-shutdown-phase ${shutdown.phase}`}>{shutdown.phase === 'armed' ? '已排定关机' : shutdown.phase === 'waiting' ? '等待空闲' : '未开启'}</span>}
+          </header>
+          <div className="start-panel-body">
+            <label className="start-shutdown-toggle">
+              <input
+                type="checkbox"
+                aria-label="任务完成后自动关机"
+                checked={shutdown?.enabled ?? false}
+                disabled={shutdownBusy}
+                onChange={event => void applyShutdown(
+                  () => (event.target.checked ? shutdownApi.arm() : shutdownApi.disarm()),
+                  '自动关机开关没有生效',
+                )}
+              />
+              <span>
+                <strong>所有整合包都空闲后自动关闭这台电脑</strong>
+                <small>默认关闭。打开后按设置里的空闲阈值判定，判定通过还会留一段取消时间。</small>
+              </span>
+            </label>
+            {shutdown?.phase === 'waiting' && (
+              <div className="start-shutdown-state">
+                <strong>等待所有整合包空闲</strong>
+                <p>空闲判定 {shutdown.idleMinutes} 分钟</p>
+                {shutdown.busy.length > 0 && (
+                  <ul className="start-shutdown-busy">
+                    {shutdown.busy.map(item => <li key={item.packId}><code>{item.packId}</code>：{item.reason}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
+            {shutdown?.phase === 'armed' && (
+              <div className="start-shutdown-state is-armed">
+                <strong>{shutdownClock(shutdown.shutdownAt) ? `将于 ${shutdownClock(shutdown.shutdownAt)} 关机` : '即将关机'}</strong>
+                <p>
+                  {shutdown.graceMinutes === 0 ? '不等待，立即关机' : `取消窗口 ${shutdown.graceMinutes} 分钟`}
+                  {shutdown.stopPacks ? '；关机前先停止所有整合包。' : '；不会停止正在运行的整合包。'}
+                </p>
+                <button type="button" className="start-shutdown-cancel" disabled={shutdownBusy} onClick={() => void applyShutdown(() => shutdownApi.cancel(), '取消失败')}>取消本次关机</button>
+              </div>
+            )}
+            {shutdown && shutdown.phase !== 'off' && shutdown.message && <p className="start-shutdown-message" role="status">{shutdown.message}</p>}
+            {shutdownError && <p className="start-shutdown-error" role="alert">{shutdownError}</p>}
           </div>
         </section>
 

@@ -130,6 +130,62 @@ it('默认允许弹一次提权停止请求，关闭后显示为未勾选', asyn
   expect(elevatedStopBox(turnedOff.container).checked).toBe(false)
 })
 
+const shutdownBox = (container: HTMLElement) => container.querySelector('input[aria-label="任务完成后自动关机"]') as HTMLInputElement
+const idleInput = (container: HTMLElement) => container.querySelector('input[aria-label="空闲判定（分钟）"]') as HTMLInputElement
+const graceInput = (container: HTMLElement) => container.querySelector('input[aria-label="关机前等待取消（分钟）"]') as HTMLInputElement
+const stopPacksBox = (container: HTMLElement) => container.querySelector('input[aria-label="关机前先停止所有整合包"]') as HTMLInputElement
+
+/** React 19 的 onChange 由原生 input 事件驱动；用原型 setter 绕过 value 追踪器，才能模拟用户真打字。 */
+function setInputValue(input: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+it('四个关机字段按已保存设置回填，默认是关闭 + 10 + 10 + 勾选停止整合包', async () => {
+  const custom = await mount({ shutdownWhenIdle: true, shutdownIdleMinutes: 25, shutdownGraceMinutes: 0, shutdownStopPacks: false })
+  expect(shutdownBox(custom.container).checked).toBe(true)
+  expect(idleInput(custom.container).value).toBe('25')
+  expect(graceInput(custom.container).value).toBe('0')
+  expect(custom.container.textContent).toContain('不等待，立即关机')
+  expect(stopPacksBox(custom.container).checked).toBe(false)
+
+  const defaults = await mount()
+  expect(shutdownBox(defaults.container).checked).toBe(false)
+  expect(idleInput(defaults.container).value).toBe('10')
+  expect(graceInput(defaults.container).value).toBe('10')
+  expect(stopPacksBox(defaults.container).checked).toBe(true)
+  expect(defaults.container.textContent).not.toContain('不等待，立即关机')
+})
+
+it('分钟数越界只在行内报错，不写进草稿；合法值与两个开关照常保存', async () => {
+  const { container, saved, button } = await mount()
+  await act(async () => { setInputValue(idleInput(container), '2000') })
+  await act(async () => { setInputValue(graceInput(container), '61') })
+  const errors = Array.from(container.querySelectorAll('.settings-field-error'))
+  expect(errors.every(item => item.getAttribute('role') === 'alert')).toBe(true)
+  expect(errors.map(item => item.textContent).join('|')).toContain('1–1440')
+  expect(errors.map(item => item.textContent).join('|')).toContain('0–60')
+  await act(async () => { button('保存设置').click() })
+  await act(async () => {})
+  expect(saved).toHaveLength(1)
+  expect(saved[0].shutdownIdleMinutes).toBeUndefined()
+  expect(saved[0].shutdownGraceMinutes).toBeUndefined()
+
+  await act(async () => { setInputValue(idleInput(container), '45') })
+  await act(async () => { setInputValue(graceInput(container), '0') })
+  expect(container.querySelectorAll('.settings-field-error')).toHaveLength(0)
+  await act(async () => { shutdownBox(container).click() })
+  await act(async () => { stopPacksBox(container).click() })
+  await act(async () => { button('保存设置').click() })
+  await act(async () => {})
+  expect(saved).toHaveLength(2)
+  expect(saved[1].shutdownIdleMinutes).toBe(45)
+  expect(saved[1].shutdownGraceMinutes).toBe(0)
+  expect(saved[1].shutdownWhenIdle).toBe(true)
+  expect(saved[1].shutdownStopPacks).toBe(false)
+  expect(container.textContent).toContain('不等待，立即关机')
+})
+
 it('勾掉提权停止提示后，保存的草稿里 elevatedStopPrompt 为 false', async () => {
   const { container, saved, button } = await mount()
   const box = elevatedStopBox(container)

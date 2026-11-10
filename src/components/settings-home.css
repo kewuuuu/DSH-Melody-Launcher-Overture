@@ -29,6 +29,12 @@
 
 .settings-home-actions-hint { margin-right: auto; color: var(--quiet); font-size: 11.5px; }
 
+/* 数字设置：输入框与说明/报错同一列堆叠，报错行内出现，不挤占左侧标签列。 */
+.settings-number-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.settings-number-field input { width: 132px; }
+.settings-field-note { color: var(--quiet); font-size: 10.5px; line-height: 1.4; }
+.settings-field-error { color: var(--danger); font-size: 10.5px; line-height: 1.4; }
+
 @media (max-width: 620px) {
   .settings-home-actions { flex-wrap: wrap; }
   .settings-home-actions-hint { flex-basis: 100%; margin: 0 0 4px; }
