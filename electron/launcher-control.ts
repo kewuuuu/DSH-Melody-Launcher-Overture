@@ -15,6 +15,7 @@ import { createApiLibrary, type ApiLibrary } from './api-library'
 import { createPackApis } from './pack-apis'
 import { createPendingResumeQueue, enqueueBeforeRestart, type PendingResumeQueue } from './pending-resume'
 import { migratePath } from './path-migration'
+import type { IdleShutdownService } from './idle-shutdown'
 
 export function createLauncherControl(options: {
   userData: string
@@ -37,6 +38,8 @@ export function createLauncherControl(options: {
   uninstall?: import('./uninstall').UninstallService
   /** helper 已经起好之后的通知：主进程据此退出，helper 才能删掉被占用的 EXE。 */
   onUninstallStarted?: () => void
+  /** 空闲自动关机服务；CLI 的 idle-shutdown 命令与 settings.set 同步开关都走它。 */
+  idleShutdown?: IdleShutdownService
 }) {
   const { userData, settings } = options
   const storage = options.storage
@@ -251,18 +254,49 @@ export function createLauncherControl(options: {
         if (typeof version !== 'string' || !version.trim()) throw new Error('缺少 DSH 版本：pack upgrade <pack-id> --dsh-version <version>')
         return options.packManager.upgradePackDshVersion(request.packId, version)
       }
+      if (typeof request?.command === 'string' && request.command.startsWith('idleShutdown.')) {
+        const service = options.idleShutdown
+        if (!service) throw new Error('空闲自动关机服务没有装配，无法执行 idle-shutdown 命令。')
+        const action = request.command.slice('idleShutdown.'.length)
+        if (action === 'status') return service.get()
+        if (action === 'arm') return service.arm()
+        if (action === 'disarm') return service.disarm()
+        if (action === 'cancel') return service.cancel()
+        throw new Error('用法：idle-shutdown status|arm|disarm|cancel')
+      }
       if (request?.command === 'settings.get') {
         const s = await settings.readStored()
-        return { openAfterLaunch: s.openAfterLaunch, uiTheme: s.uiTheme, appearance: s.appearance, network: s.network }
+        return {
+          openAfterLaunch: s.openAfterLaunch,
+          uiTheme: s.uiTheme,
+          appearance: s.appearance,
+          network: s.network,
+          shutdownWhenIdle: s.shutdownWhenIdle === true,
+          shutdownIdleMinutes: s.shutdownIdleMinutes ?? 10,
+          shutdownGraceMinutes: s.shutdownGraceMinutes ?? 10,
+          shutdownStopPacks: s.shutdownStopPacks !== false,
+        }
       }
       if (request?.command === 'settings.set') {
         const patch = request.args ?? {}
-        if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(k => !['openAfterLaunch','uiTheme','appearance','network'].includes(k))) throw new Error('Unsupported launcher setting')
+        const allowed = ['openAfterLaunch','uiTheme','appearance','network','shutdownWhenIdle','shutdownIdleMinutes','shutdownGraceMinutes','shutdownStopPacks']
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(k => !allowed.includes(k))) throw new Error('Unsupported launcher setting')
         const next = settingsQueue.catch(() => undefined).then(async () => settings.save({ ...await settings.readStored(), ...patch }))
         settingsQueue = next
         await next
         const saved = await settings.readStored()
-        return { openAfterLaunch: saved.openAfterLaunch, uiTheme: saved.uiTheme, appearance: saved.appearance, network: saved.network }
+        // 设置里的开关是唯一真相：保存后立刻让状态机跟上，不用等下一次 tick。
+        if (options.idleShutdown) await options.idleShutdown.applySettings(saved)
+        return {
+          openAfterLaunch: saved.openAfterLaunch,
+          uiTheme: saved.uiTheme,
+          appearance: saved.appearance,
+          network: saved.network,
+          shutdownWhenIdle: saved.shutdownWhenIdle === true,
+          shutdownIdleMinutes: saved.shutdownIdleMinutes ?? 10,
+          shutdownGraceMinutes: saved.shutdownGraceMinutes ?? 10,
+          shutdownStopPacks: saved.shutdownStopPacks !== false,
+        }
       }
       if (request?.command === 'storage.info') return storage.get()
       if (request?.command === 'storage.set') {

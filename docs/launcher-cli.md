@@ -13,6 +13,7 @@ node bin/launcher-control.cjs pack config set pack-a --workspace 'D:/work' --lau
 node bin/launcher-control.cjs settings get --json
 node bin/launcher-control.cjs settings set --args '{"openAfterLaunch":false}'
 node bin/launcher-control.cjs settings launch-at-login on
+node bin/launcher-control.cjs idle-shutdown status --json
 node bin/launcher-control.cjs api add acme --name 'Acme' --base-url 'https://api.acme.test/v1' --protocol openai-completions --models 'acme-1,acme-2' --api-key 'sk-acme'
 node bin/launcher-control.cjs pack api enable pack-a acme
 ~~~
@@ -228,6 +229,29 @@ $ node bin/launcher-control.cjs pending list --json
 ~~~
 
 pack restart 带 --resume 时先登记续接请求、再执行原来的重启；入队失败就不重启，避免那句话丢失。返回 {resume, runtime}：resume 是新条目，runtime 是原有的 RuntimeState。没有 --resume 时 pack restart 行为不变；--session 必须与 --resume 一起用，省略时启动器会挑该包唯一 running 的会话，零个或多个都会报中文错误并列出候选。自动发送失败会把条目标成 failed、attempts 加一；连试 3 次仍失败就不再自动重发，手动 pending retry 会把计数清零。
+
+## 空闲自动关机（idle-shutdown）
+
+设置里 `shutdownWhenIdle` 打开后，启动器持续判定「所有正在运行的整合包里都没有 running 状态的会话」。真正全空闲满 `shutdownIdleMinutes` 分钟（默认 10）才进入预告阶段，`shutdownGraceMinutes` 分钟（默认 10，0 表示不等待）后关机；预告期间每 15 秒复查一次，一旦有新活动就退回等待并重新计时。命令行可随时查看、布防、撤防与取消：
+
+~~~sh
+node bin/launcher-control.cjs idle-shutdown status --json
+node bin/launcher-control.cjs idle-shutdown arm
+node bin/launcher-control.cjs idle-shutdown disarm
+node bin/launcher-control.cjs idle-shutdown cancel
+~~~
+
+四条命令都返回 IdleShutdownState（见 src/types.ts）：{enabled,phase,idleMinutes,graceMinutes,stopPacks,idleSince,shutdownAt,busy,message}。phase 为 off/waiting/armed，busy 直接列出拿不到结论的整合包与中文原因，界面照抄即可。判定复用续接队列的同一条链路（`/connect?token=…` 换 cookie、`POST /api/session/list`）：任何运行中的包拿不到 Web 地址，或 RPC 失败、超时，一律算忙，绝不因为「问不出来」就关机。布防后必须先有整合包运行过；一个都没跑过时停在 waiting，message 为「还没有整合包在运行」，跑过之后即便都停了也照常计时。
+
+到点前再复查一次：仍空闲且 `shutdownStopPacks` 为 true 时先逐个停包（总预算 20 秒，停不掉的记进 message 但不阻止关机），再执行 `shutdown.exe /s /t 0 /c "KEWU: 所有整合包空闲，自动关机"`；非 Windows 只写 message、不执行命令。预告开始时发一次系统通知（标题「即将自动关机」，正文说明多少分钟后关机、可在启动器里取消），每轮只发一次，通知失败不影响状态机。`cancel` 只在 armed 阶段有效，回到 waiting 并重新计时；`disarm` 落 off 并把设置写回 false；`arm` 把设置写回 true。
+
+四个字段都能用 settings set 改：
+
+~~~sh
+node bin/launcher-control.cjs settings set --args '{"shutdownWhenIdle":true,"shutdownIdleMinutes":10,"shutdownGraceMinutes":10,"shutdownStopPacks":true}'
+~~~
+
+shutdownIdleMinutes 收敛到 1–1440、shutdownGraceMinutes 收敛到 0–60（都是整数，越界夹到边界）；缺省值依次为 false / 10 / 10 / true。
 
 ## 原地切换 DSH 版本（pack upgrade）
 

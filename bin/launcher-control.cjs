@@ -16,6 +16,7 @@ const HELP = `DSH Launcher control (Node >=20)
   settings get
   settings set --args '{"openAfterLaunch":false}'
   settings launch-at-login [on|off]
+  idle-shutdown status|arm|disarm|cancel
   api list
   api add <route> --name <name> --base-url <url> --protocol <protocol> --models a,b [--api-key <key>]
   api remove <route>
@@ -129,6 +130,10 @@ function parse(argv) {
       if (!flags.yes) throw new Error('卸载会删除启动器文件，必须带 --yes 确认：uninstall now --yes')
       command = 'uninstall.run'
     }
+  }
+  else if (group === 'idle-shutdown') {
+    if (!['status', 'arm', 'disarm', 'cancel'].includes(action)) throw new Error('用法：idle-shutdown status|arm|disarm|cancel')
+    command = 'idleShutdown.' + action
   }
   else if (['pack','settings','resource'].includes(group) && action) { command = (group === 'resource' ? 'pack.resources' : group) + '.' + action; packId = words.shift() }
   else throw new Error('A command is required. Use --help')

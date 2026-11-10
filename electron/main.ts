@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, Notification, safeStorage, shell } from 'electron'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -15,6 +15,9 @@ import { registerAppearanceProtocol, registerAppearanceScheme } from './appearan
 import { registerBackupsIpc } from './backups-ipc'
 import { registerPathMigrationIpc } from './path-migration-ipc'
 import { registerPendingResumesIpc } from './pending-resume-ipc'
+import { readRunningSessions } from './pending-resume'
+import { createIdleShutdownService, type IdleShutdownService } from './idle-shutdown'
+import { registerIdleShutdownIpc } from './idle-shutdown-ipc'
 import { registerLauncherPluginsIpc } from './launcher-plugins-ipc'
 import { createWorkspaceSkillsService } from './workspace-skills'
 import { registerWorkspaceSkillsIpc } from './workspace-skills-ipc'
@@ -162,6 +165,8 @@ const events = createRendererEvents(createRendererChannel(getWindow))
 interface Services {
   packControl: ReturnType<typeof createLauncherControl>
   launcherControl: ReturnType<typeof createLauncherControl>['execute']
+  /** 所有整合包都空闲后自动关机的状态机；IPC、CLI、设置保存都指向这一份。 */
+  idleShutdown: IdleShutdownService
   settings: SettingsStore
   /** 启动器级 API 库（跨整合包共享）。 */
   apiLibrary: ReturnType<typeof createLauncherControl>['apiLibrary']
@@ -1082,6 +1087,32 @@ function createServices(): Services {
     tempDir: os.tmpdir(),
   }
   const uninstall = createUninstallService({ plan: uninstallPlan, stopAllPacks: () => packControl!.shutdown() })
+  // 空闲自动关机：判定要读「谁在跑」和「包里的会话列」，两者都只能经 packControl 拿到；
+  // packControl 在下一行才赋值，所以这里的依赖全部走闭包、在真正 tick 时才解引用。
+  const idleShutdown = createIdleShutdownService({
+    settings,
+    listRunningPacks: async () => {
+      const records = await readPackRegistry(packsJsonPath)
+      return records
+        .filter(record => packControl?.isPackRunning(record.id) ?? false)
+        .map(record => ({ id: record.id, name: record.name, url: packControl?.runtimeUrl(record.id) ?? null }))
+    },
+    countRunningSessions: async (url, signal) => (await readRunningSessions({ baseUrl: url, fetch: githubAuth.fetch, signal })).length,
+    // 关机前停包不弹 UAC：此刻界面可能已经关了，没人能点确认。
+    stopPack: async packId => { await packControl?.execute({ command: 'pack.stop', packId, args: { noElevated: true } }) },
+    notify: (title, body) => {
+      try {
+        if (Notification.isSupported()) new Notification({ title, body }).show()
+      } catch (error) {
+        console.error('[idle-shutdown] 发送系统通知失败。', error)
+      }
+    },
+    shutdown: async comment => {
+      if (process.platform !== 'win32') return false
+      await runCommand('shutdown.exe', ['/s', '/t', '0', '/c', comment], { cwd: os.tmpdir(), env: process.env, timeoutMs: 5_000 })
+      return true
+    },
+  })
   packControl = createLauncherControl({
     userData, cliPath: path.join(app.getAppPath(), 'bin/launcher-control.cjs'), settings, packManager: packManager!, storage: storageController,
     prepareNodeRuntime: () => prepareNodeRuntime('runtime'),
@@ -1089,9 +1120,9 @@ function createServices(): Services {
     openExternal: url => shell.openExternal(url), fallbackWorkspace: () => app.getPath('documents'),
     fetchImpl: githubAuth.fetch, emitOutput: text => events.output('runtime', 'info', text),
     legacyRuntimeRunning: () => runtime.isRunning(), prepareOfficeCliTool,
-    loginRegistration, uninstall, onUninstallStarted: quitAfterUninstallStarted,
+    loginRegistration, uninstall, onUninstallStarted: quitAfterUninstallStarted, idleShutdown,
   })
-  return { packControl, uninstall, uninstallPlan, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
+  return { packControl, uninstall, uninstallPlan, idleShutdown, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
 }
 
 // helper 已在 %TEMP% 里跑起来，主进程必须让位：EXE 被自己占着就永远删不掉。
@@ -1244,6 +1275,9 @@ app.whenReady().then(async () => {
     baseUrlOf: packId => services?.packControl.runtimeUrl(packId) ?? null,
   })
   registerPathMigrationIpc({ ipcMain, migrate: (kind, target) => services!.packControl.paths.migrate(kind, target) })
+  // 空闲自动关机：布防状态以设置为准，启动时先对齐一次，开关为 true 才会进入 waiting。
+  registerIdleShutdownIpc({ ipcMain, service: services.idleShutdown })
+  void services.idleShutdown.applySettings(startupSettings).catch(error => console.error('[idle-shutdown] 启动时同步设置失败。', error))
   // 卸载：dshHome 决定计划里哪一行算「用户自己的数据」，所以等设置读出来再补上；helper 起来后主进程直接退出。
   services.uninstallPlan.dshHome = startupSettings.dshHome
   registerUninstallIpc({
@@ -1267,7 +1301,10 @@ app.whenReady().then(async () => {
     getWindow,
     setWindowMode: (mode: WindowMode) => applyWindowMode(mainWindow, mode),
     // 家目录换了以后工作区 skill 必须跟着换根，否则会继续列旧目录。
-    onSettingsSaved: saved => { workspaceSkillsHome = saved.dshHome },
+    onSettingsSaved: saved => {
+      workspaceSkillsHome = saved.dshHome
+      void services?.idleShutdown.applySettings(saved).catch(error => console.error('[idle-shutdown] 同步设置失败。', error))
+    },
   })
   await services.profilePoolReady
   void services.packControl.autoStart()
@@ -1319,6 +1356,7 @@ async function shutdownLauncherProcesses(): Promise<void> {
   const gracefulTasks: Promise<unknown>[] = []
   if (controlServer) gracefulTasks.push(controlServer.close())
   if (current) gracefulTasks.push(current.packControl.shutdown())
+  if (current) gracefulTasks.push(current.idleShutdown.dispose())
   if (current?.runtime.isRunning()) gracefulTasks.push(current.runtime.stop())
   if (current?.pluginTrial.isBusy()) gracefulTasks.push(current.pluginTrial.cancel())
   if (current?.aiInstaller.isBusy()) gracefulTasks.push(current.aiInstaller.cancel())

@@ -103,9 +103,154 @@ async function writeEntriesOf(file: string, entries: PendingResumeEntry[]): Prom
   await writeFileAtomic(file, JSON.stringify({ version: 1, entries }, null, 2) + '\n')
 }
 
-interface RunningSession {
+export interface RunningSession {
   id: string
   title: string
+}
+
+function resolveFetcher(injected?: Fetcher): Fetcher {
+  if (injected) return injected
+  if (typeof globalThis.fetch !== 'function') throw new Error('当前运行环境没有可用的 fetch，无法发送续接消息。')
+  return globalThis.fetch
+}
+
+/** 从 <origin>/web?token=… 里拆出 Web 服务根地址与 token；续接与空闲判定共用这一份校验。 */
+export function parsePackBaseUrl(baseUrl: string): { origin: string; token: string } {
+  let url: URL
+  try {
+    url = new URL(baseUrl)
+  } catch {
+    throw new Error('整合包 Web 服务地址无效：' + baseUrl)
+  }
+  const token = url.searchParams.get('token') ?? ''
+  if (!token) throw new Error('续接地址缺少 token 参数，无法连接整合包 Web 服务。')
+  return { origin: url.origin, token }
+}
+
+/** GET /connect?token=… 换出会话 cookie；续接与空闲判定共用。 */
+async function connectPackSession(fetcher: Fetcher, origin: string, token: string, signal?: AbortSignal): Promise<string> {
+  const target = origin + CONNECT_PATH + '?token=' + encodeURIComponent(token)
+  const init: RequestInit = { method: 'GET' }
+  if (signal) init.signal = signal
+  let response: Response
+  try {
+    response = await fetcher(target, init)
+  } catch (error) {
+    throw new Error('连接整合包 Web 服务失败：' + messageOf(error))
+  }
+  if (!response.ok) throw new Error('连接整合包 Web 服务失败（HTTP ' + response.status + '）。')
+  const headers = response.headers as Headers & { getSetCookie?: () => string[] }
+  const rawCookies = typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : []
+  const pairs: string[] = []
+  for (const cookie of rawCookies) {
+    const pair = cookie.split(';')[0]?.trim() ?? ''
+    if (pair) pairs.push(pair)
+  }
+  if (pairs.length === 0) {
+    const fallback = headers.get('set-cookie')?.split(';')[0]?.trim() ?? ''
+    if (fallback) pairs.push(fallback)
+  }
+  if (pairs.length === 0) throw new Error('连接整合包 Web 服务未返回会话 cookie，无法续接。')
+  return pairs.join('; ')
+}
+
+/** POST /api/<method> 发一条 RPC；错误文案由 action 决定。 */
+async function callPackRpc(fetcher: Fetcher, origin: string, method: string, args: unknown, cookie: string, action: string, signal?: AbortSignal): Promise<unknown> {
+  const body = JSON.stringify({
+    type: 'client-request',
+    rpcId: randomUUID(),
+    method,
+    payload: { args },
+  })
+  const init: RequestInit = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body,
+  }
+  if (signal) init.signal = signal
+  let response: Response
+  try {
+    response = await fetcher(origin + '/api/' + method, init)
+  } catch (error) {
+    throw new Error(action + '失败：无法连接整合包 Web 服务（' + messageOf(error) + '）')
+  }
+  if (!response.ok) throw new Error(action + '失败：整合包 Web 服务返回 HTTP ' + response.status + '。')
+  let text: string
+  try {
+    text = await response.text()
+  } catch (error) {
+    throw new Error(action + '失败：读取响应内容出错（' + messageOf(error) + '）。')
+  }
+  let payload: unknown
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    throw new Error(action + '失败：整合包 Web 服务返回了无法解析的响应。')
+  }
+  if (!isRecord(payload) || !isRecord(payload.result)) {
+    throw new Error(action + '失败：整合包 Web 服务返回了无法识别的响应。')
+  }
+  const result = payload.result
+  if (result.ok !== true) {
+    const error = isRecord(result.error) ? result.error : null
+    const detail = error ? readString(error.message) || readString(error.code) : ''
+    throw new Error(action + '失败：' + (detail || '整合包 Web 服务拒绝了请求。'))
+  }
+  return result.value
+}
+
+/** session/list 的返回值里挑出 running 的会话；形状不认识就当没有。 */
+function runningSessionsOf(value: unknown): RunningSession[] {
+  const list = Array.isArray(value)
+    ? value
+    : isRecord(value) && Array.isArray(value.sessions)
+      ? value.sessions
+      : isRecord(value) && Array.isArray(value.items)
+        ? value.items
+        : []
+  const running: RunningSession[] = []
+  for (const item of list) {
+    if (!isRecord(item)) continue
+    const status = readString(item.status) || readString(item.state)
+    if (status !== 'running') continue
+    running.push({
+      id: readString(item.id) || readString(item.sessionId) || readString(item.session_id),
+      title: readString(item.title) || readString(item.name) || readString(item.summary),
+    })
+  }
+  return running
+}
+
+function pickRunningSessionOf(packId: string, value: unknown): string {
+  const running = runningSessionsOf(value)
+  if (running.length === 0) {
+    throw new Error('整合包「' + packId + '」当前没有正在运行的会话。请先在整合包里打开一个会话，或用 --session 指定会话 ID。')
+  }
+  if (running.length > 1) {
+    const candidates = running.map((item) => (item.title ? item.id + '（' + item.title + '）' : item.id)).join('、')
+    throw new Error('整合包「' + packId + '」有 ' + running.length + ' 个正在运行的会话：' + candidates + '。请用 --session 指定要续接的会话。')
+  }
+  const only = running[0]
+  if (!only || !only.id) {
+    throw new Error('整合包「' + packId + '」正在运行的会话没有会话 ID，无法续接。请用 --session 指定会话 ID。')
+  }
+  return only.id
+}
+
+/**
+ * 读某个整合包当前正在运行的会话（复用续接队列的 /connect + session/list 链路）。
+ * 失败一律抛错，调用方（空闲自动关机）据此按「忙」处理。
+ */
+export async function readRunningSessions(options: {
+  baseUrl: string
+  fetch?: Fetcher
+  signal?: AbortSignal
+}): Promise<RunningSession[]> {
+  const fetcher = resolveFetcher(options.fetch)
+  const base = parsePackBaseUrl(options.baseUrl)
+  const cookie = await connectPackSession(fetcher, base.origin, base.token, options.signal)
+  const value = await callPackRpc(fetcher, base.origin, SESSION_LIST_METHOD, {}, cookie, '读取会话列表', options.signal)
+  return runningSessionsOf(value)
 }
 
 export function createPendingResumeQueue(deps: PendingResumeQueueDeps): PendingResumeQueue {
@@ -124,121 +269,16 @@ export function createPendingResumeQueue(deps: PendingResumeQueueDeps): PendingR
     return next
   }
 
-  const fetcher = (): Fetcher => {
-    if (injectedFetch) return injectedFetch
-    if (typeof globalThis.fetch !== 'function') throw new Error('当前运行环境没有可用的 fetch，无法发送续接消息。')
-    return globalThis.fetch
-  }
+  const fetcher = (): Fetcher => resolveFetcher(injectedFetch)
 
-  const parseBaseUrl = (baseUrl: string): { origin: string; token: string } => {
-    let url: URL
-    try {
-      url = new URL(baseUrl)
-    } catch {
-      throw new Error('整合包 Web 服务地址无效：' + baseUrl)
-    }
-    const token = url.searchParams.get('token') ?? ''
-    if (!token) throw new Error('续接地址缺少 token 参数，无法连接整合包 Web 服务。')
-    return { origin: url.origin, token }
-  }
+  const parseBaseUrl = (baseUrl: string): { origin: string; token: string } => parsePackBaseUrl(baseUrl)
 
-  const connect = async (origin: string, token: string): Promise<string> => {
-    const target = origin + CONNECT_PATH + '?token=' + encodeURIComponent(token)
-    let response: Response
-    try {
-      response = await fetcher()(target, { method: 'GET' })
-    } catch (error) {
-      throw new Error('连接整合包 Web 服务失败：' + messageOf(error))
-    }
-    if (!response.ok) throw new Error('连接整合包 Web 服务失败（HTTP ' + response.status + '）。')
-    const headers = response.headers as Headers & { getSetCookie?: () => string[] }
-    const rawCookies = typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : []
-    const pairs: string[] = []
-    for (const cookie of rawCookies) {
-      const pair = cookie.split(';')[0]?.trim() ?? ''
-      if (pair) pairs.push(pair)
-    }
-    if (pairs.length === 0) {
-      const fallback = headers.get('set-cookie')?.split(';')[0]?.trim() ?? ''
-      if (fallback) pairs.push(fallback)
-    }
-    if (pairs.length === 0) throw new Error('连接整合包 Web 服务未返回会话 cookie，无法续接。')
-    return pairs.join('; ')
-  }
+  const connect = (origin: string, token: string): Promise<string> => connectPackSession(fetcher(), origin, token)
 
-  const callRpc = async (origin: string, method: string, args: unknown, cookie: string, action: string): Promise<unknown> => {
-    const body = JSON.stringify({
-      type: 'client-request',
-      rpcId: randomUUID(),
-      method,
-      payload: { args },
-    })
-    let response: Response
-    try {
-      response = await fetcher()(origin + '/api/' + method, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', cookie },
-        body,
-      })
-    } catch (error) {
-      throw new Error(action + '失败：无法连接整合包 Web 服务（' + messageOf(error) + '）')
-    }
-    if (!response.ok) throw new Error(action + '失败：整合包 Web 服务返回 HTTP ' + response.status + '。')
-    let text: string
-    try {
-      text = await response.text()
-    } catch (error) {
-      throw new Error(action + '失败：读取响应内容出错（' + messageOf(error) + '）。')
-    }
-    let payload: unknown
-    try {
-      payload = JSON.parse(text)
-    } catch {
-      throw new Error(action + '失败：整合包 Web 服务返回了无法解析的响应。')
-    }
-    if (!isRecord(payload) || !isRecord(payload.result)) {
-      throw new Error(action + '失败：整合包 Web 服务返回了无法识别的响应。')
-    }
-    const result = payload.result
-    if (result.ok !== true) {
-      const error = isRecord(result.error) ? result.error : null
-      const detail = error ? readString(error.message) || readString(error.code) : ''
-      throw new Error(action + '失败：' + (detail || '整合包 Web 服务拒绝了请求。'))
-    }
-    return result.value
-  }
+  const callRpc = (origin: string, method: string, args: unknown, cookie: string, action: string): Promise<unknown> =>
+    callPackRpc(fetcher(), origin, method, args, cookie, action)
 
-  const pickRunningSession = (packId: string, value: unknown): string => {
-    const list = Array.isArray(value)
-      ? value
-      : isRecord(value) && Array.isArray(value.sessions)
-        ? value.sessions
-        : isRecord(value) && Array.isArray(value.items)
-          ? value.items
-          : []
-    const running: RunningSession[] = []
-    for (const item of list) {
-      if (!isRecord(item)) continue
-      const status = readString(item.status) || readString(item.state)
-      if (status !== 'running') continue
-      running.push({
-        id: readString(item.id) || readString(item.sessionId) || readString(item.session_id),
-        title: readString(item.title) || readString(item.name) || readString(item.summary),
-      })
-    }
-    if (running.length === 0) {
-      throw new Error('整合包「' + packId + '」当前没有正在运行的会话。请先在整合包里打开一个会话，或用 --session 指定会话 ID。')
-    }
-    if (running.length > 1) {
-      const candidates = running.map((item) => (item.title ? item.id + '（' + item.title + '）' : item.id)).join('、')
-      throw new Error('整合包「' + packId + '」有 ' + running.length + ' 个正在运行的会话：' + candidates + '。请用 --session 指定要续接的会话。')
-    }
-    const only = running[0]
-    if (!only || !only.id) {
-      throw new Error('整合包「' + packId + '」正在运行的会话没有会话 ID，无法续接。请用 --session 指定会话 ID。')
-    }
-    return only.id
-  }
+  const pickRunningSession = (packId: string, value: unknown): string => pickRunningSessionOf(packId, value)
 
   const deliverOne = async (entry: PendingResumeEntry, baseUrl: string): Promise<PendingResumeEntry> => {
     try {

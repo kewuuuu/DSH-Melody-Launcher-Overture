@@ -51,6 +51,11 @@ export function defaultSettings(input: DefaultSettingsInput): AppSettings {
     launchAtLogin: false,
     // 停止以管理员权限运行的整合包时允许弹一次 UAC：缺省开，用户显式关掉才静默失败。
     elevatedStopPrompt: true,
+    // 空闲自动关机：缺省关；布防后空闲 10 分钟、预告 10 分钟、关机前先停包。
+    shutdownWhenIdle: false,
+    shutdownIdleMinutes: 10,
+    shutdownGraceMinutes: 10,
+    shutdownStopPacks: true,
   }
 }
 
@@ -62,6 +67,13 @@ function validUiTheme(value: unknown): value is UiTheme {
 
 function validWebPort(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 65535
+}
+
+/** 分钟数收敛：非有限数回落 fallback，其余向下取整后夹在 [min, max]。 */
+function validShutdownMinutes(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = typeof value === 'number' ? value : Number.NaN
+  if (!Number.isFinite(numeric)) return fallback
+  return Math.min(max, Math.max(min, Math.floor(numeric)))
 }
 
 function validRuntimeVersion(value: unknown): value is string {
@@ -195,6 +207,10 @@ export function validateSettings(input: AppSettings): AppSettings {
     // 启动器自身随登录启动：缺省关，只有显式 true 才开（与整合包 autoStart 无关）。
     launchAtLogin: input.launchAtLogin === true,
     elevatedStopPrompt: input.elevatedStopPrompt !== false,
+    shutdownWhenIdle: input.shutdownWhenIdle === true,
+    shutdownIdleMinutes: validShutdownMinutes(input.shutdownIdleMinutes, 10, 1, 1440),
+    shutdownGraceMinutes: validShutdownMinutes(input.shutdownGraceMinutes, 10, 0, 60),
+    shutdownStopPacks: input.shutdownStopPacks !== false,
   }
 }
 
@@ -226,6 +242,10 @@ export function mergeStoredSettings(defaults: AppSettings, stored: Partial<AppSe
     recommendedWebUiPrompted: Boolean(stored.recommendedWebUiPrompted),
     launchAtLogin: typeof stored.launchAtLogin === 'boolean' ? stored.launchAtLogin : defaults.launchAtLogin === true,
     elevatedStopPrompt: typeof stored.elevatedStopPrompt === 'boolean' ? stored.elevatedStopPrompt : defaults.elevatedStopPrompt !== false,
+    shutdownWhenIdle: typeof stored.shutdownWhenIdle === 'boolean' ? stored.shutdownWhenIdle : defaults.shutdownWhenIdle === true,
+    shutdownIdleMinutes: validShutdownMinutes(stored.shutdownIdleMinutes, defaults.shutdownIdleMinutes ?? 10, 1, 1440),
+    shutdownGraceMinutes: validShutdownMinutes(stored.shutdownGraceMinutes, defaults.shutdownGraceMinutes ?? 10, 0, 60),
+    shutdownStopPacks: typeof stored.shutdownStopPacks === 'boolean' ? stored.shutdownStopPacks : defaults.shutdownStopPacks !== false,
   }
 }
 
