@@ -29,6 +29,7 @@ function createHarness(overrides: Partial<AppSettings> = {}) {
   let sessionCount = 0
   let probeFailure: Error | null = null
   let notifyFailure: Error | null = null
+  let stopFailure: Error | null = null
   const calls: string[] = []
   const notifications: { title: string; body: string }[] = []
   const timers = new Map<number, number>()
@@ -42,6 +43,7 @@ function createHarness(overrides: Partial<AppSettings> = {}) {
     },
     stopPack: async packId => {
       calls.push('stop:' + packId)
+      if (stopFailure) throw stopFailure
     },
     notify: (title, body) => {
       if (notifyFailure) throw notifyFailure
@@ -83,6 +85,9 @@ function createHarness(overrides: Partial<AppSettings> = {}) {
     },
     failNotify: (error: Error | null) => {
       notifyFailure = error
+    },
+    failStop: (error: Error | null) => {
+      stopFailure = error
     },
   }
 }
@@ -241,6 +246,17 @@ describe('idle shutdown', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+
+  it('停包失败也要继续关机，并把失败原因写进 message', async () => {
+    const h = createHarness()
+    h.failStop(new Error('整合包已失去响应'))
+    await reachArmed(h)
+    h.advance(10 * MINUTE)
+    const state = await h.service.poll()
+    expect(h.calls).toEqual(['stop:pack-a', 'shutdown:' + IDLE_SHUTDOWN_COMMENT])
+    expect(state.phase).toBe('off')
+    expect(state.message).toContain('未能停止')
   })
 
   it('宽限期为 0 时同一轮里停包并关机', async () => {
