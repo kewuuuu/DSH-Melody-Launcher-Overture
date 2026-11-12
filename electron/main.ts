@@ -37,7 +37,12 @@ import { registerIpcHandlers } from './ipc'
 import { createLauncherUpdater, type LauncherUpdater } from './launcher-update'
 import { loginItemSettings, syncLaunchAtLogin } from './login-item'
 import { isProcessElevated } from './process-elevation'
-import { buildElevatedRelaunchArgs, relaunchElevated, shouldRelaunchElevated } from './startup-elevation'
+import {
+  buildElevatedRelaunchArgs,
+  orchestrateElevationRelaunch,
+  relaunchElevated,
+  shouldRelaunchElevated,
+} from './startup-elevation'
 import { createGitHubAuthService, type GitHubAuthService } from './github-auth'
 import { buildNetworkEnvironment, npmRegistryCandidates, refreshWindowsSystemProxy } from './proxy'
 import {
@@ -212,7 +217,36 @@ interface Services {
 let services: Services | null = null
 let controlServer: { close(): Promise<void> } | null = null
 
-function createServices(): Services {
+/**
+ * 设置存储的装配参数只写一次：提权判定要在服务装配之前读设置，两次共用同一个实例，
+ * 才不会重复探测 Node 运行时，也不会出现两份互不相干的缓存（IPC 存的设置必须落在这一个上）。
+ */
+function createLauncherSettingsStore(userData: string): SettingsStore {
+  const managedDshRoot = path.join(userData, 'dsh-runtime')
+  return createSettingsStore({
+    filePath: path.join(userData, 'settings.json'),
+    createDefaults: () => defaultSettings({
+      dshHomeFromEnvironment: process.env.DSH_HOME,
+      homeDirectory: os.homedir(),
+      documentsDirectory: app.getPath('documents'),
+      systemNpx: findSystemNodeRuntime()?.npx,
+      dshInstallPath: managedDshRoot,
+    }),
+    detectInstalledDsh: (settings: AppSettings) => findInstalledDsh({
+      managedRoot: settings.dshInstallPath,
+      configuredExecutable: settings.launchExecutable,
+    }),
+    // 整合包真隔离的咽喉点：read() 返回的 dshHome 即激活包的私有家目录（缺省 = 默认家目录）。
+    resolvePackHome: async current => {
+      if (!current.activePackId) return null
+      const records = await readPackRegistry(path.join(userData, 'packs.json'))
+      return records.find(record => record.id === current.activePackId)?.homePath ?? null
+    },
+  })
+}
+
+/** bootSettings = 提权判定之前就读好的那个实例，装配时直接接管，避免读两次设置。 */
+function createServices(bootSettings?: SettingsStore): Services {
   const userData = app.getPath('userData')
   const managedDshRoot = path.join(userData, 'dsh-runtime')
   const managedNodeRoot = path.join(userData, 'node-runtime')
@@ -321,26 +355,7 @@ function createServices(): Services {
     }
   }
 
-  settings = createSettingsStore({
-    filePath: path.join(userData, 'settings.json'),
-    createDefaults: () => defaultSettings({
-      dshHomeFromEnvironment: process.env.DSH_HOME,
-      homeDirectory: os.homedir(),
-      documentsDirectory: app.getPath('documents'),
-      systemNpx: findSystemNodeRuntime()?.npx,
-      dshInstallPath: managedDshRoot,
-    }),
-    detectInstalledDsh: (settings: AppSettings) => findInstalledDsh({
-      managedRoot: settings.dshInstallPath,
-      configuredExecutable: settings.launchExecutable,
-    }),
-    // 整合包真隔离的咽喉点：read() 返回的 dshHome 即激活包的私有家目录（缺省 = 默认家目录）。
-    resolvePackHome: async current => {
-      if (!current.activePackId) return null
-      const records = await readPackRegistry(packsJsonPath)
-      return records.find(record => record.id === current.activePackId)?.homePath ?? null
-    },
-  })
+  settings = bootSettings ?? createLauncherSettingsStore(userData)
 
   let applicationAddons: ApplicationAddonManager
   let installer: Installer
@@ -1218,6 +1233,37 @@ app.whenReady().then(async () => {
     console.error('[credentials] 旧版 DSH 凭据恢复失败。', error)
   })
   await systemProxyProbe
+  // 设置要在服务装配之前读出来：提权判定必须早于 createServices——它一进去就开始跑旧整合包迁移，
+  // 而提权重启会把那次迁移连根拔掉。
+  const bootSettingsStore = createLauncherSettingsStore(app.getPath('userData'))
+  const startupSettings = await bootSettingsStore.read()
+  // 启动即提权：必须在开窗口、注册 IPC、迁移数据之前决断。
+  // 失败（用户点「否」、UAC 被拦）就当没开这个设置继续，绝不因为提权失败而崩掉启动器；
+  // argv 里的 --elevated-relaunch 保证提权后的那次不会再弹一次，不会无限重启。
+  // 单实例锁此刻正被本进程持有，而提权子进程要靠它活着——所以先释放，重启失败再抢回来。
+  if (
+    shouldRelaunchElevated({
+      launchElevated: startupSettings.launchElevated,
+      argv: process.argv.slice(1),
+      elevated: await isProcessElevated(),
+    })
+  ) {
+    const outcome = await orchestrateElevationRelaunch({
+      releaseLock: () => {
+        app.releaseSingleInstanceLock()
+      },
+      acquireLock: () => app.requestSingleInstanceLock(),
+      relaunch: () => relaunchElevated({
+        executablePath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
+        args: buildElevatedRelaunchArgs({ argv: process.argv.slice(1), dataDir: app.getPath('userData') }),
+      }),
+    })
+    // 只有 continued 才继续启动：relaunched = 新实例已接手，handed-over = 锁已被别的实例拿走。
+    if (outcome !== 'continued') {
+      app.quit()
+      return
+    }
+  }
   try {
     processSupervisor = await createProcessSupervisor({
       root: path.join(app.getPath('userData'), 'process-supervisor'),
@@ -1227,27 +1273,7 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error('[process-supervisor] 启动失败，退出时只能执行普通清理。', error)
   }
-  services = createServices()
-  const startupSettings = await services.settings.read()
-  // 启动即提权：必须在开窗口、注册 IPC、迁移数据之前决断。
-  // 失败（用户点「否」、UAC 被拦）就当没开这个设置继续，绝不因为提权失败而崩掉启动器；
-  // argv 里的 --elevated-relaunch 保证提权后的那次不会再弹一次，不会无限重启。
-  if (
-    shouldRelaunchElevated({
-      launchElevated: startupSettings.launchElevated,
-      argv: process.argv.slice(1),
-      elevated: await isProcessElevated(),
-    })
-  ) {
-    const relaunched = await relaunchElevated({
-      executablePath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
-      args: buildElevatedRelaunchArgs({ argv: process.argv.slice(1), dataDir: app.getPath('userData') }),
-    })
-    if (relaunched) {
-      app.quit()
-      return
-    }
-  }
+  services = createServices(bootSettingsStore)
   // 备份区必须早于任何「会删用户数据的启动路径」：三条删除链路在没装配引擎时会拒绝删除，
   // 而装配本身同步且零成本（tar.exe / PowerShell 探测推迟到第一次备份）。
   try {

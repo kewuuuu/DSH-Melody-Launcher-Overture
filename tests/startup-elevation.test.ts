@@ -6,6 +6,7 @@ import {
   ELEVATED_RELAUNCH_FLAG,
   buildElevatedPowerShellCommand,
   buildElevatedRelaunchArgs,
+  orchestrateElevationRelaunch,
   relaunchElevated,
   shouldRelaunchElevated,
 } from '../electron/startup-elevation'
@@ -132,6 +133,81 @@ const baseSettings: AppSettings = {
   webPort: 3080,
   openAfterLaunch: true,
 }
+
+type ElevationHooks = Parameters<typeof orchestrateElevationRelaunch>[0]
+
+function fakeHooks(options: { relaunched: boolean; acquired?: boolean; releaseThrows?: boolean }) {
+  const calls: string[] = []
+  const hooks: ElevationHooks = {
+    releaseLock: () => {
+      calls.push('release')
+      if (options.releaseThrows) throw new Error('lock is gone')
+    },
+    acquireLock: () => {
+      calls.push('acquire')
+      return options.acquired ?? true
+    },
+    relaunch: async () => {
+      calls.push('relaunch')
+      return options.relaunched
+    },
+  }
+  return { calls, hooks }
+}
+
+describe('orchestrateElevationRelaunch', () => {
+  it('重启成功时顺序为 release → relaunch，且绝不把锁抢回来', async () => {
+    const { calls, hooks } = fakeHooks({ relaunched: true })
+    await expect(orchestrateElevationRelaunch(hooks)).resolves.toBe('relaunched')
+    expect(calls).toEqual(['release', 'relaunch'])
+  })
+
+  it('用户拒绝提权时重新拿锁继续运行', async () => {
+    const { calls, hooks } = fakeHooks({ relaunched: false, acquired: true })
+    await expect(orchestrateElevationRelaunch(hooks)).resolves.toBe('continued')
+    expect(calls).toEqual(['release', 'relaunch', 'acquire'])
+  })
+
+  it('拿不回锁说明别的实例已接管，交班退出', async () => {
+    const { calls, hooks } = fakeHooks({ relaunched: false, acquired: false })
+    await expect(orchestrateElevationRelaunch(hooks)).resolves.toBe('handed-over')
+    expect(calls).toEqual(['release', 'relaunch', 'acquire'])
+  })
+
+  // 约定：releaseLock 抛错时整体按 'continued' 收尾——不 relaunch，也不 acquire。
+  // 理由：锁的状态已经不可信，此时重启只会得到「父子都拿不到锁、两个进程都不在」的最坏结果；
+  // 留在当前进程里未提权运行，至少启动器是开着的。
+  it('释放锁抛错时按 continued 收尾，不再尝试重启', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { calls, hooks } = fakeHooks({ relaunched: true, releaseThrows: true })
+      await expect(orchestrateElevationRelaunch(hooks)).resolves.toBe('continued')
+      expect(calls).toEqual(['release'])
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  // 异常不能冒到 whenReady：那会让进程既没窗口也没退出，正是这次要修的那类静默失败。
+  it('relaunch 抛错时按失败分支走 acquire，不把异常抛给启动流程', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { calls, hooks } = fakeHooks({ relaunched: false, acquired: false })
+      const outcome = await orchestrateElevationRelaunch({
+        ...hooks,
+        relaunch: async () => {
+          calls.push('relaunch')
+          throw new Error('powershell exploded')
+        },
+      })
+      expect(outcome).toBe('handed-over')
+      expect(calls).toEqual(['release', 'relaunch', 'acquire'])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
 
 describe('launchElevated 设置归一化', () => {
   const defaults = defaultSettings({

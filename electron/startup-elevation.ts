@@ -153,3 +153,40 @@ export async function relaunchElevated(options: RelaunchElevatedOptions): Promis
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
+
+export interface ElevationRelaunchHooks {
+  releaseLock: () => void
+  acquireLock: () => boolean
+  relaunch: () => Promise<boolean>
+}
+
+export type ElevationRelaunchOutcome = 'relaunched' | 'continued' | 'handed-over'
+
+/**
+ * 提权重启与单实例锁的时序编排。
+ *
+ * 提权子进程一启动就要 requestSingleInstanceLock()，所以父进程必须先放手：否则子进程拿到
+ * false 立刻 quit，父进程随后也 quit，用户看到的是「点了以后什么都没开」。
+ * 顺序固定为 release → relaunch → (失败才) acquire，成功路径绝不把锁抢回来。
+ *
+ * releaseLock 抛错时整体按 'continued' 收尾（不 relaunch、不 acquire）：锁的状态已经不可信，
+ * 此时重启只可能得到「父子都拿不到锁、两个进程都不在」的最坏结果；留在当前进程里未提权
+ * 运行，至少启动器是开的。relaunch 抛错则走正常的失败分支（acquire 决定继续还是交班）。
+ */
+export async function orchestrateElevationRelaunch(hooks: ElevationRelaunchHooks): Promise<ElevationRelaunchOutcome> {
+  try {
+    hooks.releaseLock()
+  } catch (error) {
+    console.warn('[startup-elevation] 释放单实例锁失败，放弃提权重启，按当前实例继续：' + describe(error))
+    return 'continued'
+  }
+  let relaunched = false
+  try {
+    relaunched = await hooks.relaunch()
+  } catch (error) {
+    // 交给下面的 acquire 分支定夺：新实例可能已经起来了，那就该交班而不是再开一个窗口。
+    console.warn('[startup-elevation] 提权重启调用抛错，按未提权继续：' + describe(error))
+  }
+  if (relaunched) return 'relaunched'
+  return hooks.acquireLock() ? 'continued' : 'handed-over'
+}
