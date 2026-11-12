@@ -60,6 +60,8 @@ export function createPackControl(options: PackControlOptions) {
   let closing = false
   /** 后台重启的状态：controller 会被换掉，所以 restarting/lastError 只能记在这张表里。 */
   const restarts = new Map<string, { restarting: boolean; lastError: string | null }>()
+  /** 强制停止会让正在后台跑的那轮重启作废：epoch 一变，它就不再执行 start。 */
+  const restartEpochs = new Map<string, number>()
   const runtimeStateOf = (id: string): RuntimeState => {
     const base: RuntimeState = controllers.get(id)?.state() ?? { running: false, pid: null, startedAt: null, url: null, port: null }
     const flag = restarts.get(id)
@@ -159,6 +161,7 @@ export function createPackControl(options: PackControlOptions) {
   }
   /** 后台串行执行的 stop → start：失败只落到 runtime.lastError，绝不抛给已经拿到 accepted 的调用方。 */
   async function restartPack(r: PackRecord): Promise<void> {
+    const epoch = restartEpochs.get(r.id) ?? 0
     const running = controllers.get(r.id)
     if (running) {
       try {
@@ -173,12 +176,37 @@ export function createPackControl(options: PackControlOptions) {
         await clearElevatedSession(elevatedRoot, r.id).catch(() => undefined)
       }
     }
+    // 这轮重启期间用户按过「强制停止」：包已经被停掉，不能再把它启动回来。
+    if ((restartEpochs.get(r.id) ?? 0) !== epoch) return
     try {
       await (await controller(r)).start()
       restarts.delete(r.id)
     } catch (error) {
       noteRestartFailure(r.id, error)
     }
+  }
+  /** pack.stop 的唯一实现：force 由 execute 绕过串行队列直接调用，非 force 在 serial 里排队。 */
+  async function stopPack(r: PackRecord, args: Record<string, unknown>): Promise<unknown> {
+    const force = args.force === true
+    // 强制停止要连带作废正在后台跑的那轮重启，否则它的 start 会把刚停掉的包又拉起来。
+    if (force) restartEpochs.set(r.id, (restartEpochs.get(r.id) ?? 0) + 1)
+    const runtime = controllers.get(r.id)
+    if (runtime) {
+      const state = await runtime.stop({ force })
+      controllers.delete(r.id)
+      restarts.delete(r.id)
+      await clearElevatedSession(elevatedRoot, r.id)
+      return state
+    }
+    const stopSettings = await options.resolveSettings(r, await config(r.id))
+    const external = await findExternal(r, stopSettings.profileName)
+    // 内存里没有 controller 也不代表没在跑：先扫一遍外部遗留进程，扫不到才算真没跑。
+    if (!external) return { running: false, pid: null, startedAt: null, url: null, port: null }
+    const stored = await options.readSettings()
+    const allowElevation = args.noElevated === true ? false : stored.elevatedStopPrompt !== false
+    const method = await stopExternal(external, { dataDir: options.userData, allowElevation, log: text => console.log('[pack-stop] ' + r.id + ': ' + text) })
+    await clearElevatedSession(elevatedRoot, r.id)
+    return { running: false, pid: null, startedAt: null, url: null, port: null, externalStopped: true, stoppedBy: method }
   }
   async function resources(r: PackRecord, kind: unknown) {
     const s = await options.resolveSettings(r, await config(r.id))
@@ -253,6 +281,9 @@ export function createPackControl(options: PackControlOptions) {
       return next
     })
     if (command === 'pack.resources.list') return resources(r, args.kind)
+    // 强制停止不排队：一轮重启最坏要等 20 秒停止 + 120 秒授权，用户这时点「强制停止」
+    // 还排在它后面，表现依然是「停不掉」。非 force 的优雅停止照旧走串行队列。
+    if (command === 'pack.stop' && args.force === true) return stopPack(r, args)
     return serial(r.id, async () => {
       if (command === 'pack.start' || command === 'pack.restart') {
         if (closing) throw new Error('Launcher is shutting down')
@@ -267,25 +298,7 @@ export function createPackControl(options: PackControlOptions) {
         }
         return (await controller(r)).start()
       }
-      if (command === 'pack.stop') {
-        const runtime = controllers.get(r.id)
-        if (runtime) {
-          const state = await runtime.stop({ force: args.force === true })
-          controllers.delete(r.id)
-          restarts.delete(r.id)
-          await clearElevatedSession(elevatedRoot, r.id)
-          return state
-        }
-        const stopSettings = await options.resolveSettings(r, await config(r.id))
-        const external = await findExternal(r, stopSettings.profileName)
-        // 内存里没有 controller 也不代表没在跑：先扫一遍外部遗留进程，扫不到才算真没跑。
-        if (!external) return { running: false, pid: null, startedAt: null, url: null, port: null }
-        const stored = await options.readSettings()
-        const allowElevation = args.noElevated === true ? false : stored.elevatedStopPrompt !== false
-        const method = await stopExternal(external, { dataDir: options.userData, allowElevation, log: text => console.log('[pack-stop] ' + r.id + ': ' + text) })
-        await clearElevatedSession(elevatedRoot, r.id)
-        return { running: false, pid: null, startedAt: null, url: null, port: null, externalStopped: true, stoppedBy: method }
-      }
+      if (command === 'pack.stop') return stopPack(r, args)
       if (command === 'pack.openWeb') {
         const state = controllers.get(r.id)?.state()
         if (!state?.running || !state.url) throw new Error('Pack Web service is not ready')

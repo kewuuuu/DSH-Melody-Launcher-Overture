@@ -11,7 +11,7 @@ const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(r => rm(r, { recursive: true, force: true }))) })
 
 type Hooks = {
-  stop?: () => Promise<void>
+  stop?: (attempt: number) => Promise<void>
   start?: (attempt: number) => Promise<void>
 }
 
@@ -23,6 +23,7 @@ async function fixture(hooks: Hooks = {}) {
   const settings: AppSettings = { dshHome: path.join(root, 'default'), dshInstallPath: root, profileName: 'web', launchExecutable: 'dsh', launchArgs: ['web'], webPort: 45321, workspace: root, openAfterLaunch: false, activePackId: 'a' }
   const events: string[] = []
   let starts = 0
+  let stops = 0
   const fakeController = (): RuntimeController => {
     let running = false
     const snapshot = (): RuntimeState => ({ running, pid: running ? 4242 : null, startedAt: null, url: running ? 'http://127.0.0.1:45321' : null, port: running ? 45321 : null })
@@ -38,8 +39,9 @@ async function fixture(hooks: Hooks = {}) {
         return snapshot()
       },
       async stop(options?: { force?: boolean }) {
+        stops += 1
         events.push(options?.force === true ? 'stop:force' : 'stop')
-        await hooks.stop?.()
+        await hooks.stop?.(stops)
         running = false
         return snapshot()
       },
@@ -99,4 +101,43 @@ describe('后台重启与强制停止', () => {
       expect(events).toEqual(['start', 'stop:force', 'start', 'stop'])
     } finally { await control.shutdown() }
   }, 15_000)
+
+  it('pack.stop 带 force 时越过排队中的重启立即停止，非 force 仍然排队', async () => {
+    // 每个 gate 只拦一次 stop：模拟提权停止卡在等 UAC / 等外层退出的那一段。
+    let gate: Promise<void> | null = null
+    const { control, events } = await fixture({ stop: async () => { const waiting = gate; gate = null; if (waiting) await waiting } })
+    let gateReleaser: () => void = () => undefined
+    const openGate = () => { const release = gateReleaser; gateReleaser = () => undefined; release() }
+    const closeGate = () => { gate = new Promise<void>(resolve => { gateReleaser = resolve }) }
+    try {
+      await control.execute({ command: 'pack.start', packId: 'a' })
+      events.length = 0
+      // 队首是一轮重启，它的 stop 会卡上很久（提权时最多 20 秒）。
+      closeGate()
+      await control.execute({ command: 'pack.restart', packId: 'a' })
+      await vi.waitFor(() => expect(events).toEqual(['stop']))
+      // 队首还挂着的时候点「强制停止」：必须立刻生效，而不是排到它后面。
+      const forced = await control.execute({ command: 'pack.stop', packId: 'a', args: { force: true } })
+      expect(forced).toMatchObject({ running: false })
+      expect(events).toEqual(['stop', 'stop:force'])
+      // 被强制停止作废的那轮重启不会再 start。
+      openGate()
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(events).toEqual(['stop', 'stop:force'])
+      // 非 force 的优雅停止照旧串行：队首没完成之前它不会动手。
+      await control.execute({ command: 'pack.start', packId: 'a' })
+      events.length = 0
+      closeGate()
+      await control.execute({ command: 'pack.restart', packId: 'a' })
+      await vi.waitFor(() => expect(events).toEqual(['stop']))
+      let finished = false
+      const polite = control.execute({ command: 'pack.stop', packId: 'a' }).then(result => { finished = true; return result })
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(finished).toBe(false)
+      expect(events).toEqual(['stop'])
+      openGate()
+      await polite
+      expect(finished).toBe(true)
+    } finally { await control.shutdown() }
+  }, 20_000)
 })

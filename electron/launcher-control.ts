@@ -392,7 +392,10 @@ export function createLauncherControl(options: {
         options.onUninstallStarted?.()
         return result
       }
-      return deliverPending(request, await control.execute(request))
+      const result = await control.execute(request)
+      // 不带 --resume 的重启也只回 accepted：积压的续接请求要等运行时出 URL 再投，否则它永远挂在横幅里。
+      if (request?.command === 'pack.restart' && request.packId && !pendingDeliveryFor(request, result)) deliverPendingAfterRestart(request.packId)
+      return deliverPending(request, result)
     },
   }
 }
