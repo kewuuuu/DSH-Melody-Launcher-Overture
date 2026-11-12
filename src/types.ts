@@ -813,6 +813,12 @@ export interface RuntimeState {
   applicationAddonName?: string | null
   /** 最近一次非正常退出，供界面显示 AI 修复入口。新一轮启动时清空。 */
   lastFailure?: RuntimeFailure | null
+  /** 重启流程进行中：从 stop 开始到 start 结束（成功或失败都算结束）。 */
+  restarting?: boolean
+  /** 提权启动已经拉起外层 powershell、监督进程还没确认（多半在等用户应答 UAC）。 */
+  awaitingAuthorization?: boolean
+  /** 最近一次失败的中文原因（重启/强制停止失败都留在这里，成功启动清空）。 */
+  lastError?: string | null
 }
 
 /**

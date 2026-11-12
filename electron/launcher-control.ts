@@ -141,6 +141,26 @@ export function createLauncherControl(options: {
     if (target) void pendingResumeQueue.deliver(target.packId, target.url).catch(() => undefined)
     return result
   }
+  /**
+   * pack.restart 现在立刻返回 accepted，URL 要等后台 stop→start 跑完才出现。
+   * 直接拿 pack.list 轮询会每 500ms 起一次 PowerShell 扫描，所以只读内存里的 controller 状态。
+   */
+  const RESTART_READY_TIMEOUT_MS = 120_000
+  const RESTART_READY_POLL_MS = 500
+  const deliverPendingAfterRestart = (packId: string): void => {
+    void (async () => {
+      const deadline = Date.now() + RESTART_READY_TIMEOUT_MS
+      for (;;) {
+        const readyUrl = control.runtimeUrl(packId)
+        if (readyUrl) {
+          await pendingResumeQueue.deliver(packId, readyUrl).catch(() => undefined)
+          return
+        }
+        if (Date.now() >= deadline) return
+        await new Promise<void>(resolve => { const timer = setTimeout(resolve, RESTART_READY_POLL_MS); timer.unref() })
+      }
+    })().catch(() => undefined)
+  }
   const pendingResumes = {
     list: () => pendingResumeQueue.list(),
     async retry(id: string) {
@@ -352,7 +372,10 @@ export function createLauncherControl(options: {
           { enqueue: input => pendingResumeQueue.enqueue(input), restart: () => control.execute({ ...request, args: rest }) },
           { packId: request.packId, ...resume },
         )
-        return { resume: entry, runtime: deliverPending(request, result) }
+        const delivered = deliverPending(request, result)
+        // 这次拿不到 URL（restart 只回了 accepted）：等后台重启出 URL 再投，别把续接请求弄丢。
+        if (!pendingDeliveryFor(request, result)) deliverPendingAfterRestart(request.packId)
+        return { resume: entry, runtime: delivered }
       }
       if (request?.command === 'storage.reset') return storage.reset()
       if (request?.command === 'uninstall.plan') return uninstallService().plan()

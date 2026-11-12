@@ -105,7 +105,10 @@ describe('explicit pack control', () => {
       expect(spawned[0].home).not.toBe(spawned[1].home)
       await Promise.all([control.execute({ command: 'pack.start', packId: 'a' }), control.execute({ command: 'pack.start', packId: 'a' })])
       expect(spawned).toHaveLength(2)
-      await control.execute({ command: 'pack.restart', packId: 'a' }); expect(spawned).toHaveLength(3)
+      // restart 现在先回 accepted，再在后台串行 stop→start：等后台那次启动落定再断言。
+      const restarted = await control.execute({ command: 'pack.restart', packId: 'a' }) as { accepted?: boolean; restarting?: boolean }
+      expect(restarted).toMatchObject({ accepted: true, restarting: true })
+      await vi.waitFor(() => expect(spawned).toHaveLength(3))
       await control.execute({ command: 'pack.stop', packId: 'a' })
       const list = await control.execute({ command: 'pack.list' }) as { packs: Array<{ id: string; runtime: RuntimeState }> }
       expect(list.packs.find(p => p.id === 'b')?.runtime.running).toBe(true)

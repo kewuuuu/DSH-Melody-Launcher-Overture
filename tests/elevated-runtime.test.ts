@@ -98,4 +98,48 @@ describe('Windows administrator runtime bridge', () => {
     await vi.waitFor(async () => expect(await readFile(path.join(ours.elevatedRoot, 'supervise.ps1'), 'utf8').catch(() => null)).toBeNull())
     expect(JSON.parse(await readFile(file, 'utf8')).outerPid).toBe(999888)
   })
+
+  it.skipIf(process.platform !== 'win32')('cancels an elevated start whose supervisor never appeared instead of waiting 15 seconds', async () => {
+    const child = new EventEmitter() as ChildProcessWithoutNullStreams
+    Object.assign(child, { pid: 555111, exitCode: null, signalCode: null, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() })
+    mocked.spawn.mockImplementation((command: string) => {
+      if (command !== 'taskkill.exe') return child
+      const killer = new EventEmitter()
+      // 真实 taskkill 会立刻退出并把外层 powershell 也带走，这里同样让它把外层收掉。
+      setTimeout(() => { Object.assign(child, { exitCode: 1 }); child.emit('exit', 1); killer.emit('exit', 0) }, 10)
+      return killer as unknown as ChildProcessWithoutNullStreams
+    })
+    const started = await spawnElevatedRuntime('C:/fixture/node.exe', ['entry.js'], { cwd: 'C:/fixture', env: {} })
+    const begin = Date.now()
+    expect(await stopElevatedRuntime(started)).toBe(true)
+    const elapsed = Date.now() - begin
+    // 监督进程没起来（UAC 还没应答）＝写下去的 stop 没人消费：3 秒后必须改走 taskkill，绝不能再硬等 15 秒。
+    expect(elapsed).toBeGreaterThanOrEqual(2_000)
+    expect(elapsed).toBeLessThan(9_000)
+    const kill = mocked.spawn.mock.calls.find(call => call[0] === 'taskkill.exe')
+    expect(kill).toBeTruthy()
+    expect(kill![1]).toEqual(['/pid', '555111', '/t', '/f'])
+  }, 15_000)
+
+  it.skipIf(process.platform !== 'win32')('force stop kills the outer shell directly without writing the stop file', async () => {
+    const child = new EventEmitter() as ChildProcessWithoutNullStreams
+    Object.assign(child, { pid: 666222, exitCode: null, signalCode: null, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() })
+    mocked.spawn.mockImplementation((command: string) => {
+      if (command !== 'taskkill.exe') return child
+      const killer = new EventEmitter()
+      setTimeout(() => killer.emit('exit', 0), 5)
+      return killer as unknown as ChildProcessWithoutNullStreams
+    })
+    const started = await spawnElevatedRuntime('C:/fixture/node.exe', ['entry.js'], { cwd: 'C:/fixture', env: {} })
+    const args = mocked.spawn.mock.calls[0][1] as string[]
+    const outer = Buffer.from(args[2], 'base64').toString('utf16le')
+    const root = path.dirname(outer.match(/"([^"]+supervise[.]ps1)"/)![1])
+    const stopping = stopElevatedRuntime(started, { force: true })
+    await vi.waitFor(() => expect(mocked.spawn.mock.calls.some(call => call[0] === 'taskkill.exe')).toBe(true))
+    // force 语义就是跳过优雅停止：这一步不能有 stop 文件。
+    expect(await readFile(path.join(root, 'stop'), 'utf8').catch(() => null)).toBeNull()
+    Object.assign(child, { exitCode: 0 }); child.emit('exit', 0)
+    expect(await stopping).toBe(true)
+    expect(mocked.spawn.mock.calls.find(call => call[0] === 'taskkill.exe')![1]).toEqual(['/pid', '666222', '/t', '/f'])
+  }, 15_000)
 })

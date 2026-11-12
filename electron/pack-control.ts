@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { readFile, mkdir, symlink, lstat, realpath, rm, readdir, link, rename } from 'node:fs/promises'
-import type { AppSettings, ExternalRuntime, LauncherControlRequest, PackControlConfig } from '../src/types'
+import type { AppSettings, ExternalRuntime, LauncherControlRequest, PackControlConfig, RuntimeState } from '../src/types'
 import { readPackRegistry, toPackStatus, type PackRecord } from './pack-registry'
 import { writeFileAtomic } from './fs-atomic'
 import { createRuntimeController, findAvailableWebPort, type RuntimeController, type RuntimeControllerOptions } from './runtime'
@@ -58,6 +58,19 @@ export function createPackControl(options: PackControlOptions) {
   let portQueue: Promise<unknown> = Promise.resolve()
   const reservations = new Set<number>()
   let closing = false
+  /** 后台重启的状态：controller 会被换掉，所以 restarting/lastError 只能记在这张表里。 */
+  const restarts = new Map<string, { restarting: boolean; lastError: string | null }>()
+  const runtimeStateOf = (id: string): RuntimeState => {
+    const base: RuntimeState = controllers.get(id)?.state() ?? { running: false, pid: null, startedAt: null, url: null, port: null }
+    const flag = restarts.get(id)
+    // restarting/lastError 恒定出现：界面不用区分「没这字段」和「false」。
+    return { ...base, restarting: flag?.restarting ?? false, lastError: flag?.lastError ?? base.lastError ?? null }
+  }
+  const noteRestartFailure = (id: string, error: unknown): void => {
+    const message = '重启整合包失败：' + (error instanceof Error ? error.message : String(error))
+    restarts.set(id, { restarting: false, lastError: message })
+    console.warn('[pack-restart] ' + id + ': ' + message)
+  }
   const configPath = path.join(options.userData, 'pack-control.json')
   const elevatedRoot = path.join(options.userData, 'elevated')
   const scanExternal = options.externalRuntime?.scan ?? scanExternalRuntimes
@@ -144,6 +157,29 @@ export function createPackControl(options: PackControlOptions) {
     controllers.set(r.id, runtime)
     return runtime
   }
+  /** 后台串行执行的 stop → start：失败只落到 runtime.lastError，绝不抛给已经拿到 accepted 的调用方。 */
+  async function restartPack(r: PackRecord): Promise<void> {
+    const running = controllers.get(r.id)
+    if (running) {
+      try {
+        await running.stop()
+      } catch (error) {
+        // 停不下来就不要再起第二份：原因留在状态里，用户可改用「强制停止」。
+        noteRestartFailure(r.id, error)
+        return
+      } finally {
+        // stop 抛错也必须摘掉旧 controller，否则 map 里留着一个已经失效的实例。
+        controllers.delete(r.id)
+        await clearElevatedSession(elevatedRoot, r.id).catch(() => undefined)
+      }
+    }
+    try {
+      await (await controller(r)).start()
+      restarts.delete(r.id)
+    } catch (error) {
+      noteRestartFailure(r.id, error)
+    }
+  }
   async function resources(r: PackRecord, kind: unknown) {
     const s = await options.resolveSettings(r, await config(r.id))
     if (kind === 'plugins') {
@@ -195,7 +231,7 @@ export function createPackControl(options: PackControlOptions) {
           ...toPackStatus(item.record, base.activePackId),
           homePath: item.record.homePath,
           config: item.config,
-          runtime: controllers.get(item.record.id)?.state() ?? { running: false, pid: null, startedAt: null, url: null, port: null },
+          runtime: runtimeStateOf(item.record.id),
           externalRuntime: target ? { ...target, elevatedSession: session ? elevatedSessionPath(elevatedRoot, item.record.id) : null } : null,
         }
       })) }
@@ -223,14 +259,20 @@ export function createPackControl(options: PackControlOptions) {
         const startSettings = await options.resolveSettings(r, await config(r.id))
         const external = await findExternal(r, startSettings.profileName)
         if (external) throw new Error('这个整合包已经有一份没被启动器托管的 DSH 在运行（PID ' + external.pid + '，端口 ' + (external.port ?? '未知') + '）。先停止它再启动。')
-        if (command === 'pack.restart') { await controllers.get(r.id)?.stop(); controllers.delete(r.id) }
+        if (command === 'pack.restart') {
+          // 先回话、后执行：停+起要花好几秒（提权时还要等用户应答 UAC），调用方不能被挂在这里。
+          restarts.set(r.id, { restarting: true, lastError: null })
+          void serial(r.id, () => restartPack(r)).catch(() => undefined)
+          return { accepted: true, restarting: true }
+        }
         return (await controller(r)).start()
       }
       if (command === 'pack.stop') {
         const runtime = controllers.get(r.id)
         if (runtime) {
-          const state = await runtime.stop()
+          const state = await runtime.stop({ force: args.force === true })
           controllers.delete(r.id)
+          restarts.delete(r.id)
           await clearElevatedSession(elevatedRoot, r.id)
           return state
         }

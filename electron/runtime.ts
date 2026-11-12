@@ -1,4 +1,4 @@
-import { spawnElevatedRuntime, stopElevatedRuntime } from './elevated-runtime'
+import { elevatedRuntimeReady, spawnElevatedRuntime, stopElevatedRuntime } from './elevated-runtime'
 import { isProcessElevated } from './process-elevation'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createServer } from 'node:net'
@@ -126,6 +126,8 @@ export async function findAvailableWebPort(
 const STDERR_CAPTURE_LIMIT = 24_000
 /** officecli 工具首次准备（含 33MB 下载）等待启动的硬顶，超时后台继续。 */
 const OFFICE_CLI_PREPARE_TIMEOUT_MS = 180_000
+/** 提权启动后等监督进程确认的硬顶：UAC 没人应答时不能一直挂在「运行中」。 */
+const ELEVATED_READY_TIMEOUT_MS = 120_000
 
 export interface RuntimeControllerOptions {
   runAsAdmin?: boolean
@@ -148,6 +150,8 @@ export interface RuntimeControllerOptions {
   isElevated?: () => Promise<boolean>
   /** 提权启动的实现；默认 spawnElevatedRuntime，测试注入假实现来断言「已提权时根本不走它」。 */
   spawnElevatedProcess?: typeof spawnElevatedRuntime
+  /** 提权启动后等监督进程确认（child.json）的硬顶；超时按 fail-closed 收尾，不留 running。 */
+  elevatedReadyTimeoutMs?: number
   /** 启动旧版 DSH 时使用的临时凭据兼容备份目录。 */
   legacyCredentialsBackupRoot?: string
   /** 修正非法凭据引用名时存放原始文件备份的目录（必须在 dshHome 之外）。 */
@@ -170,7 +174,8 @@ export interface RuntimeController {
   failure(): RuntimeFailure | null
   isRunning(): boolean
   start(): Promise<RuntimeState>
-  stop(): Promise<RuntimeState>
+  /** force 时跳过优雅停止（stop 文件），直接收掉外层与已知子进程。 */
+  stop(options?: { force?: boolean }): Promise<RuntimeState>
 }
 
 export function createRuntimeController(options: RuntimeControllerOptions): RuntimeController {
@@ -194,6 +199,8 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
   let applicationAddonName: string | null = null
   let legacyCredentialsSession: LegacyCredentialsSession | null = null
   let startPromise: Promise<RuntimeState> | null = null
+  let lastError: string | null = null
+  let awaitingAuthorization = false
 
   const state = (): RuntimeState => ({
     running: child !== null,
@@ -205,6 +212,8 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
     applicationAddonId,
     applicationAddonName,
     lastFailure,
+    awaitingAuthorization,
+    lastError,
   })
 
   const broadcast = () => options.emitState(state())
@@ -222,8 +231,8 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
     }
   }
 
-  const killProcessTree = async (processToStop: ChildProcessWithoutNullStreams): Promise<void> => {
-    if (await stopElevatedRuntime(processToStop)) return
+  const killProcessTree = async (processToStop: ChildProcessWithoutNullStreams, force = false): Promise<void> => {
+    if (await stopElevatedRuntime(processToStop, { force })) return
     if (options.stopProcess) {
       await options.stopProcess(processToStop)
       return
@@ -246,7 +255,48 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
     }
     const running = [...companions.values()]
     companions.clear()
-    await Promise.allSettled(running.map(killProcessTree))
+    await Promise.allSettled(running.map(item => killProcessTree(item)))
+  }
+
+  /**
+   * 启动失败的就地收尾：清 child、放端口、杀树、广播，最后抛中文错误。
+   * 就绪超时和多条失败分支共用它，状态一定落定成「没在跑 + 有原因」。
+   */
+  const abortLaunch = async (failed: ChildProcessWithoutNullStreams, message: string): Promise<never> => {
+    if (child === failed) child = null
+    awaitingAuthorization = false
+    lastError = message
+    await killProcessTree(failed, true).catch(() => undefined)
+    if (port !== null) options.releasePort?.(port)
+    port = null
+    void stopCompanions()
+    await restoreLegacyCredentials()
+    options.emitOutput('error', message)
+    broadcast()
+    throw new Error(message)
+  }
+
+  /**
+   * 提权启动后盯着监督进程有没有真的接管（child.json）。UAC 没人应答时外层 powershell 会一直挂着，
+   * 不设硬顶就会出现「显示运行中、点停止必然失败」；超时按 fail-closed 收尾，绝不留 running。
+   */
+  const awaitElevatedRuntime = async (started: ChildProcessWithoutNullStreams): Promise<void> => {
+    const readyTimeoutMs = options.elevatedReadyTimeoutMs ?? ELEVATED_READY_TIMEOUT_MS
+    awaitingAuthorization = true
+    broadcast()
+    const deadline = Date.now() + readyTimeoutMs
+    for (;;) {
+      if (child !== started) { awaitingAuthorization = false; return }
+      if (await elevatedRuntimeReady(started).catch(() => false)) break
+      if (Date.now() >= deadline) {
+        await abortLaunch(started, '以管理员模式启动失败：' + Math.round(readyTimeoutMs / 1000) + ' 秒内没有等到管理员授权（监督进程没有确认启动）。建议：直接用管理员身份运行启动器，整合包会继承管理员权限、不用再弹 UAC；也可以先取消「以管理员运行」，确认整合包在普通权限下能正常启动。').catch(() => undefined)
+        return
+      }
+      await new Promise<void>(resolve => { const timer = setTimeout(resolve, 100); timer.unref() })
+    }
+    if (child !== started) { awaitingAuthorization = false; return }
+    awaitingAuthorization = false
+    broadcast()
   }
 
   /**
@@ -488,13 +538,16 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
     }
 
     // 启动器自己已经是管理员时，子进程直接继承管理员令牌：不再弹 UAC，也不再多起一个提权看护进程。
+    let elevatedLaunch = false
     const startAdministratorProcess = async (): Promise<ChildProcessWithoutNullStreams> => {
       if (await probeElevation().catch(() => false)) {
         options.emitOutput('info', '启动器已以管理员身份运行，整合包直接继承管理员权限，不再弹出 UAC。')
         return startProcess(executable, launchArgs, { cwd, env: environment })
       }
       try {
-        return await spawnElevated(executable, launchArgs, { cwd, env: environment, ...(options.elevatedStash ? { stash: options.elevatedStash } : {}) })
+        const elevated = await spawnElevated(executable, launchArgs, { cwd, env: environment, ...(options.elevatedStash ? { stash: options.elevatedStash } : {}) })
+        elevatedLaunch = true
+        return elevated
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
         throw new Error('以管理员模式启动失败：' + reason + '。建议：直接用管理员身份运行启动器，整合包会继承管理员权限、不用再弹 UAC；也可以先取消「以管理员运行」，确认整合包在普通权限下能正常启动。')
@@ -502,6 +555,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
     }
 
     launchAttempt = async (useLegacyCredentials: boolean): Promise<void> => {
+      elevatedLaunch = false
       if (useLegacyCredentials && options.legacyCredentialsBackupRoot) {
         legacyCredentialsSession = await prepareLegacyCredentials(
           settings.dshHome,
@@ -520,6 +574,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
         // 同步抛错＝进程根本没起来（可执行文件不存在、路径非法、EPERM）。
         // 不记就只剩一条 toast，用户和 agent 都不知道死在哪。
         const message = error instanceof Error ? error.message : String(error)
+        lastError = message
         recordLaunchFailure('spawn', [
           `原因：${message}`,
           `启动命令：${commandLine}`,
@@ -534,6 +589,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
       port = selectedLaunchPort
       startedAt = new Date().toISOString()
       url = null
+      lastError = null
       broadcast()
       started.stdout.on('data', handleData('info'))
       started.stderr.on('data', handleData('error'))
@@ -555,6 +611,8 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
         broadcast()
       })
       started.once('exit', code => { if (child && child !== started) return; void handleExit(code) })
+      // 提权启动：外层只是 UAC 看护进程，真正的就绪证据是监督进程写下的 child.json。
+      if (elevatedLaunch) void awaitElevatedRuntime(started)
       scheduleCompanions()
     }
 
@@ -577,16 +635,33 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
     }
   }
 
-  async function stop(): Promise<RuntimeState> {
+  async function stop(stopOptions: { force?: boolean } = {}): Promise<RuntimeState> {
     if (startPromise) await startPromise.catch(() => undefined)
     const running = child
     if (!running) {
+      awaitingAuthorization = false
+      lastError = null
       await stopCompanions()
       await restoreLegacyCredentials()
       return state()
     }
+    // 先置空再杀：handleExit 靠 child===null 认出「主动停止」，不会误记成意外退出。
     child = null
-    try { await Promise.all([killProcessTree(running), stopCompanions()]) } catch (error) { child = running; broadcast(); throw error }
+    const force = stopOptions.force === true
+    try {
+      await Promise.all([killProcessTree(running, force), stopCompanions()])
+    } catch (error) {
+      const message = '停止整合包失败：' + (error instanceof Error ? error.message : String(error))
+      // 外层还活着就放回运行中，让用户能再点一次「强制停止」；已经死了就只留原因，不假装还在跑。
+      if (running.exitCode === null && running.signalCode === null) child = running
+      awaitingAuthorization = false
+      lastError = message
+      options.emitOutput('error', message)
+      broadcast()
+      throw new Error(message)
+    }
+    awaitingAuthorization = false
+    lastError = null
     if (port !== null) options.releasePort?.(port)
     port = null
     applicationAddonId = null
