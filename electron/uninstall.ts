@@ -9,7 +9,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { UninstallPlan, UninstallRunOptions, UninstallScriptResult } from '../src/types'
-import { createUninstallPlan, type UninstallPlanInput } from './uninstall-plan'
+import { createUninstallPlanAsync, type UninstallPlanInput } from './uninstall-plan'
 import {
   UNINSTALL_COMMAND_FILENAME,
   UNINSTALL_SCRIPT_BOM,
@@ -29,6 +29,9 @@ export const UNINSTALL_HELPER_COMMAND_FILENAME = 'run.cmd'
 
 export const UNINSTALL_STOP_TIMEOUT_MESSAGE = '还有整合包在运行，已中止卸载'
 
+/** 计划缓存的有效期：设置页反复进出时不必每次都重扫几十万个文件。 */
+export const UNINSTALL_PLAN_CACHE_TTL_MS = 30_000
+
 export interface UninstallServiceDeps {
   /** 计划输入：executablePath / installDir / dataDir / legacyDataDir / dshHome / tempDir。 */
   plan: UninstallPlanInput
@@ -43,6 +46,10 @@ export interface UninstallServiceDeps {
   spawnImpl?: typeof spawn
   /** 随机后缀，缺省 randomBytes(4) 的 16 进制（8 位）。 */
   randomSuffix?: () => string
+  /** 计划缓存有效期，缺省 UNINSTALL_PLAN_CACHE_TTL_MS。 */
+  planCacheTtlMs?: number
+  /** 取当前时间，缺省 Date.now；测试用。 */
+  now?: () => number
 }
 
 export interface UninstallService {
@@ -63,6 +70,25 @@ export function createUninstallService(deps: UninstallServiceDeps): UninstallSer
   const helperTempDir = (): string => path.resolve(deps.tempDir ?? tmpdir())
   const selfPid = (): number => (typeof deps.pid === 'number' && deps.pid > 0 ? Math.trunc(deps.pid) : process.pid)
   const launcherPaths = () => ({ executablePath: deps.plan.executablePath, dataDir: deps.plan.dataDir })
+  const planCacheTtlMs =
+    typeof deps.planCacheTtlMs === 'number' && deps.planCacheTtlMs >= 0 ? deps.planCacheTtlMs : UNINSTALL_PLAN_CACHE_TTL_MS
+  const now = deps.now ?? (() => Date.now())
+  // 进程内缓存，绝不落盘：删除动作会改变磁盘状态，磁盘上的旧计划只会误导人。
+  let planCache: { at: number; plan: Promise<UninstallPlan> } | null = null
+
+  // 计划一律异步统计（同步遍历几十万个文件会把主进程卡十秒）。
+  // 并发调用共享同一个 promise，冷启动也只会遍历一次。
+  function plan(): Promise<UninstallPlan> {
+    const cached = planCache
+    if (cached && now() - cached.at < planCacheTtlMs) return cached.plan
+    const entry = { at: now(), plan: createUninstallPlanAsync(deps.plan) }
+    planCache = entry
+    // 失败的计划不进缓存：下一次调用重新统计，而不是把错误钉死 30 秒。
+    entry.plan.catch(() => {
+      if (planCache === entry) planCache = null
+    })
+    return entry.plan
+  }
 
   async function stopPacks(): Promise<void> {
     const stop = deps.stopAllPacks
@@ -138,7 +164,7 @@ export function createUninstallService(deps: UninstallServiceDeps): UninstallSer
   }
 
   return {
-    plan: async () => createUninstallPlan(deps.plan),
+    plan,
     exportScript,
     run,
   }

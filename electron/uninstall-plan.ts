@@ -6,6 +6,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync as defaultExistsSync, readdirSync, statSync } from 'node:fs'
+import { readdir, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { UninstallItem, UninstallPlan } from '../src/types'
 import { LEGACY_DATA_DIRNAME, STORAGE_DATA_DIRNAME, STORAGE_POINTER_FILENAME } from './storage-root'
@@ -123,6 +124,191 @@ function defaultStatTree(target: string): UninstallTreeInfo | null {
   return { sizeBytes, fileCount }
 }
 
+export interface UninstallResolvedPaths {
+  executablePath: string
+  installDir: string
+  dataDir: string
+  legacyDataDir: string
+  dshHome: string
+  tempDir: string
+  /** 安装目录里的数据目录指针文件。 */
+  pointerFile: string
+}
+
+/** 六个输入路径一次性解析成绝对路径；同步装配与异步统计共用同一份，路径口径不会漂。 */
+function resolveUninstallPaths(input: UninstallPlanInput): UninstallResolvedPaths {
+  const installDir = path.resolve(input.installDir)
+  return {
+    executablePath: path.resolve(input.executablePath),
+    installDir,
+    dataDir: path.resolve(input.dataDir),
+    legacyDataDir: path.resolve(input.legacyDataDir),
+    dshHome: path.resolve(input.dshHome),
+    tempDir: path.resolve(input.tempDir),
+    pointerFile: path.join(installDir, STORAGE_POINTER_FILENAME),
+  }
+}
+
+export interface InstallDirInspection {
+  /** 安装目录里不属于本版启动器的条目名。 */
+  foreign: string[]
+  /** 安装目录里留着要保留的本版数据：目录不能整体删。 */
+  dataBlocksDir: boolean
+  /** 除启动器自己的东西之外空无一物，可以整体删掉安装目录。 */
+  canRemoveDir: boolean
+}
+
+/**
+ * 安装目录的归属判断：只看目录项与路径、不看任何条目大小，
+ * 所以同步装配与异步统计能共用同一份结论，不必各写一遍。
+ */
+function inspectInstallDir(options: {
+  paths: UninstallResolvedPaths
+  dataKept: boolean
+  exists: (target: string) => boolean
+  readDirNames: (dir: string) => string[]
+}): InstallDirInspection {
+  const { paths, dataKept } = options
+  const ownedNames = new Set<string>([
+    path.basename(paths.executablePath).toLowerCase(),
+    STORAGE_POINTER_FILENAME.toLowerCase(),
+    STORAGE_DATA_DIRNAME.toLowerCase(),
+  ])
+  if (isInside(paths.dataDir, paths.installDir)) ownedNames.add(path.basename(paths.dataDir).toLowerCase())
+  const foreign = options.readDirNames(paths.installDir).filter((name) => !ownedNames.has(name.toLowerCase()))
+  const dataBlocksDir = dataKept && isInside(paths.dataDir, paths.installDir)
+  const canRemoveDir =
+    options.exists(paths.installDir) &&
+    foreign.length === 0 &&
+    !isDriveRoot(paths.installDir) &&
+    !isSamePath(paths.installDir, paths.dataDir) &&
+    !isSamePath(paths.installDir, paths.legacyDataDir) &&
+    !isSamePath(paths.installDir, paths.dshHome) &&
+    !dataBlocksDir
+  return { foreign, dataBlocksDir, canRemoveDir }
+}
+
+/** 异步统计的并发宽度：几十万个条目全并行会把句柄和内存吃光。 */
+export const UNINSTALL_ASYNC_IO_CONCURRENCY = 8
+
+/** 按固定宽度的工人池跑完一批任务，避免一次开几万个 promise。 */
+async function mapLimit<T>(items: readonly T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0
+  const width = Math.max(1, Math.min(limit, items.length))
+  await Promise.all(Array.from({ length: width }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor]
+      cursor += 1
+      await run(item)
+    }
+  }))
+}
+
+/**
+ * 异步版目录树统计：数法（文件数 + 字节数、UNINSTALL_TREE_ENTRY_LIMIT 上限、空树返回 null）与
+ * defaultStatTree 一致，只把 readdirSync/statSync 换成 fs/promises，主进程不再被同步 IO 卡住。
+ * 逐层推进以便按层并行；上限真的触发时统计到的子集可能与同步的深度优先不同，
+ * 而这个上限本来就只是防呆——计划只需要「大致多大」。
+ */
+export async function statTreeAsync(target: string, limit: number = UNINSTALL_TREE_ENTRY_LIMIT): Promise<UninstallTreeInfo | null> {
+  const state = { sizeBytes: 0, fileCount: 0, visited: 0, touched: false }
+  let level: string[] = [target]
+  while (level.length > 0 && state.visited < limit) {
+    const next: string[] = []
+    await mapLimit(level, UNINSTALL_ASYNC_IO_CONCURRENCY, async (current) => {
+      if (state.visited >= limit) return
+      let stats
+      try {
+        stats = await stat(current)
+      } catch {
+        return
+      }
+      state.touched = true
+      state.visited += 1
+      if (stats.isFile()) {
+        state.sizeBytes += stats.size
+        state.fileCount += 1
+        return
+      }
+      if (!stats.isDirectory()) return
+      let names: string[] = []
+      try {
+        names = await readdir(current)
+      } catch {
+        names = []
+      }
+      for (const name of names) {
+        if (next.length >= limit) return
+        next.push(path.join(current, name))
+      }
+    })
+    level = next
+  }
+  return state.touched ? { sizeBytes: state.sizeBytes, fileCount: state.fileCount } : null
+}
+
+/**
+ * 先把计划里每个可能被统计的路径异步量好，键是 normalizePath 的结果（与同步版比较口径一致）。
+ * 这份目标集合必须与 createUninstallPlan 里的 measure() 调用严格对应，
+ * 否则同步装配会拿到 undefined，把有内容的行报成 0。
+ */
+export async function collectUninstallTreeSizes(input: UninstallPlanInput): Promise<Map<string, UninstallTreeInfo>> {
+  const exists = input.existsSync ?? defaultExistsSync
+  const readDirNames = input.readDirNames ?? defaultReadDirNames
+  const measure = input.statTree ?? statTreeAsync
+  const deleteData = input.deleteData !== false
+  const paths = resolveUninstallPaths(input)
+
+  // 同步版 measure() 的目标全集：主程序、指针文件、本版数据、旧版数据、DSH 家目录、安装目录、
+  // 安装目录里的每个外来子项、%TEMP% 里每个 3L* 残留。
+  const targets: string[] = [paths.executablePath, paths.dataDir, paths.dshHome]
+  if (exists(paths.pointerFile)) targets.push(paths.pointerFile)
+  const dataIsLegacy = isSamePath(paths.dataDir, paths.legacyDataDir)
+  if (!dataIsLegacy) targets.push(paths.legacyDataDir)
+
+  const dataKept = dataIsLegacy || !deleteData
+  const { foreign, canRemoveDir } = inspectInstallDir({ paths, dataKept, exists, readDirNames })
+  if (canRemoveDir) targets.push(paths.installDir)
+  else if (foreign.length > 0) for (const name of foreign) targets.push(path.join(paths.installDir, name))
+
+  if (exists(paths.tempDir)) {
+    for (const name of readDirNames(paths.tempDir)) {
+      if (!name.toLowerCase().startsWith(UNINSTALL_TEMP_RESIDUE_PREFIX)) continue
+      const target = path.join(paths.tempDir, name)
+      if (exists(target)) targets.push(target)
+    }
+  }
+
+  const unique = new Map<string, string>()
+  for (const target of targets) {
+    const key = normalizePath(target)
+    if (!unique.has(key)) unique.set(key, target)
+  }
+
+  const sizes = new Map<string, UninstallTreeInfo>()
+  await mapLimit([...unique.entries()], UNINSTALL_ASYNC_IO_CONCURRENCY, async ([key, target]) => {
+    const info = await measure(target)
+    if (info) sizes.set(key, info)
+  })
+  return sizes
+}
+
+/**
+ * 异步版 createUninstallPlan：计划装配仍然只有同步版那一份（一行不改、注入点不变），
+ * 这里只负责先把每个目标的量异步算进 Map，再把这个 Map 当成 statTree 注入进去。
+ */
+export async function createUninstallPlanAsync(input: UninstallPlanInput): Promise<UninstallPlan> {
+  const sizes = await collectUninstallTreeSizes(input)
+  return createUninstallPlan({
+    ...input,
+    // 返回副本：同步装配会就地扣减 install-dir 的字节数，别把算好的量改掉。
+    statTree: (target: string) => {
+      const info = sizes.get(normalizePath(target))
+      return info ? { ...info } : null
+    },
+  })
+}
+
 /**
  * 计算卸载计划。纯函数：同样的输入给同样的结果，不读进程状态、不删东西。
  */
@@ -133,13 +319,8 @@ export function createUninstallPlan(input: UninstallPlanInput): UninstallPlan {
   const processImagePaths = input.processImagePaths
   const deleteData = input.deleteData !== false
 
-  const executablePath = path.resolve(input.executablePath)
-  const installDir = path.resolve(input.installDir)
-  const dataDir = path.resolve(input.dataDir)
-  const legacyDataDir = path.resolve(input.legacyDataDir)
-  const dshHome = path.resolve(input.dshHome)
-  const tempDir = path.resolve(input.tempDir)
-  const pointerFile = path.join(installDir, STORAGE_POINTER_FILENAME)
+  const paths = resolveUninstallPaths(input)
+  const { executablePath, installDir, dataDir, legacyDataDir, dshHome, tempDir, pointerFile } = paths
 
   const items: UninstallItem[] = []
   const warnings: string[] = []
@@ -244,22 +425,7 @@ export function createUninstallPlan(input: UninstallPlanInput): UninstallPlan {
   })
 
   // 安装目录：只有里面除了启动器自己的东西之外空无一物，才整体删掉。
-  const ownedNames = new Set<string>([
-    path.basename(executablePath).toLowerCase(),
-    STORAGE_POINTER_FILENAME.toLowerCase(),
-    STORAGE_DATA_DIRNAME.toLowerCase(),
-  ])
-  if (isInside(dataDir, installDir)) ownedNames.add(path.basename(dataDir).toLowerCase())
-  const foreign = readDirNames(installDir).filter((name) => !ownedNames.has(name.toLowerCase()))
-  const dataBlocksDir = dataKept && isInside(dataDir, installDir)
-  const canRemoveDir =
-    exists(installDir) &&
-    foreign.length === 0 &&
-    !isDriveRoot(installDir) &&
-    !isSamePath(installDir, dataDir) &&
-    !isSamePath(installDir, legacyDataDir) &&
-    !isSamePath(installDir, dshHome) &&
-    !dataBlocksDir
+  const { foreign, dataBlocksDir, canRemoveDir } = inspectInstallDir({ paths, dataKept, exists, readDirNames })
 
   if (canRemoveDir) {
     const info = measure(installDir)
