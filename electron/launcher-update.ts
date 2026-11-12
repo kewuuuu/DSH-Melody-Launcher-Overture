@@ -8,8 +8,8 @@ import { downloadReleaseAsset } from './release-download'
 
 /**
  * 启动器自更新：启动时检测 GitHub Release 是否有新版本 → 自动后台下载新 exe
- * （带进度）→ 原位替换当前 portable exe 并重启。检测逻辑与 dsh-update 对齐：
- * 任何网络/解析失败都收敛成 error 状态，绝不阻塞启动。
+ * （带进度）→ 便携版原位替换当前 exe 并重启，安装版交给 Setup 覆盖安装。
+ * 检测逻辑与 dsh-update 对齐：任何网络/解析失败都收敛成 error 状态，绝不阻塞启动。
  */
 
 const GITHUB_API_ROOT = 'https://api.github.com'
@@ -44,28 +44,77 @@ export interface ResolvedLauncherAsset {
   url: string
 }
 
-/** 从 /releases/latest 响应里解析出唯一 portable exe 资产；缺失即抛错。 */
+/** 便携版资产的文件名标记。匹配前统一转小写：历史命名 `-portable.exe` 与现在的
+ * `DSH-launcher-KEWU-Portable-1.1.0.exe`（大写 P、版本在中间）都要能命中。 */
+const PORTABLE_ASSET_MARKER = 'portable'
+/** NSIS 安装包（安装版自更新用）的文件名标记。 */
+const SETUP_ASSET_MARKER = 'setup'
+
+/** 文件名里最后一个版本号（`DSH-launcher-KEWU-Portable-1.1.0.exe` → `1.1.0`）；没有则 null。 */
+export function versionFromAssetName(name: string): string | null {
+  const versions = name.toLowerCase().match(/\d+(?:\.\d+)+/g)
+  return versions && versions.length > 0 ? versions[versions.length - 1] : null
+}
+
+function collectAssets(release: GitHubLatestRelease, marker: string): ResolvedLauncherAsset[] {
+  const assets = Array.isArray(release.assets) ? release.assets : []
+  const collected: ResolvedLauncherAsset[] = []
+  for (const entry of assets) {
+    const candidate = entry as GitHubReleaseAsset | null
+    if (!candidate || typeof candidate.name !== 'string' || typeof candidate.browser_download_url !== 'string') continue
+    const lower = candidate.name.toLowerCase()
+    if (!lower.endsWith('.exe') || !lower.includes(marker)) continue
+    collected.push({
+      name: candidate.name,
+      size: Number.isFinite(candidate.size) ? Number(candidate.size) : 0,
+      url: candidate.browser_download_url,
+    })
+  }
+  return collected
+}
+
+/** 多个候选时取文件名里版本号最大的那个；没有版本号可比的保留先出现的。 */
+function pickNewestAsset(candidates: readonly ResolvedLauncherAsset[]): ResolvedLauncherAsset | null {
+  let best: ResolvedLauncherAsset | null = null
+  for (const candidate of candidates) {
+    if (!best) {
+      best = candidate
+      continue
+    }
+    const bestVersion = versionFromAssetName(best.name)
+    const candidateVersion = versionFromAssetName(candidate.name)
+    if (!bestVersion) {
+      if (candidateVersion) best = candidate
+      continue
+    }
+    if (!candidateVersion) continue
+    // compareVersions(local, remote) > 0 读作「remote 更新」。
+    if (compareVersions(bestVersion, candidateVersion) > 0) best = candidate
+  }
+  return best
+}
+
+/** 从 /releases/latest 响应里解析出便携版 exe 资产；缺失即抛错。 */
 export function resolvePortableAsset(release: GitHubLatestRelease): ResolvedLauncherAsset {
   const tag = typeof release.tag_name === 'string' ? release.tag_name : ''
   if (!tag) throw new Error('Release 返回异常（缺少版本号）。')
-  const assets = Array.isArray(release.assets) ? release.assets : []
-  const found = assets.find(entry => {
-    const candidate = entry as GitHubReleaseAsset | null
-    return Boolean(candidate)
-      && typeof candidate?.name === 'string'
-      && candidate.name.endsWith('-portable.exe')
-      && typeof candidate?.browser_download_url === 'string'
-  })
+  const found = pickNewestAsset(collectAssets(release, PORTABLE_ASSET_MARKER))
   if (!found) throw new Error('新版本没有可下载的便携版安装包。')
-  const resolved = found as GitHubReleaseAsset & { name: string; browser_download_url: string }
-  return {
-    name: resolved.name,
-    size: Number.isFinite(resolved.size) ? Number(resolved.size) : 0,
-    url: resolved.browser_download_url,
-  }
+  return found
 }
 
-async function fetchLatestRelease(fetchImpl: typeof fetch): Promise<{ tag: string; htmlUrl: string; notes: string | null; asset: ResolvedLauncherAsset }> {
+/** 安装版的 Setup 资产：可选 —— 只发便携包的 Release 不该因此判成异常。 */
+export function resolveSetupAsset(release: GitHubLatestRelease): ResolvedLauncherAsset | null {
+  return pickNewestAsset(collectAssets(release, SETUP_ASSET_MARKER))
+}
+
+async function fetchLatestRelease(fetchImpl: typeof fetch): Promise<{
+  tag: string
+  htmlUrl: string
+  notes: string | null
+  asset: ResolvedLauncherAsset
+  setup: ResolvedLauncherAsset | null
+}> {
   const endpoint = `${GITHUB_API_ROOT}/repos/${LAUNCHER_RELEASE_REPOSITORY}/releases/latest`
   const candidates = [endpoint, ...GITHUB_API_MIRRORS.map(prefix => `${prefix}${endpoint}`)]
   const failures: string[] = []
@@ -87,6 +136,7 @@ async function fetchLatestRelease(fetchImpl: typeof fetch): Promise<{ tag: strin
         // 正文截到 4000 字符：详情弹窗展示用，超长部分去 Release 页看。
         notes: rawNotes ? rawNotes.slice(0, 4000) : null,
         asset,
+        setup: resolveSetupAsset(release),
       }
     } catch (error) {
       failures.push(url === endpoint ? errorMessage(error) : '镜像不可用。')
@@ -118,7 +168,10 @@ function errorMessage(error: unknown): string {
 interface PendingUpdate {
   tag: string
   htmlUrl: string
+  /** 便携版：原位替换用。 */
   asset: ResolvedLauncherAsset
+  /** 安装版：Setup 覆盖安装用；Release 只发便携包时为 null。 */
+  setup: ResolvedLauncherAsset | null
 }
 
 interface UpdateSnapshot {
@@ -145,7 +198,7 @@ async function readUpdate(getVersion: () => string, fetchImpl: typeof fetch): Pr
           checkedAt: checkedAt(),
           message: `发现新版本 ${remoteVersion}。`,
         },
-        pending: { tag: release.tag, htmlUrl: release.htmlUrl, asset: release.asset },
+        pending: { tag: release.tag, htmlUrl: release.htmlUrl, asset: release.asset, setup: release.setup },
       }
     }
     return {
@@ -211,6 +264,26 @@ export function buildApplyScript(execBase: string, tempPath: string, execPath: s
   ].join('\r\n')
 }
 
+export type LauncherInstallMode = 'portable' | 'installed' | 'dev'
+
+/**
+ * 当前进程的安装形态：
+ * - portable：electron-builder 便携包（有 PORTABLE_EXECUTABLE_FILE，或 exe 名带 Portable），
+ *   可以下载新 exe 原位替换后重启；
+ * - dev：直接跑 electron / node（execPath 落在 node_modules 里），没有可替换的独立产物，
+ *   替换会把新启动器写到 Electron 二进制上，必须先拒绝；
+ * - installed：NSIS 安装版，没有可替换的 exe，只能运行下载好的 Setup 覆盖安装。
+ */
+export function detectInstallMode(
+  execPath: string,
+  portableExecutableFile: string | null | undefined = process.env.PORTABLE_EXECUTABLE_FILE,
+): LauncherInstallMode {
+  if (portableExecutableFile) return 'portable'
+  if (path.basename(execPath).toLowerCase().includes('-portable')) return 'portable'
+  if (execPath.replace(/\\/g, '/').toLowerCase().includes('node_modules')) return 'dev'
+  return 'installed'
+}
+
 export interface LauncherUpdaterOptions {
   /** 本地启动器版本。 */
   getVersion: () => string
@@ -237,6 +310,8 @@ export interface LauncherUpdater {
 export function createLauncherUpdater(options: LauncherUpdaterOptions): LauncherUpdater {
   const doFetch = options.githubFetch ?? fetch
   const updateRoot = path.join(options.userDataPath, 'launcher-update')
+  /** 用户手里那个 exe：便携版是 PORTABLE_EXECUTABLE_FILE，开发/安装态是 process.execPath。 */
+  const execPathOf = (): string => (options.getExecPath ?? (() => process.env.PORTABLE_EXECUTABLE_FILE || process.execPath))()
   let status: LauncherUpdateStatus = {
     state: 'up-to-date',
     localVersion: null,
@@ -271,16 +346,22 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
 
   async function performDownload(): Promise<LauncherUpdateStatus> {
     const target = pending as PendingUpdate
-    const targetPath = path.join(updateRoot, target.asset.name)
+    // 安装版没有可替换的 exe，只能下 Setup 覆盖安装；便携版（以及开发态）下便携包。
+    const asset = detectInstallMode(execPathOf()) === 'installed' ? target.setup : target.asset
+    if (!asset) {
+      status = { ...status, state: 'error', message: '新版本没有可下载的安装版安装包。' }
+      return status
+    }
+    const targetPath = path.join(updateRoot, asset.name)
     try {
       const existing = await stat(targetPath).catch(() => null)
-      if (existing && target.asset.size > 0 && existing.size === target.asset.size) {
-        status = { ...status, state: 'downloaded', message: '更新已就绪，可以重启应用。' }
+      if (existing && asset.size > 0 && existing.size === asset.size) {
+        status = { ...status, state: 'downloaded', assetName: asset.name, assetSize: asset.size || null, message: '更新已就绪，可以重启应用。' }
         return status
       }
-      status = { ...status, state: 'downloading', message: '正在下载更新…' }
+      status = { ...status, state: 'downloading', assetName: asset.name, assetSize: asset.size || null, message: '正在下载更新…' }
       const buffer = await downloadReleaseAsset(
-        target.asset.url,
+        asset.url,
         MAX_LAUNCHER_BYTES,
         (received, total) => {
           options.emitProgress({
@@ -292,12 +373,12 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
         },
         doFetch,
       )
-      if (target.asset.size > 0 && buffer.length !== target.asset.size) {
-        throw new Error(`下载内容不完整（${buffer.length} ≠ ${target.asset.size} 字节）。`)
+      if (asset.size > 0 && buffer.length !== asset.size) {
+        throw new Error(`下载内容不完整（${buffer.length} ≠ ${asset.size} 字节）。`)
       }
       await mkdir(updateRoot, { recursive: true })
       await writeFile(targetPath, buffer)
-      status = { ...status, state: 'downloaded', message: '更新已就绪，可以重启应用。' }
+      status = { ...status, state: 'downloaded', assetName: asset.name, assetSize: asset.size || null, message: '更新已就绪，可以重启应用。' }
       return status
     } catch (error) {
       status = { ...status, state: 'error', message: `更新下载失败：${errorMessage(error)}` }
@@ -305,16 +386,50 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     }
   }
 
+  /**
+   * 安装版：静默运行下载好的 Setup（/S）覆盖安装。安装器要写 Program Files 或注册表，
+   * 会在 UAC 弹窗停下等用户确认，所以这里不隐藏窗口，也不等它返回。
+   */
+  async function applySetupInstaller(target: PendingUpdate): Promise<void> {
+    const setup = target.setup
+    if (!setup) throw new Error('新版本没有可下载的安装版安装包。')
+    const setupPath = path.join(updateRoot, setup.name)
+    const existing = await stat(setupPath).catch(() => null)
+    if (!existing) throw new Error('安装包还没下载完，请重新下载更新后再试。')
+    status = { ...status, state: 'applying', message: '正在启动安装程序，安装过程需要管理员确认…' }
+    options.emitProgress({ phase: 'applying', percent: 100 })
+    const doSpawn = options.spawnProcess ?? nodeSpawn
+    try {
+      const child = doSpawn(setupPath, ['/S'], {
+        detached: true,
+        stdio: 'ignore',
+        cwd: updateRoot,
+      })
+      child.unref()
+    } catch (error) {
+      status = { ...status, state: 'error', message: `启动安装程序失败：${errorMessage(error)}` }
+      throw new Error(status.message)
+    }
+    const doExit = options.exitProcess ?? (code => process.exit(code))
+    doExit(0)
+  }
+
   async function apply(): Promise<void> {
     if (status.state !== 'downloaded' || !pending) {
       throw new Error('没有已下载的启动器更新。')
     }
     const target = pending as PendingUpdate
-    const execPath = (options.getExecPath ?? (() => process.env.PORTABLE_EXECUTABLE_FILE || process.execPath))()
-    // 开发模式（process.execPath 指向 node_modules/electron 等）没有独立的便携包，
-    // 原位替换会把下载的新启动器 move 到 Electron 二进制上，破坏开发环境。只允许便携版更新。
-    if (!process.env.PORTABLE_EXECUTABLE_FILE && !path.basename(execPath).toLowerCase().includes('-portable')) {
+    const execPath = execPathOf()
+    const mode = detectInstallMode(execPath)
+    // 开发模式（process.execPath 指向 node_modules/electron 等）没有可替换的产物，
+    // 原位替换会把下载的新启动器 move 到 Electron 二进制上，破坏开发环境。
+    if (mode === 'dev') {
       throw new Error('当前以开发模式运行，自动更新仅支持便携版启动器。')
+    }
+    // 安装版：没有可原位替换的 exe，改走 Setup 覆盖安装。
+    if (mode === 'installed') {
+      await applySetupInstaller(target)
+      return
     }
     const execBase = path.basename(execPath)
     const tempPath = path.join(updateRoot, target.asset.name)

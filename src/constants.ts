@@ -13,8 +13,9 @@ export const LAUNCHER_REPOSITORY = 'rirko/dsh-melody-launcher'
 /**
  * 序曲（Overture）分支的独立发布仓库：启动器自更新检测与官方整合包发布
  * 都以它的 Release 页为准（v0.1.x 版本线、official-pack-v*.zip 资产）。
+ * 发布线已迁到 fork：kewuuuu/DSH-Melody-Launcher-Overture。
  */
-export const LAUNCHER_RELEASE_REPOSITORY = 'Miyazawai/DSH-Melody-Launcher-Overture'
+export const LAUNCHER_RELEASE_REPOSITORY = 'kewuuuu/DSH-Melody-Launcher-Overture'
 
 /**
  * 官方默认整合包的版本号：与发布到 LAUNCHER_RELEASE_REPOSITORY Release 的

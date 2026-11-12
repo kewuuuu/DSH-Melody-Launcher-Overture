@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要发布的标签（例如 v0.1.4，需已存在于仓库中）'
+        description: '要发布的标签（例如 v1.1.0，需已存在于仓库中）'
         required: true
         type: string
 
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   release:
-    name: 构建并发布 Windows 便携版
+    name: 构建并发布 Windows 安装包
     runs-on: windows-latest
     steps:
       - name: 解析发布标签
@@ -67,16 +67,68 @@ jobs:
       - name: 运行测试
         run: npm test
 
+      # 三件产物都进同一个 Release：便携版（自更新用）、安装包（安装版用户覆盖安装）、卸载器。
       - name: 打包便携版
         env:
           DSH_LAUNCHER_GITHUB_CLIENT_ID: ${{ vars.DSH_LAUNCHER_GITHUB_CLIENT_ID }}
         run: npm run package:win
 
-      - name: 确认产物存在
+      - name: 打包安装包
+        env:
+          DSH_LAUNCHER_GITHUB_CLIENT_ID: ${{ vars.DSH_LAUNCHER_GITHUB_CLIENT_ID }}
+        run: npm run package:win:setup
+
+      - name: 构建卸载器
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $output = "release/DSH-launcher-KEWU-Uninstaller-$version.exe"
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-uninstaller.ps1 -OutputPath $output
+          if (-not (Test-Path $output)) { Write-Error "未生成卸载器：$output" }
+
+      - name: 确认三件产物存在
         shell: bash
         run: |
+          version="$(node -p "require('./package.json').version")"
+          missing=0
+          for name in "DSH-launcher-KEWU-Portable-$version.exe" "DSH-launcher-KEWU-Setup-$version.exe" "DSH-launcher-KEWU-Uninstaller-$version.exe"; do
+            if [ ! -f "release/$name" ]; then
+              echo "::error::缺少产物 release/$name"
+              missing=1
+            fi
+          done
           ls -lh release/*.exe
-          test -n "$(ls release/*.exe 2>/dev/null)" || { echo "::error::未找到便携版产物。"; exit 1; }
+          exit $missing
+
+      # 没有配置证书就不签名：产物照旧发布，Windows 会提示未知发布者。
+      - name: 检查签名证书是否配置
+        id: signing
+        shell: bash
+        env:
+          SIGN_CERT_BASE64: ${{ secrets.SIGN_CERT_BASE64 }}
+        run: |
+          if [ -n "$SIGN_CERT_BASE64" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "检测到 SIGN_CERT_BASE64，将对三件产物签名。"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "未配置 SIGN_CERT_BASE64，跳过代码签名（产物以未签名方式发布）。"
+          fi
+
+      - name: 代码签名（可选）
+        if: steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          SIGN_CERT_BASE64: ${{ secrets.SIGN_CERT_BASE64 }}
+          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
+        run: |
+          $failed = @()
+          Get-ChildItem release/*.exe | ForEach-Object {
+            Write-Host "签名 $($_.Name)"
+            powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-windows.ps1 -Path $_.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += $_.Name }
+          }
+          if ($failed.Count -gt 0) { Write-Error "签名失败：$($failed -join ', ')" }
 
       - name: 发布到 GitHub Release
         shell: bash

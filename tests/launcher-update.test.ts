@@ -7,11 +7,32 @@ import {
   buildApplyScript,
   checkLauncherUpdate,
   createLauncherUpdater,
+  detectInstallMode,
   resolvePortableAsset,
+  resolveSetupAsset,
+  versionFromAssetName,
 } from '../electron/launcher-update'
 import { LAUNCHER_RELEASE_REPOSITORY } from '../src/constants'
 
 const PORTABLE = 'DSH-Launcher-0.1.10-portable.exe'
+/** 改名后的产物命名：大写 Portable、版本号在中间。 */
+const PORTABLE_KEWU = 'DSH-launcher-KEWU-Portable-1.1.0.exe'
+const SETUP_KEWU = 'DSH-launcher-KEWU-Setup-1.1.0.exe'
+/** 安装版进程的 exe：不在 node_modules 里，名字也不带 portable。 */
+const INSTALLED_EXEC = 'C:\\Program Files\\DSH-launcher-KEWU\\DSH-launcher-KEWU.exe'
+
+/** 构造带任意资产的 Release 响应（多资产场景用）。 */
+function assetsBody(remoteTag: string, assets: Array<{ name: string; size?: number }>): unknown {
+  return {
+    tag_name: remoteTag,
+    html_url: `https://github.com/${LAUNCHER_RELEASE_REPOSITORY}/releases/tag/${remoteTag}`,
+    assets: assets.map(asset => ({
+      name: asset.name,
+      browser_download_url: `https://github.com/${LAUNCHER_RELEASE_REPOSITORY}/releases/download/${remoteTag}/${asset.name}`,
+      size: asset.size ?? 9,
+    })),
+  }
+}
 
 /** 构造 /releases/latest 的响应，可替换资产/版本。默认体积与下载测试的数据（9 字节）一致。 */
 function releaseBody(remoteTag = 'v0.1.10', assetName = PORTABLE, assetSize = 9): unknown {
@@ -49,6 +70,69 @@ describe('resolvePortableAsset', () => {
 
   it('throws when the tag is missing', () => {
     expect(() => resolvePortableAsset(releaseBody('') as never)).toThrow('缺少版本号')
+  })
+})
+
+describe('资产匹配：忽略大小写与版本位置', () => {
+  it('选中改名后的 DSH-launcher-KEWU-Portable-1.1.0.exe', () => {
+    const asset = resolvePortableAsset(assetsBody('v1.1.0', [{ name: PORTABLE_KEWU }]) as never)
+    expect(asset.name).toBe(PORTABLE_KEWU)
+  })
+
+  it('旧命名 DSH-Launcher-1.0.4-portable.exe 仍然被选中', () => {
+    const legacy = 'DSH-Launcher-1.0.4-portable.exe'
+    expect(resolvePortableAsset(assetsBody('v1.0.4', [{ name: legacy }]) as never).name).toBe(legacy)
+  })
+
+  it('多个便携版资产时取文件名里版本号最大的那个', () => {
+    const asset = resolvePortableAsset(
+      assetsBody('v1.1.0', [
+        { name: 'DSH-launcher-KEWU-Portable-1.0.4.exe' },
+        { name: 'DSH-launcher-KEWU-Portable-1.1.0.exe' },
+        { name: 'DSH-launcher-KEWU-Portable-1.0.10.exe' },
+      ]) as never,
+    )
+    expect(asset.name).toBe('DSH-launcher-KEWU-Portable-1.1.0.exe')
+  })
+
+  it('大小写混写（Portable / PORTABLE）都能命中', () => {
+    const upper = 'DSH-launcher-KEWU-PORTABLE-1.1.0.EXE'
+    expect(resolvePortableAsset(assetsBody('v1.1.0', [{ name: upper }]) as never).name).toBe(upper)
+  })
+
+  it('没有 portable 资产时抛原文案（只有 Setup 也不算）', () => {
+    expect(() => resolvePortableAsset(assetsBody('v1.1.0', [{ name: SETUP_KEWU }, { name: 'latest.yml' }]) as never)).toThrow(
+      '新版本没有可下载的便携版安装包。',
+    )
+  })
+
+  it('缺 Setup 资产时 resolveSetupAsset 返回 null 而不是抛错', () => {
+    expect(resolveSetupAsset(assetsBody('v1.1.0', [{ name: PORTABLE_KEWU }]) as never)).toBeNull()
+    expect(resolveSetupAsset(assetsBody('v1.1.0', [{ name: SETUP_KEWU }]) as never)).toMatchObject({ name: SETUP_KEWU })
+  })
+
+  it('versionFromAssetName 取文件名里最后一个版本号', () => {
+    expect(versionFromAssetName(PORTABLE_KEWU)).toBe('1.1.0')
+    expect(versionFromAssetName('DSH-Launcher-1.0.4-portable.exe')).toBe('1.0.4')
+    expect(versionFromAssetName('launcher.exe')).toBeNull()
+  })
+})
+
+describe('detectInstallMode', () => {
+  it('PORTABLE_EXECUTABLE_FILE 存在即便携版', () => {
+    expect(detectInstallMode('C:\\x\\launcher.exe', 'C:\\x\\launcher.exe')).toBe('portable')
+  })
+
+  it('exe 名带 -portable 视为便携版', () => {
+    expect(detectInstallMode('C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe', null)).toBe('portable')
+  })
+
+  it('execPath 落在 node_modules 里视为开发模式', () => {
+    expect(detectInstallMode('C:\\dev\\dshlauncher\\node_modules\\electron\\dist\\electron.exe', null)).toBe('dev')
+  })
+
+  it('安装版 exe（不在 node_modules、名不带 portable）视为安装版', () => {
+    expect(detectInstallMode(INSTALLED_EXEC, null)).toBe('installed')
   })
 })
 
@@ -131,10 +215,10 @@ describe('checkLauncherUpdate', () => {
 })
 
 /** 分块发送内容的假 fetch，模拟 GitHub 资产下载。 */
-function chunkedAssetFetch(chunkSize = 3, total = 9): typeof fetch {
+function chunkedAssetFetch(chunkSize = 3, total = 9, body: unknown = releaseBody()): typeof fetch {
   return (async input => {
     const url = String(input)
-    if (url.endsWith('/releases/latest')) return new Response(JSON.stringify(releaseBody()), { status: 200 })
+    if (url.endsWith('/releases/latest')) return new Response(JSON.stringify(body), { status: 200 })
     if (url.includes('/releases/download/')) {
       const body = new Uint8Array(total)
       body.fill(0x41) // 'A'
@@ -161,6 +245,7 @@ describe('createLauncherUpdater download', () => {
     const updater = createLauncherUpdater({
       getVersion: () => '0.1.9',
       userDataPath,
+      getExecPath: () => 'C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe',
       githubFetch: chunkedAssetFetch(3, 9),
       emitProgress: p => progresses.push(p),
     })
@@ -180,6 +265,7 @@ describe('createLauncherUpdater download', () => {
     const updater = createLauncherUpdater({
       getVersion: () => '0.1.9',
       userDataPath,
+      getExecPath: () => 'C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe',
       githubFetch: latestFetch(releaseBody(tag)),
       emitProgress: p => progresses.push(p),
     })
@@ -223,6 +309,7 @@ describe('createLauncherUpdater download', () => {
     const updater = createLauncherUpdater({
       getVersion: () => '0.1.9',
       userDataPath,
+      getExecPath: () => 'C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe',
       githubFetch: lying,
       emitProgress: () => undefined,
     })
@@ -325,3 +412,61 @@ describe('apply', () => {
     expect(script).toContain('start ""')
   })
 })
+
+describe('安装版自更新（Setup 覆盖安装）', () => {
+  it('下载 Setup 并以 detached 方式启动安装程序，然后退出应用', async () => {
+    const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
+    const body = assetsBody('v1.1.0', [{ name: PORTABLE_KEWU }, { name: SETUP_KEWU }])
+    const spawned: Array<{ command: string; args: string[]; options?: Record<string, unknown> }> = []
+    let exitCode: number | undefined
+    const fakeSpawn = ((command: string, args: string[], spawnOptions: Record<string, unknown>) => {
+      spawned.push({ command, args, options: spawnOptions })
+      return { unref: () => undefined }
+    }) as never
+    const fakeExit = ((code: number) => { exitCode = code }) as never
+    const updater = createLauncherUpdater({
+      getVersion: () => '1.0.4',
+      userDataPath,
+      getExecPath: () => INSTALLED_EXEC,
+      githubFetch: chunkedAssetFetch(3, 9, body),
+      emitProgress: () => undefined,
+      spawnProcess: fakeSpawn,
+      exitProcess: fakeExit,
+    })
+
+    await updater.check()
+    const status = await updater.download()
+    expect(status.state).toBe('downloaded')
+    expect(status.assetName).toBe(SETUP_KEWU)
+
+    const setupPath = path.join(userDataPath, 'launcher-update', SETUP_KEWU)
+    const saved = await import('node:fs/promises').then(fs => fs.readFile(setupPath))
+    expect(saved.length).toBe(9)
+
+    // 安装版不再抛「开发模式」，而是启动安装程序。
+    await updater.apply()
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0].command).toBe(setupPath)
+    expect(spawned[0].args).toEqual(['/S'])
+    expect(spawned[0].options?.detached).toBe(true)
+    expect(spawned[0].options?.stdio).toBe('ignore')
+    expect(exitCode).toBe(0)
+  })
+
+  it('安装版没有 Setup 资产时给出中文错误，而不是「开发模式」文案', async () => {
+    const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
+    const updater = createLauncherUpdater({
+      getVersion: () => '1.0.4',
+      userDataPath,
+      getExecPath: () => INSTALLED_EXEC,
+      githubFetch: latestFetch(assetsBody('v1.1.0', [{ name: PORTABLE_KEWU }])),
+      emitProgress: () => undefined,
+    })
+    await updater.check()
+    const status = await updater.download()
+    expect(status.state).toBe('error')
+    expect(status.message).toContain('没有可下载的安装版安装包')
+    expect(status.message).not.toContain('开发模式')
+  })
+})
+
