@@ -61,17 +61,31 @@ function readReleaseRepository() {
   return matched ? matched[1] : null
 }
 
-/** release/b<N> 是仓库里的构建轮次目录（b3…b13）；下一个空闲编号即本轮产物目录。 */
-function nextBuildDir() {
-  const releaseRoot = path.join(repoRoot, 'release')
-  if (!existsSync(releaseRoot)) return path.join('release', 'b1')
-  const used = readdirSync(releaseRoot, { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
-    .map(entry => /^b(\d+)$/.exec(entry.name))
-    .filter(Boolean)
-    .map(matched => Number(matched[1]))
-  const next = used.length > 0 ? Math.max(...used) + 1 : 1
-  return path.join('release', `b${next}`)
+/**
+ * 默认产物目录。release/b<N> 是仓库里的构建轮次目录（b3…b14）：
+ * ① 从大到小找第一个装着「当前版本便携版」的目录 —— 构建完再跑一次本脚本要能认出它，
+ *    否则每次都跳到下一个编号，产明明建好了却报「还缺 3 件产物」；
+ * ② 一个都没有才用「最大编号 + 1」。
+ */
+export function resolveOutputDir(version, options = {}) {
+  const root = options.root ?? repoRoot
+  const releaseRoot = path.join(root, 'release')
+  const builds = existsSync(releaseRoot)
+    ? readdirSync(releaseRoot, { withFileTypes: true })
+        .filter(entry => entry.isDirectory())
+        .map(entry => /^b(\d+)$/.exec(entry.name))
+        .filter(Boolean)
+        .map(matched => ({ name: matched[0], number: Number(matched[1]) }))
+        .sort((left, right) => right.number - left.number)
+    : []
+  const portable = `DSH-launcher-KEWU-Portable-${version}.exe`
+  for (const build of builds) {
+    if (existsSync(path.join(releaseRoot, build.name, portable))) {
+      return { dir: path.join('release', build.name), reused: true }
+    }
+  }
+  const next = builds.length > 0 ? builds[0].number + 1 : 1
+  return { dir: path.join('release', `b${next}`), reused: false }
 }
 
 function gitStatusPorcelain() {
@@ -182,10 +196,14 @@ function main() {
     return
   }
 
-  const outputDir = options.dir ? options.dir.replace(/[\\/]+$/, '') : nextBuildDir()
+  const resolved = options.dir
+    ? { dir: options.dir.replace(/[\\/]+$/, ''), reused: false }
+    : resolveOutputDir(version, { root: repoRoot })
+  const outputDir = resolved.dir
   console.log(`当前版本：${version}`)
   console.log(`发布仓库：${repository ?? '<未从 src/constants.ts 读到 LAUNCHER_RELEASE_REPOSITORY>'}`)
-  console.log(`产物目录：${outputDir}`)
+  if (resolved.reused) console.log(`发现已构建的产物目录：${outputDir}（已含 DSH-launcher-KEWU-Portable-${version}.exe）`)
+  else console.log(`产物目录：${outputDir}`)
   console.log('')
 
   const missing = artifactList(version).filter(artifact => !existsSync(path.join(repoRoot, outputDir, artifact.name)))
@@ -209,9 +227,16 @@ function main() {
   console.log(`发版说明骨架：node scripts/release.mjs --notes → docs/release-v${version}.md`)
 }
 
-try {
-  main()
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exitCode = 1
+// 被 import（测试）时只导出函数，不执行 CLI。
+const invokedDirectly = process.argv[1]
+  ? path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
+  : false
+
+if (invokedDirectly) {
+  try {
+    main()
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
+  }
 }
