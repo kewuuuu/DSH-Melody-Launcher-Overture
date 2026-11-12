@@ -88,10 +88,16 @@ A grant is per pack and lives in userData/pack-api-grants.json (version 1). Enab
 
 launchAtLogin is the launcher's own Windows login item. It is independent of pack autoStart: a pack with autoStart true is started by a launcher that is already running, and it no longer registers anything at login. Saving the setting applies the login item immediately (exe path is PORTABLE_EXECUTABLE_FILE when set, otherwise the launcher executable, with --background so it starts hidden in the tray), and startup re-applies it once, so a missing launchAtLogin means off and any stale registration is removed.
 
+launchElevated is the launcher's own start-up elevation. When it is true the launcher decides at start-up — before any window, IPC handler or pack migration — whether it is already elevated; if it is not, and it was not itself started with --elevated-relaunch, it asks Windows for administrator rights with one UAC prompt and relaunches itself with --elevated-relaunch and --data-dir=<current userData>, then exits. Declining the prompt (or any UAC failure) leaves the launcher running unelevated, exactly as if the setting were off; that flag guarantees a single retry, so a refused prompt can never become a restart loop. settings get --json reports launchElevated, and settings launch-elevated on|off writes it.
+
 ~~~sh
 node bin/launcher-control.cjs settings launch-at-login
 node bin/launcher-control.cjs settings launch-at-login on
 node bin/launcher-control.cjs settings launch-at-login off
+
+node bin/launcher-control.cjs settings launch-elevated
+node bin/launcher-control.cjs settings launch-elevated on
+node bin/launcher-control.cjs settings launch-elevated off
 
 node bin/launcher-control.cjs api add acme --name 'Acme' --base-url 'https://api.acme.test/v1' --protocol openai-completions --models 'acme-1,acme-2' --api-key 'sk-acme'
 node bin/launcher-control.cjs api list
@@ -102,12 +108,19 @@ node bin/launcher-control.cjs pack api enable pack-a acme
 node bin/launcher-control.cjs pack api disable pack-a acme
 ~~~
 
-settings launch-at-login without an argument reports the current value and does not change it; on and off write the setting and apply it. These are real outputs from the fixture launcher (API keys and pack IDs are fixture values):
+settings launch-at-login without an argument reports the current value and does not change it; on and off write the setting and apply it. settings launch-elevated works the same way and only takes effect on the next start, because elevation happens before the window exists. These are real outputs from the fixture launcher (API keys and pack IDs are fixture values):
 
 ~~~text
 $ node bin/launcher-control.cjs settings launch-at-login on
 {
   "launchAtLogin": true
+}
+~~~
+
+~~~text
+$ node bin/launcher-control.cjs settings launch-elevated on
+{
+  "launchElevated": true
 }
 ~~~
 

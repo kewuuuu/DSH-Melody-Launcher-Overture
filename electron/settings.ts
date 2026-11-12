@@ -49,6 +49,8 @@ export function defaultSettings(input: DefaultSettingsInput): AppSettings {
     aiPrompt: '',
     recommendedWebUiPrompted: false,
     launchAtLogin: false,
+    // 启动时申请管理员权限：缺省关；开了才会在启动前弹一次 UAC 并自我重启。
+    launchElevated: false,
     // 停止以管理员权限运行的整合包时允许弹一次 UAC：缺省开，用户显式关掉才静默失败。
     elevatedStopPrompt: true,
     // 空闲自动关机：缺省关；布防后空闲 10 分钟、预告 10 分钟、关机前先停包。
@@ -206,6 +208,7 @@ export function validateSettings(input: AppSettings): AppSettings {
     recommendedWebUiPrompted: Boolean(input.recommendedWebUiPrompted),
     // 启动器自身随登录启动：缺省关，只有显式 true 才开（与整合包 autoStart 无关）。
     launchAtLogin: input.launchAtLogin === true,
+    launchElevated: input.launchElevated === true,
     elevatedStopPrompt: input.elevatedStopPrompt !== false,
     shutdownWhenIdle: input.shutdownWhenIdle === true,
     shutdownIdleMinutes: validShutdownMinutes(input.shutdownIdleMinutes, 10, 1, 1440),
@@ -241,6 +244,7 @@ export function mergeStoredSettings(defaults: AppSettings, stored: Partial<AppSe
     network: validNetworkSettings(stored.network) ?? defaults.network,
     recommendedWebUiPrompted: Boolean(stored.recommendedWebUiPrompted),
     launchAtLogin: typeof stored.launchAtLogin === 'boolean' ? stored.launchAtLogin : defaults.launchAtLogin === true,
+    launchElevated: typeof stored.launchElevated === 'boolean' ? stored.launchElevated : defaults.launchElevated === true,
     elevatedStopPrompt: typeof stored.elevatedStopPrompt === 'boolean' ? stored.elevatedStopPrompt : defaults.elevatedStopPrompt !== false,
     shutdownWhenIdle: typeof stored.shutdownWhenIdle === 'boolean' ? stored.shutdownWhenIdle : defaults.shutdownWhenIdle === true,
     shutdownIdleMinutes: validShutdownMinutes(stored.shutdownIdleMinutes, defaults.shutdownIdleMinutes ?? 10, 1, 1440),

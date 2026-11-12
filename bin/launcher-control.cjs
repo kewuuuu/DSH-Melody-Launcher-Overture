@@ -16,6 +16,7 @@ const HELP = `DSH Launcher control (Node >=20)
   settings get
   settings set --args '{"openAfterLaunch":false}'
   settings launch-at-login [on|off]
+  settings launch-elevated [on|off]
   idle-shutdown status|arm|disarm|cancel
   api list
   api add <route> --name <name> --base-url <url> --protocol <protocol> --models a,b [--api-key <key>]
@@ -65,7 +66,7 @@ function parse(argv) {
   }
   if (flags.help) return { help: true }
   const group = words.shift(), action = words.shift()
-  let command, packId, storageDir, apiRoute, apiEnabled, launchAtLogin, pendingPackId, pendingId, pathKind, pathTarget, uninstallOut
+  let command, packId, storageDir, apiRoute, apiEnabled, launchAtLogin, launchElevated, pendingPackId, pendingId, pathKind, pathTarget, uninstallOut
   if (group === 'request') { command = action; packId = words.shift() }
   else if (group === 'pack' && action === 'api') {
     const operation = words.shift()
@@ -91,6 +92,12 @@ function parse(argv) {
     const value = words.shift()
     if (value !== undefined && !['on', 'off'].includes(value)) throw new Error('用法：settings launch-at-login [on|off]')
     if (value !== undefined) launchAtLogin = value === 'on'
+  }
+  else if (group === 'settings' && action === 'launch-elevated') {
+    command = 'settings.launchElevated'
+    const value = words.shift()
+    if (value !== undefined && !['on', 'off'].includes(value)) throw new Error('用法：settings launch-elevated [on|off]')
+    if (value !== undefined) launchElevated = value === 'on'
   }
   else if (group === 'storage') {
     command = 'storage.' + action
@@ -149,6 +156,7 @@ function parse(argv) {
   if (apiRoute !== undefined) args.route = apiRoute
   if (apiEnabled !== undefined) args.enabled = apiEnabled
   if (launchAtLogin !== undefined) args.enabled = launchAtLogin
+  if (launchElevated !== undefined) args.enabled = launchElevated
   const configKeys = { port: 'port', 'port-mode': 'portMode', 'run-as-admin': 'runAsAdmin', 'auto-start': 'autoStart', 'pinned-at': 'pinnedAt', workspace: 'workspace', 'launch-args': 'launchArgs' }
   for (const [flag, key] of Object.entries(configKeys)) {
     if (flags[flag] === undefined) continue

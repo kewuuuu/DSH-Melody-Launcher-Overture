@@ -214,6 +214,18 @@ export function createLauncherControl(options: {
     options.loginRegistration(enabled)
     return { launchAtLogin: enabled }
   }
+  // 启动时申请管理员权限：只改设置，真正的提权发生在下一次启动（重启后由主进程执行）。
+  const applyLaunchElevated = async (patch: Record<string, unknown>): Promise<{ launchElevated: boolean }> => {
+    let enabled = (await settings.readStored()).launchElevated === true
+    if (patch.enabled !== undefined) {
+      if (typeof patch.enabled !== 'boolean') throw new Error('launchElevated 必须是布尔值。')
+      enabled = patch.enabled
+      const next = settingsQueue.catch(() => undefined).then(async () => settings.save({ ...await settings.readStored(), launchElevated: enabled }))
+      settingsQueue = next
+      await next
+    }
+    return { launchElevated: enabled }
+  }
   let settingsQueue: Promise<unknown> = Promise.resolve()
   return {
     ...control,
@@ -227,6 +239,11 @@ export function createLauncherControl(options: {
         const patch = request.args ?? {}
         if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(key => key !== 'enabled')) throw new Error('Unsupported launcher setting')
         return applyLaunchAtLogin(patch)
+      }
+      if (request?.command === 'settings.launchElevated') {
+        const patch = request.args ?? {}
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(key => key !== 'enabled')) throw new Error('Unsupported launcher setting')
+        return applyLaunchElevated(patch)
       }
       if (request?.command === 'api.list') return apiLibrary.list()
       if (request?.command === 'api.save') return apiLibrary.save((request.args ?? {}) as unknown as LauncherApiEntryInput)
@@ -271,6 +288,7 @@ export function createLauncherControl(options: {
           uiTheme: s.uiTheme,
           appearance: s.appearance,
           network: s.network,
+          launchElevated: s.launchElevated === true,
           shutdownWhenIdle: s.shutdownWhenIdle === true,
           shutdownIdleMinutes: s.shutdownIdleMinutes ?? 10,
           shutdownGraceMinutes: s.shutdownGraceMinutes ?? 10,
@@ -292,6 +310,7 @@ export function createLauncherControl(options: {
           uiTheme: saved.uiTheme,
           appearance: saved.appearance,
           network: saved.network,
+          launchElevated: saved.launchElevated === true,
           shutdownWhenIdle: saved.shutdownWhenIdle === true,
           shutdownIdleMinutes: saved.shutdownIdleMinutes ?? 10,
           shutdownGraceMinutes: saved.shutdownGraceMinutes ?? 10,

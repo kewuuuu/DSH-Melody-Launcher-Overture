@@ -36,6 +36,8 @@ import { buildPluginCommandArgs, createInstaller, syncProfilePnpmConfig, validat
 import { registerIpcHandlers } from './ipc'
 import { createLauncherUpdater, type LauncherUpdater } from './launcher-update'
 import { loginItemSettings, syncLaunchAtLogin } from './login-item'
+import { isProcessElevated } from './process-elevation'
+import { buildElevatedRelaunchArgs, relaunchElevated, shouldRelaunchElevated } from './startup-elevation'
 import { createGitHubAuthService, type GitHubAuthService } from './github-auth'
 import { buildNetworkEnvironment, npmRegistryCandidates, refreshWindowsSystemProxy } from './proxy'
 import {
@@ -1227,6 +1229,25 @@ app.whenReady().then(async () => {
   }
   services = createServices()
   const startupSettings = await services.settings.read()
+  // 启动即提权：必须在开窗口、注册 IPC、迁移数据之前决断。
+  // 失败（用户点「否」、UAC 被拦）就当没开这个设置继续，绝不因为提权失败而崩掉启动器；
+  // argv 里的 --elevated-relaunch 保证提权后的那次不会再弹一次，不会无限重启。
+  if (
+    shouldRelaunchElevated({
+      launchElevated: startupSettings.launchElevated,
+      argv: process.argv.slice(1),
+      elevated: await isProcessElevated(),
+    })
+  ) {
+    const relaunched = await relaunchElevated({
+      executablePath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
+      args: buildElevatedRelaunchArgs({ argv: process.argv.slice(1), dataDir: app.getPath('userData') }),
+    })
+    if (relaunched) {
+      app.quit()
+      return
+    }
+  }
   // 备份区必须早于任何「会删用户数据的启动路径」：三条删除链路在没装配引擎时会拒绝删除，
   // 而装配本身同步且零成本（tar.exe / PowerShell 探测推迟到第一次备份）。
   try {
