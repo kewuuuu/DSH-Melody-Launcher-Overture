@@ -256,3 +256,13 @@
 - 实机烟测（`D:\engine\DSH\test\kewu-b14-*`，schtasks 一次性任务拉起）：便携版版本资源 FileVersion/ProductVersion 都是 1.1.0，`storage info` 报 `source:"portable"`，`pack list` 的 runtime 带 `restarting:false`/`lastError:null`；安装版 `Setup /S` 装出 85 个文件，运行后 `storage info` 报 `source:"install"`、数据落在 `%APPDATA%\DSH-launcher-KEWU`，静默卸载后程序目录整棵消失、数据保留（53 个文件）、HKCU 卸载项与用户快捷方式归零。
 - 未验证项：真实 UAC 下重启/停止的成功交接（无人值守只能模拟「拒绝」）、GitHub Actions 实跑、真实证书签名、从旧版本实跑一次自更新升级。
 - 清理：`kewu-b14-smoke`、`kewu-b14-inst`、`kewu-b14-build`、`%APPDATA%\DSH-launcher-KEWU`、烟测自解压目录 `%TEMP%\3M0ZdNrbT46vVjI7hWek9wshinJ` 与 schtasks 任务全部删除；用户正在跑的实例与其数据未触碰。
+
+## 管理员权限口径：只开启动器级（2026-11-12）
+
+- 用户选定「只弹一次 UAC」：启动器级 `launchElevated` 打开，各整合包 `runAsAdmin` 全部关掉，界面把这层关系写清楚。
+- `src/components/PackDashboard.tsx`：「管理员」勾选框加 `title`（勾上后每次启动各自弹一次 UAC；启动器本身是管理员就直接继承），有包勾着时页脚追加一条提示并指向设置页的启动器级开关。
+- `src/views/SettingsHomeView.tsx`：启动器级开关的说明补一句「想只弹这一次，就把各整合包的『管理员』勾选取消」；`src/components/PackDashboard.test.tsx` 增 1 例（勾选框 title 与页脚提示都在）。
+- 本机 `D:\engine\DSH\launcher-data` 已按此改盘（改前备份在 `D:\engine\DSH\Workspace\_cache\kewu-opt2-backup\<时间戳>\`）：`settings.json` 的 `launchElevated` 由「没有这个键」改为 `true`，`pack-control.json` 的 `pack-test.runAsAdmin` 由 `true` 改为 `false`。下次启动启动器会弹一次 UAC，之后包级启停继承该令牌。
+- 注意：1.0.x 与 1.1.0 之前的旧 EXE 不认识 `launchElevated`，用旧版打开这份数据会忽略该键、并在下次保存设置时丢掉；这份配置要用 b14 及以后的版本。
+- 回归：`npx tsc --noEmit` 0 error；`npx vitest run` **143 文件通过 / 9 跳过，1328 passed / 11 skipped（1339）**。
+

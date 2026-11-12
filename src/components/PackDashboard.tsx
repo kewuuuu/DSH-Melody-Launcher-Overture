@@ -117,7 +117,8 @@ export function PackDashboard(props: Props) {
             {!busy && control.inlineErrors[pack.id] && <p className="pack-external-error" role="alert">{control.inlineErrors[pack.id]}</p>}
             {failure && <p className="pack-external-error" role="status">{failure}</p>}
           </td>
-          <td><input type="checkbox" aria-label={'以管理员运行 ' + pack.name} checked={pack.config.runAsAdmin} disabled={busy} onChange={event => void patch(pack, { runAsAdmin: event.target.checked })} /></td>
+          {/* 提权是每个包各自申请一次，和启动器自身的提权开关不是一回事：勾上这里，每次启动这个包都会弹一次 UAC。 */}
+          <td><input type="checkbox" aria-label={'以管理员运行 ' + pack.name} title="勾选后这个整合包以管理员权限运行，每次启动都会弹一次 UAC；启动器本身已是管理员时直接继承，不再弹" checked={pack.config.runAsAdmin} disabled={busy} onChange={event => void patch(pack, { runAsAdmin: event.target.checked })} /></td>
           <td><button className="icon-button" aria-label={'配置 ' + pack.name} onClick={() => setSelected(pack.id)}><Settings2 size={17} /></button></td>
           <td><input type="checkbox" aria-label={'自动启动 ' + pack.name} checked={pack.config.autoStart} disabled={busy} onChange={event => void patch(pack, { autoStart: event.target.checked })} /></td>
           <td><div className="pack-row-actions">{confirmRemove === pack.id
@@ -128,7 +129,7 @@ export function PackDashboard(props: Props) {
     </tbody></table></div>
     {control.loading && <div className="pack-empty"><LoaderCircle className="spin" size={18} />正在读取整合包…</div>}
     {!control.loading && !control.error && packs.length === 0 && <div className="pack-empty">{query ? '没有匹配的整合包' : '还没有整合包。新建一个，或导入一个。'}</div>}
-    <footer className="pack-dashboard-footer"><span>{control.packs.filter(pack => pack.runtime.running).length} 个正在运行</span>{externalCount > 0 && <span className="pack-external-count">另有 {externalCount} 个未托管实例在运行</span>}<span>置顶按时间排列 · 启动参数在下次启动时生效</span></footer>
+    <footer className="pack-dashboard-footer"><span>{control.packs.filter(pack => pack.runtime.running).length} 个正在运行</span>{externalCount > 0 && <span className="pack-external-count">另有 {externalCount} 个未托管实例在运行</span>}<span>置顶按时间排列 · 启动参数在下次启动时生效</span>{packs.some(pack => pack.config.runAsAdmin) && <span className="pack-admin-note">已勾选「管理员」的整合包每次启动都会弹一次 UAC；想只弹一次就关掉它们、改用设置里的「启动器启动时请求管理员权限」</span>}</footer>
     {selectedPack && <PackControlDialog key={selectedPack.id} pack={selectedPack} busy={control.busy.includes(selectedPack.id)} onClose={() => setSelected(null)} onSave={values => patch(selectedPack, values)} onRefresh={control.refresh} onExport={() => props.onExport(selectedPack.id)} onImportSessions={() => props.onImportSessions(selectedPack.id)} onCloneVersion={() => props.onCloneVersion(selectedPack.id)} installedDshVersions={props.installedDshVersions} onUpgradeVersion={version => props.onUpgradeVersion(selectedPack.id, version)} />}
   </section>
 }

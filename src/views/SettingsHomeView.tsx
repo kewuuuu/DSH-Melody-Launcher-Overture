@@ -398,7 +398,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
               />
               <span>
                 <strong>启动器启动时请求管理员权限</strong>
-                <small>开启后每次启动启动器都会弹一次 UAC 确认；启动器里的启动/停止整合包等操作都继承这份管理员权限，不会再额外弹窗。关闭则只在需要时弹。这一项跟随底部「保存设置」，下次启动启动器时生效。</small>
+                <small>开启后每次启动启动器都会弹一次 UAC 确认；启动器里的启动/停止整合包等操作都继承这份管理员权限，不会再额外弹窗。想只弹这一次，就把各整合包的「管理员」勾选取消。这一项跟随底部「保存设置」，下次启动启动器时生效。</small>
               </span>
             </label>
             {!windows && <p className="settings-field-note">仅 Windows 支持：当前系统无法在启动时请求管理员权限，这一项已禁用。</p>}
