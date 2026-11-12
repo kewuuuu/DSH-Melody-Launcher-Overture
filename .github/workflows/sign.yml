@@ -1,0 +1,111 @@
+name: Sign Windows Assets
+
+# 对一个既有的 GitHub Release 里的 exe 重新签名，并覆盖上传。
+# 证书通过仓库 secret 注入，两种模式二选一：
+#   SIGN_CERT_BASE64 + SIGN_CERT_PASSWORD   PFX 模式（推荐，CI 里不依赖证书存储）
+#   SIGN_THUMBPRINT                         证书存储模式（需要先在本机导入证书）
+# 没有配置任何证书时：检测步骤把 has_cert 置为 false，其余步骤全部跳过，整次运行成功结束。
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要签名的 Release 标签（例如 v1.0.4，需已存在）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sign-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    name: 对 Release 资产做代码签名
+    runs-on: windows-latest
+    env:
+      SIGN_CERT_BASE64: ${{ secrets.SIGN_CERT_BASE64 }}
+      SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
+      SIGN_THUMBPRINT: ${{ secrets.SIGN_THUMBPRINT }}
+    steps:
+      - name: 解析标签
+        id: meta
+        shell: bash
+        run: echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: 检出代码
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+
+      # 证书检测放在最前面：没有 secret 时后续所有步骤都跳过，流水线保持绿色。
+      - name: 检测签名证书
+        id: cert
+        shell: bash
+        run: |
+          if [ -n "$SIGN_CERT_BASE64" ] || [ -n "$SIGN_THUMBPRINT" ]; then
+            echo "has_cert=true" >> "$GITHUB_OUTPUT"
+            if [ -n "$SIGN_CERT_BASE64" ]; then
+              echo "检测到证书：PFX 模式（SIGN_CERT_BASE64）。"
+            else
+              echo "检测到证书：证书存储模式（SIGN_THUMBPRINT）。"
+            fi
+          else
+            echo "has_cert=false" >> "$GITHUB_OUTPUT"
+            echo "未配置签名证书，跳过签名"
+          fi
+
+      - name: 下载 Release 资产
+        if: steps.cert.outputs.has_cert == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          mkdir -p unsigned
+          gh release download "$tag" --dir unsigned --pattern "*.exe" --clobber
+          ls -lh unsigned
+
+      - name: 打印签名前状态
+        if: steps.cert.outputs.has_cert == 'true'
+        shell: powershell
+        run: |
+          Get-ChildItem -LiteralPath unsigned -Filter *.exe |
+            Get-AuthenticodeSignature |
+            Format-Table Name, Status -AutoSize |
+            Out-String |
+            Write-Host
+
+      - name: 调用签名脚本
+        if: steps.cert.outputs.has_cert == 'true'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-windows.ps1 -Path unsigned
+
+      - name: 打印签名后状态
+        if: steps.cert.outputs.has_cert == 'true'
+        shell: powershell
+        run: |
+          Get-ChildItem -LiteralPath unsigned -Filter *.exe |
+            Get-AuthenticodeSignature |
+            Format-Table Name, Status, StatusMessage -AutoSize |
+            Out-String |
+            Write-Host
+
+      - name: 回传 Release 资产
+        if: steps.cert.outputs.has_cert == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          gh release upload "$tag" unsigned/*.exe --clobber
+          echo "已用签名后的文件覆盖 Release $tag 的资产。"
+
+      - name: 未配置证书时的说明
+        if: steps.cert.outputs.has_cert != 'true'
+        shell: bash
+        run: |
+          echo "未配置签名证书，跳过签名。"
+          echo "配置 SIGN_CERT_BASE64 + SIGN_CERT_PASSWORD 或 SIGN_THUMBPRINT 后重跑本工作流即可。"
