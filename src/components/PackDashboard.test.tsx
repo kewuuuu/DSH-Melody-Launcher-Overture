@@ -56,6 +56,30 @@ it('offers pack creation and import on the dashboard itself', async () => {
   expect(onImport).toHaveBeenCalledTimes(1)
 })
 
+it('shows an in-flight restart with a force stop, and the reason it failed', async () => {
+  const requests: Array<{ command: string; packId?: string; args?: Record<string, unknown> }> = []
+  const packs = [{
+    id: 'alpha', name: 'Alpha', dshVersion: '1.0', installedAt: '2025-01-01',
+    config: { portMode: 'auto', port: 3080, runAsAdmin: true, autoStart: false, pinnedAt: null },
+    runtime: { running: false, port: null, url: null, restarting: true, awaitingAuthorization: true, lastError: '重启整合包失败：端口 3080 被占用' },
+  }]
+  const bridge = vi.fn(async (request: typeof requests[number]) => {
+    requests.push(request)
+    return request.command === 'pack.list' ? { packs } : {}
+  })
+  const api = { launcherControl: bridge } as unknown as LauncherApi
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container); roots.push(root)
+  await act(async () => root.render(<LauncherApiProvider value={api}><PackDashboard installedDshVersions={['1.0']} onCreate={async () => true} onImport={() => {}} onExport={() => {}} onImportSessions={() => {}} onCloneVersion={() => {}} onRemove={async () => true} onUpgradeVersion={async () => true} onOpenVersions={() => {}} /></LauncherApiProvider>))
+  // 后台重启期间不能只留一个「启动」按钮：说明在等什么，并给出强制停止的出口。
+  expect(container.textContent).toContain('等待管理员授权')
+  expect(container.textContent).toContain('重启整合包失败：端口 3080 被占用')
+  const force = container.querySelector<HTMLButtonElement>('[aria-label="强制停止 Alpha"]')
+  expect(force).not.toBeNull()
+  await act(async () => force!.click())
+  expect(requests).toContainEqual({ command: 'pack.stop', packId: 'alpha', args: { force: true } })
+})
+
 it('does not overwrite the neutral market cache with a target pack installation state', async () => {
   const { DshMarketView } = await import('../views/DshMarketView')
   const catalog = { updated: '', count: 1, categories: {}, plugins: [{ name: 'example', owner: 'owner', url: 'https://example.com', category: 'tools', description: { zh: 'Example' }, npm: '@owner/example', stars: 0, added: '', install: '', installed: false, enabled: false, version: null, updateAvailable: false, updateVersion: null }] }

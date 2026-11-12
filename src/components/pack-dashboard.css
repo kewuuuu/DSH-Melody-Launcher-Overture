@@ -9,6 +9,9 @@
 .pack-external .secondary-button{padding:5px 9px;font-size:11px}
 .pack-external-error{margin:7px 0 0;max-width:280px;color:var(--danger);font-size:10px;line-height:1.6;white-space:normal}
 .pack-external-count{color:#c9871b}
+/* 后台重启/等待 UAC：状态字与强制停止按钮并排，避免用户以为卡死。 */
+.pack-pending-state{color:#c9871b;font-size:11px;white-space:nowrap}
+.pack-row-actions .danger-button{padding:5px 9px;font-size:11px}
 .pack-table i.external{background:#c9871b}
 
 /* 整合包配置浮层：标题区的改名/打开文件夹、行内改名、运行中提示。 */
