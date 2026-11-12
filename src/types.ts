@@ -55,6 +55,8 @@ export interface AppSettings {
   openAfterLaunch: boolean
   /** 启动器自身是否随 Windows 登录启动（隐藏窗口进托盘）；与整合包的 autoStart 无关。 */
   launchAtLogin?: boolean
+  /** 启动器启动时就请求管理员权限（会弹一次 UAC）；开启后启动器内的操作都继承这个令牌。 */
+  launchElevated?: boolean
   /**
    * 停止以管理员权限运行的整合包时，允许弹一次 UAC 去结束它。
    * 默认 true：监督进程不在时这是唯一能停下来的路径；关掉则只给可复制的命令。
