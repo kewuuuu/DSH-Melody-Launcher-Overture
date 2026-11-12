@@ -36,7 +36,11 @@ function baseSettings(overrides: Partial<AppSettings> = {}): AppSettings {
 }
 
 /** 挂载整页设置：外观与 API 库都会去读接口，存储位置卡片读 storage。 */
-async function mount(overrides: Partial<AppSettings> = {}) {
+/** saveHandler 决定 onSave 的返回：返回 false 或一直挂起的 Promise 用来测失败/保存中。 */
+async function mount(
+  overrides: Partial<AppSettings> = {},
+  saveHandler: (next: AppSettings) => boolean | Promise<boolean> = () => true,
+) {
   const saved: AppSettings[] = []
   const previews: Array<AppearanceSettings | null> = []
   const api = {
@@ -63,7 +67,7 @@ async function mount(overrides: Partial<AppSettings> = {}) {
       <SettingsHomeView
         settings={baseSettings(overrides)}
         busy={false}
-        onSave={async next => { saved.push(next); return true }}
+        onSave={async next => { saved.push(next); return saveHandler(next) }}
         onPreview={next => previews.push(next)}
         onCheckUpdate={() => {}}
         onOpenPath={() => {}}
@@ -96,27 +100,70 @@ it('按外观→启动器→存储位置→API 库→网络→关于的顺序渲
   expect(container.textContent).toContain('启动器版本')
 })
 
-it('勾选开机自启后保存，onSave 收到 launchAtLogin: true', async () => {
-  const { container, saved, button } = await mount()
-  const box = container.querySelector('input[aria-label="随 Windows 登录启动"]') as HTMLInputElement
-  expect(box).toBeTruthy()
+const loginBox = (container: HTMLElement) => container.querySelector('input[aria-label="随 Windows 登录启动"]') as HTMLInputElement
+const loginStatus = (container: HTMLElement) => container.querySelector('.login-item-row .settings-field-status')
+
+it('勾选开机自启立即调用 onSave（不等底部保存），成功后在行内显示已写入登录项', async () => {
+  const { container, saved } = await mount()
+  const box = loginBox(container)
   expect(box.checked).toBe(false)
   await act(async () => { box.click() })
-  await act(async () => { button('保存设置').click() })
   await act(async () => {})
   expect(saved).toHaveLength(1)
   expect(saved[0].launchAtLogin).toBe(true)
   expect(saved[0].launchArgs).toEqual(['--port', '3080'])
+  expect(box.checked).toBe(true)
+  const status = loginStatus(container)
+  expect(status?.getAttribute('role')).toBe('status')
+  expect(status?.textContent).toContain('已写入登录项')
 })
 
-it('取消更改把草稿恢复成已保存的设置', async () => {
+it('取消勾选也立即 onSave，行内显示已移除登录项', async () => {
+  const { container, saved } = await mount({ launchAtLogin: true })
+  const box = loginBox(container)
+  expect(box.checked).toBe(true)
+  await act(async () => { box.click() })
+  await act(async () => {})
+  expect(saved).toHaveLength(1)
+  expect(saved[0].launchAtLogin).toBe(false)
+  expect(box.checked).toBe(false)
+  expect(loginStatus(container)?.textContent).toContain('已移除登录项')
+})
+
+it('自启保存失败时复选框回滚到点击前的值，并显示 role=alert 的错误', async () => {
+  const { container, saved } = await mount({}, () => false)
+  const box = loginBox(container)
+  await act(async () => { box.click() })
+  await act(async () => {})
+  expect(saved).toHaveLength(1)
+  expect(box.checked).toBe(false)
+  const alert = container.querySelector('.login-item-row .settings-field-error')
+  expect(alert?.getAttribute('role')).toBe('alert')
+  expect(alert?.textContent).toContain('登录项没有写入')
+  expect(loginStatus(container)).toBeNull()
+})
+
+it('保存进行中复选框禁用，连点不会发第二次 onSave', async () => {
+  let release: ((ok: boolean) => void) | null = null
+  const { container, saved } = await mount({}, () => new Promise<boolean>(resolve => { release = resolve }))
+  const box = loginBox(container)
+  await act(async () => { box.click() })
+  expect(box.disabled).toBe(true)
+  await act(async () => { box.click() })
+  expect(saved).toHaveLength(1)
+  await act(async () => { release!(true) })
+  expect(box.disabled).toBe(false)
+  expect(saved).toHaveLength(1)
+})
+
+it('取消更改把草稿恢复成已保存的设置（用只走草稿的关机开关验证）', async () => {
   const { container, saved, button } = await mount()
-  const box = container.querySelector('input[aria-label="随 Windows 登录启动"]') as HTMLInputElement
+  const box = shutdownBox(container)
   await act(async () => { box.click() })
   expect(box.checked).toBe(true)
   await act(async () => { button('取消更改').click() })
   await act(async () => {})
-  expect((container.querySelector('input[aria-label="随 Windows 登录启动"]') as HTMLInputElement).checked).toBe(false)
+  expect(shutdownBox(container).checked).toBe(false)
   expect(saved).toHaveLength(0)
 })
 const ELEVATED_STOP_LABEL = '停止提权整合包时允许弹出一次管理员权限请求'
@@ -195,4 +242,56 @@ it('勾掉提权停止提示后，保存的草稿里 elevatedStopPrompt 为 fals
   await act(async () => {})
   expect(saved).toHaveLength(1)
   expect(saved[0].elevatedStopPrompt).toBe(false)
+})
+const WINDOWS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+const LINUX_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+const ELEVATED_LAUNCH_LABEL = '启动器启动时请求管理员权限'
+const elevatedLaunchBox = (container: HTMLElement) => container.querySelector('input[aria-label="' + ELEVATED_LAUNCH_LABEL + '"]') as HTMLInputElement
+
+/** 这一项按 navigator.userAgent 判断平台；临时换成指定 UA，返回恢复函数。 */
+function setUserAgent(value: string): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(window.navigator, 'userAgent')
+  Object.defineProperty(window.navigator, 'userAgent', { value, configurable: true })
+  return () => {
+    if (descriptor) Object.defineProperty(window.navigator, 'userAgent', descriptor)
+    else delete (window.navigator as unknown as Record<string, unknown>).userAgent
+  }
+}
+
+it('Windows 下勾选「启动器启动时请求管理员权限」不立即保存，点保存后 onSave 收到 launchElevated: true', async () => {
+  const restore = setUserAgent(WINDOWS_UA)
+  try {
+    const { container, saved, button } = await mount()
+    const box = elevatedLaunchBox(container)
+    expect(box.disabled).toBe(false)
+    expect(box.checked).toBe(false)
+    expect(container.textContent).toContain('下次启动启动器时生效')
+    expect(container.textContent).toContain('UAC')
+    await act(async () => { box.click() })
+    expect(box.checked).toBe(true)
+    expect(saved).toHaveLength(0)
+    await act(async () => { button('保存设置').click() })
+    await act(async () => {})
+    expect(saved).toHaveLength(1)
+    expect(saved[0].launchElevated).toBe(true)
+  } finally {
+    restore()
+  }
+})
+
+it('非 Windows 时该开关禁用，并说明仅 Windows 支持', async () => {
+  const restore = setUserAgent(LINUX_UA)
+  try {
+    const { container, saved, button } = await mount()
+    const box = elevatedLaunchBox(container)
+    expect(box.disabled).toBe(true)
+    expect(container.textContent).toContain('仅 Windows 支持')
+    await act(async () => { box.click() })
+    expect(box.checked).toBe(false)
+    await act(async () => { button('保存设置').click() })
+    await act(async () => {})
+    expect(saved[0].launchElevated).toBeUndefined()
+  } finally {
+    restore()
+  }
 })

@@ -35,6 +35,11 @@
 .settings-field-note { color: var(--quiet); font-size: 10.5px; line-height: 1.4; }
 .settings-field-error { color: var(--danger); font-size: 10.5px; line-height: 1.4; }
 
+/* 保存即生效的行（自启开关）：复选框下面挂一行状态，缩进对齐到勾选框右侧的文字。 */
+.login-item-row { display: grid; gap: 4px; }
+.settings-field-status { margin: 0; padding-left: 37px; color: var(--accent); font-size: 10.5px; line-height: 1.4; }
+.login-item-row .settings-field-error { padding-left: 37px; }
+
 @media (max-width: 620px) {
   .settings-home-actions { flex-wrap: wrap; }
   .settings-home-actions-hint { flex-basis: 100%; margin: 0 0 4px; }

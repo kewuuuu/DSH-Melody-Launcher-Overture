@@ -65,6 +65,22 @@
 
 .uninstall-empty { margin: 10px 0 0; color: var(--quiet); font-size: 12px; }
 
+/* 首屏扫描区：说明 + 一次性扫描按钮；不自动扫描，点过之后这里变成「重新扫描」。 */
+.uninstall-scan {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.uninstall-scan-hint { flex: 1 1 240px; margin: 0; color: var(--quiet); font-size: 12px; line-height: 1.7; }
+.uninstall-scan button { min-height: 32px; padding: 0 12px; font-size: 12.5px; white-space: nowrap; }
+
 .uninstall-warnings {
   display: grid;
   gap: 4px;

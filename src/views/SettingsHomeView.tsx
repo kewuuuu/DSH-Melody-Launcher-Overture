@@ -25,7 +25,7 @@ import '../components/settings-home.css'
 /**
  * 设置主页（顶栏「设置」）：把原本散在设置弹窗里的东西收成整页。
  * 分区顺序即使用频率：外观 → 启动器 → 存储位置 → API 库 → 备份管理 → 工作区 Skills → 网络 → 关于。
- * 只有点「保存设置」才写盘；外观改动会实时预览，离开本页即回到已保存设置。
+ * 除「随 Windows 登录启动」勾选即写登录项外，只有点「保存设置」才写盘；外观改动会实时预览，离开本页即回到已保存设置。
  */
 
 interface Props {
@@ -52,6 +52,9 @@ const UI_THEMES: Array<{ id: UiTheme; label: string }> = [
 const CUSTOM_MIRROR = '__custom__'
 /** 比较镜像地址时忽略首尾空格与结尾斜杠（手敲的常常少一个 / ）。 */
 const normalizeMirror = (value: string): string => value.trim().replace(/\/+$/, '')
+
+/** 管理员权限开关只对 Windows 有意义；在渲染时读 UA，测试可以临时替换。 */
+const isWindowsHost = (): boolean => typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
 
 /** 关机参数的默认值与合法区间，与 AppSettings 上的注释同一口径。 */
 const SHUTDOWN_IDLE_DEFAULT = 10
@@ -95,6 +98,10 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   const [imageError, setImageError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  // 自启开关是保存即生效的，行内状态只描述这一次点选；与底部「保存设置」的 saved 无关。
+  const [loginBusy, setLoginBusy] = useState(false)
+  const [loginStatus, setLoginStatus] = useState<string | null>(null)
+  const [loginError, setLoginError] = useState<string | null>(null)
 
   // 已保存设置变了（保存成功、切换整合包等）：草稿跟着回到最新值，别用旧草稿覆盖磁盘。
   useEffect(() => {
@@ -114,6 +121,13 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   const mirrorPreset = mirrorValue.trim() === '' ? '' : (matchedPreset ?? CUSTOM_MIRROR)
 
   const patch = (next: Partial<AppSettings>) => { setDraft(current => ({ ...current, ...next })); setSaved(false) }
+
+  // 立即保存与「保存设置」共用同一份 payload，参数文本的口径不会分叉。
+  const payload = (next: Partial<AppSettings> = {}): AppSettings => ({
+    ...draft,
+    ...next,
+    launchArgs: argsText.trim().split(/\s+/).filter(Boolean),
+  })
 
   const chooseDirectory = async (kind: 'dshInstallPath' | 'dshHome' | 'workspace') => {
     const chosen = await api.chooseDirectory(kind)
@@ -164,6 +178,8 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
     setImageError(null)
     setSaveError(null)
     setSaved(false)
+    setLoginStatus(null)
+    setLoginError(null)
     onPreview(null)
   }
 
@@ -194,7 +210,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
 
   const save = async () => {
     setSaveError(null)
-    const ok = await onSave({ ...draft, launchArgs: argsText.trim().split(/\s+/).filter(Boolean) })
+    const ok = await onSave(payload())
     if (ok) {
       setSaved(true)
       onPreview(null)
@@ -202,6 +218,35 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
       setSaveError('设置没有保存成功，请检查填写内容后重试。')
     }
   }
+
+  /**
+   * 「随 Windows 登录启动」勾了就算数：立刻把整份草稿交给主进程写登录项，不等「保存设置」。
+   * 失败则把复选框退回点击前的值，并在行内说明，别让界面显示一个磁盘上没有的状态。
+   */
+  const toggleLaunchAtLogin = async (next: boolean) => {
+    if (loginBusy) return
+    const previous = draft.launchAtLogin === true
+    setLoginBusy(true)
+    setLoginStatus(null)
+    setLoginError(null)
+    setDraft(current => ({ ...current, launchAtLogin: next }))
+    setSaved(false)
+    let ok = false
+    try {
+      ok = await onSave(payload({ launchAtLogin: next }))
+    } catch {
+      ok = false
+    }
+    if (ok) {
+      setLoginStatus(next ? '已写入登录项，下次登录 Windows 时生效。' : '已移除登录项，下次登录 Windows 时不再自动启动。')
+    } else {
+      setDraft(current => ({ ...current, launchAtLogin: previous }))
+      setLoginError('登录项没有写入，开关已恢复原状；可以稍后重试，或点底部「保存设置」再存一次。')
+    }
+    setLoginBusy(false)
+  }
+
+  const windows = isWindowsHost()
 
   return (
     <div className="home-tab-page">
@@ -328,15 +373,35 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
           </Section>
 
           <Section icon={<Rocket size={16} />} title="启动器" desc="开机自启、DSH 本体目录、DSH_HOME 与工作区；DSH 本体目录存程序与依赖，DSH_HOME 存整合包、配置、插件和 Skills。">
+            <div className="login-item-row">
+              <label className="check-field">
+                <input
+                  type="checkbox"
+                  aria-label="随 Windows 登录启动"
+                  checked={draft.launchAtLogin ?? false}
+                  disabled={loginBusy || busy}
+                  onChange={event => { void toggleLaunchAtLogin(event.target.checked) }}
+                />
+                <span><strong>随 Windows 登录启动</strong><small>开机后自动把启动器收进托盘，不打开主窗口。勾选后立刻写入 Windows 登录项，不用等下面的「保存设置」。</small></span>
+              </label>
+              {loginBusy && <p className="settings-field-status" role="status">正在写入登录项…</p>}
+              {loginStatus && <p className="settings-field-status" role="status">{loginStatus}</p>}
+              {loginError && <p className="settings-field-error" role="alert">{loginError}</p>}
+            </div>
             <label className="check-field">
               <input
                 type="checkbox"
-                aria-label="随 Windows 登录启动"
-                checked={draft.launchAtLogin ?? false}
-                onChange={event => patch({ launchAtLogin: event.target.checked })}
+                aria-label="启动器启动时请求管理员权限"
+                checked={draft.launchElevated === true}
+                disabled={!windows}
+                onChange={event => patch({ launchElevated: event.target.checked })}
               />
-              <span><strong>随 Windows 登录启动</strong><small>开机后自动把启动器收进托盘，不打开主窗口。</small></span>
+              <span>
+                <strong>启动器启动时请求管理员权限</strong>
+                <small>开启后每次启动启动器都会弹一次 UAC 确认；启动器里的启动/停止整合包等操作都继承这份管理员权限，不会再额外弹窗。关闭则只在需要时弹。这一项跟随底部「保存设置」，下次启动启动器时生效。</small>
+              </span>
             </label>
+            {!windows && <p className="settings-field-note">仅 Windows 支持：当前系统无法在启动时请求管理员权限，这一项已禁用。</p>}
             <label className="check-field">
               <input
                 type="checkbox"
@@ -505,7 +570,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
 
           {saveError && <div className="error-banner" role="alert">{saveError}</div>}
           <div className="settings-home-actions">
-            <span className="settings-home-actions-hint">{saved ? '已保存。' : '改动只在点「保存设置」后写入磁盘。'}</span>
+            <span className="settings-home-actions-hint">{saved ? '已保存。' : '除「随 Windows 登录启动」是勾选即写盘，其余改动只在点「保存设置」后写入磁盘。'}</span>
             <button type="button" className="secondary-button" disabled={busy} onClick={resetDraft}>取消更改</button>
             <button type="button" className="primary-command" disabled={busy} onClick={() => void save()}>
               {busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存设置
