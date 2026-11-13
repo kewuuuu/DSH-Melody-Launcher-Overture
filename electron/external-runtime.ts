@@ -10,6 +10,7 @@ import type { ExternalRuntime } from '../src/types'
 
 export interface ProcessSnapshot {
   pid: number
+  parentPid?: number | null
   name?: string | null
   commandLine?: string | null
   startedAt?: string | null
@@ -69,7 +70,7 @@ foreach ($row in (Get-CimInstance Win32_Process | Where-Object { $_.Name -match 
   if ($handle -ne [IntPtr]::Zero) { [void][LauncherOverture.Native]::CloseHandle($handle) }
   $started = $null
   if ($row.CreationDate) { $started = ([datetime]$row.CreationDate).ToUniversalTime().ToString('o') }
-  $rows += [pscustomobject]@{ pid = [int]$row.ProcessId; name = $row.Name; commandLine = $row.CommandLine; startedAt = $started; elevated = [bool]$elevated }
+  $rows += [pscustomobject]@{ pid = [int]$row.ProcessId; parentPid = [int]$row.ParentProcessId; name = $row.Name; commandLine = $row.CommandLine; startedAt = $started; elevated = [bool]$elevated }
 }
 if ($rows.Count -eq 0) { [Console]::Out.Write('[]') } else { [Console]::Out.Write((ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress)) }`
 
@@ -216,7 +217,9 @@ function parseSnapshot(text: string): ProcessSnapshot[] {
     try {
       const parsed = JSON.parse(attempt) as unknown
       const list = Array.isArray(parsed) ? parsed : [parsed]
-      return list.filter((row): row is ProcessSnapshot => !!row && typeof row === 'object' && Number.isInteger((row as ProcessSnapshot).pid))
+      return list
+        .filter((row): row is ProcessSnapshot => !!row && typeof row === 'object' && Number.isInteger((row as ProcessSnapshot).pid))
+        .map(row => ({ ...row, parentPid: parentOf(row) }))
     } catch {
       continue
     }
@@ -249,6 +252,43 @@ function runtimeScore(row: ProcessSnapshot): number {
   return score
 }
 
+/** 父进程 id 缺失、非数字或为 0（孤儿）都按「没有父进程」处理：快照是外部输入的 JSON，不能信。 */
+function parentOf(row: ProcessSnapshot): number | null {
+  const value = row.parentPid
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null
+}
+
+/**
+ * 种子 pid 加上快照里以它们为祖先的全部后代：启动器托管的是 cmd 外壳，真正的 DSH 是它拉起的 node，
+ * 只排掉种子 pid 仍然会把子孙认成外部实例。
+ */
+export function expandExcludedPids(rows: ProcessSnapshot[], seeds: Iterable<number>): Set<number> {
+  const children = new Map<number, number[]>()
+  for (const row of rows) {
+    const parent = parentOf(row)
+    if (parent === null) continue
+    const bucket = children.get(parent)
+    if (bucket) bucket.push(row.pid)
+    else children.set(parent, [row.pid])
+  }
+  const excluded = new Set<number>()
+  const queue: number[] = []
+  for (const seed of seeds) {
+    if (!Number.isInteger(seed) || excluded.has(seed)) continue
+    excluded.add(seed)
+    queue.push(seed)
+  }
+  // 广度优先；pid 被复用时快照里的父子关系可能成环，靠 excluded 兜底不会死循环。
+  for (let index = 0; index < queue.length; index += 1) {
+    for (const child of children.get(queue[index]) ?? []) {
+      if (excluded.has(child)) continue
+      excluded.add(child)
+      queue.push(child)
+    }
+  }
+  return excluded
+}
+
 function pickForProfile(rows: ProcessSnapshot[], profileName: string, exclude: Set<number>): ProcessSnapshot | null {
   const wanted = profileName.toLowerCase()
   const candidates = rows
@@ -269,8 +309,9 @@ function pickForProfile(rows: ProcessSnapshot[], profileName: string, exclude: S
 export async function scanExternalRuntimes(input: ScanExternalRuntimesInput): Promise<Map<string, ExternalRuntime>> {
   const packs = (input?.packs ?? []).filter(pack => !!pack && typeof pack.id === 'string' && !!pack.id && typeof pack.profileName === 'string' && !!pack.profileName)
   if (!packs.length) return new Map()
-  const exclude = new Set<number>([...(input.excludePids ?? []).filter(pid => Number.isInteger(pid)), process.pid])
-  const key = JSON.stringify({ packs: packs.map(pack => [pack.id, pack.profileName]), exclude: [...exclude].sort((a, b) => a - b) })
+  // 缓存 key 只认种子 pid：后代是从同一份快照推出来的，同一组种子必然排除同一批 pid。
+  const seeds = new Set<number>([...(input.excludePids ?? []).filter(pid => Number.isInteger(pid)), process.pid])
+  const key = JSON.stringify({ packs: packs.map(pack => [pack.id, pack.profileName]), exclude: [...seeds].sort((a, b) => a - b) })
   const hit = cache.get(key)
   if (hit && deps.now() - hit.at < CACHE_TTL_MS) return new Map(hit.result)
   const timeoutMs = Number.isFinite(input.timeoutMs) && (input.timeoutMs as number) > 0 ? Math.min(input.timeoutMs as number, 60_000) : DEFAULT_SCAN_TIMEOUT_MS
@@ -280,6 +321,7 @@ export async function scanExternalRuntimes(input: ScanExternalRuntimesInput): Pr
   } catch {
     rows = []
   }
+  const exclude = expandExcludedPids(rows, seeds)
   const result = new Map<string, ExternalRuntime>()
   for (const pack of packs) {
     const row = pickForProfile(rows, pack.profileName as string, exclude)

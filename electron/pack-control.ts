@@ -119,6 +119,8 @@ export function createPackControl(options: PackControlOptions) {
     return [...controllers.values()].map(c => c.state().pid).filter((pid): pid is number => typeof pid === 'number')
   }
   async function findExternal(r: PackRecord, profileName: string): Promise<ExternalRuntime | null> {
+    // 控制器已经在托管这个包：它拉起的进程树不是「外部实例」，扫描误判会把停止按钮指向别人的进程。
+    if (controllers.get(r.id)?.isRunning()) return null
     const found = await scanExternal({ packs: [{ id: r.id, profileName }], excludePids: hostedPids() })
     const target = found.get(r.id) ?? null
     if (!target) return null
@@ -253,13 +255,15 @@ export function createPackControl(options: PackControlOptions) {
       // 一次扫描覆盖全部包：列表页会被频繁拉取，批处理才不至于每次都起一次 PowerShell。
       const externals = await scanExternal({ packs: items.map(item => ({ id: item.record.id, profileName: item.profileName })), excludePids: hostedPids() })
       return { packs: await Promise.all(items.map(async item => {
-        const target = externals.get(item.record.id) ?? null
+        const runtime = runtimeStateOf(item.record.id)
+        // 托管中的包不存在「外部实例」语义，第二道闸：即便扫描漏了，也不能同时显示「运行中」和「外部运行中」。
+        const target = runtime.running ? null : (externals.get(item.record.id) ?? null)
         const session = target ? await readElevatedSession(elevatedRoot, item.record.id).catch(() => null) : null
         return {
           ...toPackStatus(item.record, base.activePackId),
           homePath: item.record.homePath,
           config: item.config,
-          runtime: runtimeStateOf(item.record.id),
+          runtime,
           externalRuntime: target ? { ...target, elevatedSession: session ? elevatedSessionPath(elevatedRoot, item.record.id) : null } : null,
         }
       })) }
