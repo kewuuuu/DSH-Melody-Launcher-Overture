@@ -32,6 +32,7 @@ import { readDeepSeekApiKey } from './credentials'
 import { resolveAgentApiForModel, resolveCopilotAgentApi } from './copilot-api'
 import { findInstalledDsh } from './dsh-install'
 import { compareVersions } from './dsh-release'
+import { waitForBootMarker, writeBootMarker } from './elevation-handshake'
 import { buildPluginCommandArgs, createInstaller, syncProfilePnpmConfig, validateLocalPluginDirectory, type Installer } from './installer'
 import { registerIpcHandlers } from './ipc'
 import { createLauncherUpdater, type LauncherUpdater } from './launcher-update'
@@ -39,6 +40,7 @@ import { loginItemSettings, syncLaunchAtLogin } from './login-item'
 import { isProcessElevated } from './process-elevation'
 import {
   buildElevatedRelaunchArgs,
+  isElevatedRelaunchFlag,
   orchestrateElevationRelaunch,
   relaunchElevated,
   shouldRelaunchElevated,
@@ -1198,6 +1200,13 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => showMainWindow())
+  // 提权后的这次先留痕：父进程正握着 20 秒预算等这个标记，看到就退出。
+  // 写失败只 warn：父进程会按超时收尾，两个实例不会同时活着（锁已经保证了这点）。
+  if (process.argv.slice(1).some(argument => isElevatedRelaunchFlag(argument))) {
+    void writeBootMarker(app.getPath('userData')).catch(error => {
+      console.warn('[elevation-handshake] 启动标记写失败，父进程将按超时处理。', error)
+    })
+  }
 }
 
 /**
@@ -1248,15 +1257,23 @@ app.whenReady().then(async () => {
       elevated: await isProcessElevated(),
     })
   ) {
+    // 标记的来源时间要早于 spawn：早于它的启动标记是上一次启动留下的，不能拿来交班。
+    const relaunchSince = Date.now()
     const outcome = await orchestrateElevationRelaunch({
       releaseLock: () => {
         app.releaseSingleInstanceLock()
       },
       acquireLock: () => app.requestSingleInstanceLock(),
-      relaunch: () => relaunchElevated({
-        executablePath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
-        args: buildElevatedRelaunchArgs({ argv: process.argv.slice(1), dataDir: app.getPath('userData') }),
-      }),
+      relaunch: async () => {
+        const spawned = await relaunchElevated({
+          executablePath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
+          args: buildElevatedRelaunchArgs({ argv: process.argv.slice(1), dataDir: app.getPath('userData') }),
+        })
+        if (!spawned) return false
+        // Start-Process 成功只说明系统接手了启动：提权进程仍可能起不来（被杀、缺依赖）。
+        // 等到它写下启动标记再交班，否则父进程一退就成了「点了以后什么都没开」。
+        return await waitForBootMarker(app.getPath('userData'), { since: relaunchSince })
+      },
     })
     // 只有 continued 才继续启动：relaunched = 新实例已接手，handed-over = 锁已被别的实例拿走。
     if (outcome !== 'continued') {
