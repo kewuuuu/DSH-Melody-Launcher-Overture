@@ -306,3 +306,17 @@
 - 因此删掉 `.github/workflows/signpath.yml`（它的 GitHub App 走 Actions runner，没额度永远起不来），`docs/signpath.md` 顶部写明当前阻塞与两条可行路径；`tests/temp-unpack-sweeper.test.ts` 改为断言这个 workflow 不存在。
 - 仓库里上游原有的 `ci.yml` / `build.yml` / `release.yml` / `official-pack.yml` 未动：它们仍会在 push/tag 时触发并因账单锁定失败（不消耗额度，但会显示红叉）。是否删掉或改成只手动触发，等用户定。
 
+## 只发安装版、workflow 全删、更新按钮与外部运行中（2026-11-15）
+
+- 用户定调三条：①仓库里的 GitHub Actions workflow 全删；②版本号相同时不该还能点「下载更新」；③以后不再编译便携版，只提供安装版安装程序。
+- workflow 实有 5 个而不是 4 个：`ci.yml` / `build.yml` / `official-pack.yml` / `release.yml` / `sign.yml`（最后一个是上一轮加的签名流水线），全部 `git rm`，`.github/workflows/` 目录消失；`.github/` 其余（ISSUE_TEMPLATE、PULL_REQUEST_TEMPLATE.md、dependabot.yml）保留。README 的 Build 徽章一并删掉，Release 徽章改指本 fork。
+- 「同版本号还能点下载更新」的真因在前端：`src/App.tsx` 的设置页入口无条件 `setUpdateOpen(true)`，而 `src/components/dialogs/UpdateDialog.tsx` 的 footer 只有 ready/downloading/failed 三个分支，`up-to-date` 落进最后 else 渲染出「下载更新」。后端判定本来是对的（`electron/launcher-update.ts` 里 `compareVersions(local, remote) > 0` 才算有更新，相等时返回 up-to-date 且 pending 为 null）。修法：加 `upToDate` 分支——标题改「启动器已是最新版本」，footer 只留「知道了」，并新增 `src/components/dialogs/UpdateDialog.test.tsx` 两例锁住两个分支。
+- 「自启拉起后仍显示外部运行中」的原理：便携壳被强杀或换了实例后，上一轮拉起的 DSH 没人回收，它变成孤儿（父 cmd 已消失、没有祖先链），命令行里带着 `--profile pack-test`，于是被 `electron/external-runtime.ts` 的 `pickForProfile` 认成「外部运行中」。同一时刻自启会调 `pack.start`，而 `electron/pack-control.ts` 对未托管实例是拒绝启动的（「这个整合包已经有一份没被启动器托管的 DSH 在运行…先停止它再启动。」）；旧实现用 `Promise.allSettled` 吞掉异常，界面上就只剩那行「外部运行中 · PID … · :3080」，看不到失败原因。修法：`autoStart()` 逐包 try/catch，失败写进 `restarts` 的 `lastError`（前缀「开机自启失败：」）并 `console.warn`，列表行会以 role=status 显示原文；新增 `tests/pack-control.test.ts` 一例（注入外部实例 + autoStart，断言 running=false、externalRuntime.pid=4242、lastError 含「开机自启失败」与 PID，且另一个包不受影响）。
+- 只发安装版：`package.json` 的 `build.win.target` 由 `["portable","nsis"]` 改成 `["nsis"]`（`build.portable` 段与 `unpackDirName: true` 保留，`tests/portable-unpack.test.ts` 仍守着它），`package:win` 改为 `electron-builder --win nsis`，另留 `package:win:portable` 备用。`scripts/release.mjs` 跟着改：`resolveOutputDir` 先认 `…-Setup-<version>.exe`（回退旧轮次的 `…-Portable-<version>.exe`），产物表里便携版标记「已停发」且非必需，构建命令只剩「安装包 → 卸载器」。`tests/release-script.test.ts` 改 Setup 命名 fixture 并补一条旧轮次识别用例。
+- 顺手修掉一个用户还没报的自更新缺陷（我点「检查更新」点出来的）：v1.1.4 只发了 Setup + 卸载器，而 `fetchLatestRelease` 里 `resolvePortableAsset` 缺 portable 资产时直接抛「新版本没有可下载的便携版安装包。」，整个检查因此失败——安装版连自己的 Setup 都拿不到。改成 `resolvePortableAsset` 返回 `ResolvedLauncherAsset | null`（只保留「缺版本号」抛错），`fetchLatestRelease` 同时取 setup，两者都没有才报「新版本没有可下载的安装包。」；`PendingUpdate.asset` 可空，下载与 apply 按 `detectInstallMode` 选 setup/portable 并各自给中文缺包提示。
+- 发版（本机构建，GitHub API 上传，不用 Actions）：v1.1.4 的 Setup 104,155,649 字节 `FBE3D82FC97D1051CD64563B6C547E1A10E84F417BAF95DB17DAE844B4D0B683`、卸载器 139,776 字节 `CCAF99D58F8EA057CFBFD31E8BB8AFF7098FC01B8C80E766DCBD9476E86C8BC5`（Release id 446085981）；v1.1.5 的 Setup 104,155,628 字节 `19BEA901F598CE4783EDE428FC4BE74D0C43BECC840B38CCF7654BF7F49964F8`、卸载器 139,776 字节 `B06E8882988E2E16E1AC41DBA7B345CA35002A617D14F8A823F035D3403B92D0`（Release id 446089540）。两个 tag 都已推 fork，`/releases/latest` 复核 v1.1.5。
+- 安装版烟测（schtasks 脱离工具沙箱）：`/S /D=D:\engine\DSH\test\kewu-b18-smoke\app` 装出 85 个文件、FileVersion 1.1.4；运行后数据落 `%APPDATA%\DSH-launcher-KEWU`（54 文件），CLI `storage info` 报 `source:"install"`；静默卸载后程序目录消失、数据保留。`--ui-shots` 产出 21 张截图，7 个 tab × 3 个滚动位置。
+- 回归：`npx tsc --noEmit` 0 error；`npm run build` 通过；`npx vitest run` **148 文件通过 / 9 跳过，1357 passed / 11 skipped（1368）**。
+- 未验证/待办：安装版自更新的完整升级（1.1.4 点「下载更新」→ apply → FileVersion 变 1.1.5）当时正在下载（GitHub 直连约 40 KB/s，99.3 MB 需要半小时级），尚未跑完；真实 UAC 成功交班、登录自启实际开机触发仍未实测。
+
+
