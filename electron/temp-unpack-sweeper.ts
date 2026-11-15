@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-/** 便携壳（NSIS）每次启动都会在 %TEMP% 里建一个 nsXXXX.tmp 目录并解出一整份程序。 */
+/** NSIS 自解压外壳（Setup 安装包，以及已停发的便携版外壳）会在 %TEMP% 里建 nsXXXX.tmp 并解出一整份程序。 */
 export const NSIS_TEMP_DIR_PATTERN = /^ns[a-z0-9]+\.tmp$/i
 /** 只有明显过期的目录才清：进程崩掉时没人替它删，正常退出时壳自己会删。 */
 export const DEFAULT_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
@@ -32,8 +32,9 @@ function inUseBy(target: string, imagePaths: string[]): boolean {
 }
 
 /**
- * 删掉 %TEMP% 里过期的便携解压目录。有进程正从里面运行、或者目录还年轻，都原样留着：
- * 正常退出时 NSIS 自己会删，这里接的是崩溃、蓝图强杀留下的残渣。
+ * 删掉 %TEMP% 里过期的 NSIS 解压残渣。安装版本体不再自解压，这里捡的是两类别人留下的目录：
+ * ① 从旧便携版升级上来的机器上还睡着的 ns*.tmp；② Setup / 更新安装包被强杀时没删干净的 ns*.tmp。
+ * 有进程正从里面运行、或者目录还年轻（默认 7 天）就原样留着：宁可漏收，也不删正在跑的实例。
  */
 export async function sweepTempUnpackDirs(options: SweepTempUnpackDirsOptions): Promise<SweepTempUnpackDirsResult> {
   const {

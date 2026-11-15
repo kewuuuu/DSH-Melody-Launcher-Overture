@@ -36,7 +36,6 @@
     "uninstall:script": "vite-node scripts/build-uninstall-script.mts",
     "package:win": "npm run build && electron-builder --win nsis",
     "package:win:setup": "electron-builder --win nsis",
-    "package:win:portable": "npm run build && electron-builder --win portable",
     "release": "node scripts/release.mjs"
   },
   "dependencies": {
@@ -98,10 +97,6 @@
         "nsis"
       ],
       "artifactName": "DSH-launcher-KEWU-Portable-${version}.${ext}"
-    },
-    "portable": {
-      "artifactName": "DSH-launcher-KEWU-Portable-${version}.${ext}",
-      "unpackDirName": true
     },
     "nsis": {
       "artifactName": "DSH-launcher-KEWU-Setup-${version}.${ext}",

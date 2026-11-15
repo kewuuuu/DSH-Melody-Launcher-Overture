@@ -1,7 +1,8 @@
 // 启动器数据目录的解析与切换。
 //
-// 打包后默认落在 EXE 旁边的 launcher-data：同一台机器上放在不同文件夹的多份启动器
-// 因此各自拥有独立的 userData，单实例锁与 packs 数据都不再互相干扰。
+// 只发布安装版（NSIS Setup）：默认数据目录压在 %APPDATA%\DSH-launcher-KEWU，升级与卸载
+// 都不会连坐程序目录。EXE 旁边的 launcher-storage.json 仍是「切到自定义数据目录」的唯一持久
+// 手段，指针文件跟着 EXE 走。
 // 这个模块刻意不依赖 electron —— 解析规则要能在 node 环境里直接测，主进程只负责把
 // app.getPath / process.argv 这些事实传进来，再执行 app.setPath。
 
@@ -32,7 +33,10 @@ export const INSTALLED_DATA_DIRNAME = 'DSH-launcher-KEWU'
 export interface StorageResolution {
   dataDir: string
   source: StorageSource
-  /** EXE 所在目录（打包态）；开发态为 null。 */
+  /**
+   * EXE 所在目录（打包态）；开发态为 null。字段名沿用便携版时期的 src/types.ts，
+   * 安装版里它就是程序目录（指针文件也放在这里）。
+   */
   portableDir: string | null
   /** 指向 <exeDir>/launcher-storage.json；开发态为 null。 */
   pointerFile: string | null
@@ -44,6 +48,7 @@ export interface ResolveStorageOptions {
   isPackaged: boolean
   execPath: string
   argv: string[]
+  /** 保留字段：调用方仍会传，解析只认命令行与指针文件，不再读环境变量。 */
   env: Record<string, string | undefined>
   /** app.getPath('appData')：开发态默认位置与旧数据探测都从这里起算。 */
   appDataPath: string
@@ -82,17 +87,9 @@ function joinWarnings(warnings: string[]): string | null {
   return warnings.length === 0 ? null : warnings.join(' ')
 }
 
-/** EXE 所在目录：portable 运行时由 electron-builder 注入 PORTABLE_EXECUTABLE_DIR。 */
-function exeDirectory(options: { execPath: string; env: Record<string, string | undefined> }): string {
-  const portable = options.env.PORTABLE_EXECUTABLE_DIR?.trim()
-  return portable ? portable : path.dirname(options.execPath)
-}
-
-/** EXE 决定的默认数据目录：portable 落在 EXE 旁，安装版落在 %APPDATA%，开发态保持老位置。 */
-function defaultLocation(options: ResolveStorageOptions): { dataDir: string; source: 'portable' | 'install' | 'development' } {
+/** EXE 决定的默认数据目录：安装版落在 %APPDATA%，开发态保持老位置。 */
+function defaultLocation(options: ResolveStorageOptions): { dataDir: string; source: 'install' | 'development' } {
   if (!options.isPackaged) return { dataDir: path.join(options.appDataPath, LEGACY_DATA_DIRNAME), source: 'development' }
-  const portable = options.env.PORTABLE_EXECUTABLE_DIR?.trim()
-  if (portable) return { dataDir: path.join(portable, STORAGE_DATA_DIRNAME), source: 'portable' }
   return { dataDir: path.join(options.appDataPath, INSTALLED_DATA_DIRNAME), source: 'install' }
 }
 
@@ -142,7 +139,7 @@ export function defaultDialogDirectory(input: unknown): string | undefined {
 export function resolveStorage(options: ResolveStorageOptions): StorageResolution {
   const existsSync = options.existsSync ?? defaultExistsSync
   const readFileSync = options.readFileSync ?? ((target: string) => defaultReadFileSync(target, 'utf8'))
-  const exeDir = exeDirectory(options)
+  const exeDir = path.dirname(options.execPath)
   const portableDir = options.isPackaged ? exeDir : null
   const pointerFile = options.isPackaged ? path.join(exeDir, STORAGE_POINTER_FILENAME) : null
   const warnings: string[] = []
@@ -173,7 +170,7 @@ export function resolveStorage(options: ResolveStorageOptions): StorageResolutio
     }
   }
 
-  // 3/4/5. 都没命中就由 EXE 决定：portable 与安装版落在 EXE 目录，开发态保持 %APPDATA%。
+  // 3/4/5. 都没命中就落到默认位置：安装版在 %APPDATA%\DSH-launcher-KEWU，开发态保持 %APPDATA%\dsh-launcher。
   const fallback = defaultLocation(options)
   return { dataDir: fallback.dataDir, source: fallback.source, portableDir, pointerFile, warning: joinWarnings(warnings) }
 }

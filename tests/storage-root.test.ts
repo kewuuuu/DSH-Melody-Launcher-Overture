@@ -34,14 +34,14 @@ interface Fixture {
   pointerFile: string
 }
 
-function fixture(overrides: Partial<ResolveStorageOptions> = {}, portable = false): Fixture {
+function fixture(overrides: Partial<ResolveStorageOptions> = {}): Fixture {
   const exeDir = temporary()
   const appDataPath = temporary()
   const options: ResolveStorageOptions = {
     isPackaged: true,
     execPath: path.join(exeDir, 'dsh-launcher.exe'),
     argv: [],
-    env: portable ? { PORTABLE_EXECUTABLE_DIR: exeDir } : {},
+    env: {},
     appDataPath,
     ...overrides,
   }
@@ -49,17 +49,7 @@ function fixture(overrides: Partial<ResolveStorageOptions> = {}, portable = fals
 }
 
 describe('resolveStorage', () => {
-  it('打包且 portable 时把数据目录放在 EXE 旁的 launcher-data', () => {
-    const { options, exeDir, pointerFile } = fixture({}, true)
-    const resolution = resolveStorage(options)
-    expect(resolution.source).toBe('portable')
-    expect(resolution.dataDir).toBe(path.join(exeDir, 'launcher-data'))
-    expect(resolution.portableDir).toBe(exeDir)
-    expect(resolution.pointerFile).toBe(pointerFile)
-    expect(resolution.warning).toBeNull()
-  })
-
-  it('打包但非 portable（安装版）落在 %APPDATA% 下，不再压进程序目录', () => {
+  it('打包后落在 %APPDATA% 下的 DSH-launcher-KEWU，不压进程序目录', () => {
     const { options, exeDir, appDataPath } = fixture()
     const resolution = resolveStorage(options)
     expect(resolution.source).toBe('install')
@@ -67,9 +57,9 @@ describe('resolveStorage', () => {
     expect(resolution.portableDir).toBe(exeDir)
   })
 
-  it('launcher-storage.json 覆盖 portable 默认值', () => {
+  it('launcher-storage.json 覆盖安装版默认值', () => {
     const target = temporary()
-    const { options, pointerFile } = fixture({}, true)
+    const { options, pointerFile } = fixture()
     writeFileSync(pointerFile, JSON.stringify({ dataDir: target }))
     const resolution = resolveStorage(options)
     expect(resolution.source).toBe('pointer')
@@ -80,7 +70,7 @@ describe('resolveStorage', () => {
   it('--data-dir 覆盖 launcher-storage.json', () => {
     const pointerTarget = temporary()
     const argumentTarget = temporary()
-    const { options, pointerFile } = fixture({}, true)
+    const { options, pointerFile } = fixture()
     writeFileSync(pointerFile, JSON.stringify({ dataDir: pointerTarget }))
     const resolution = resolveStorage({ ...options, argv: ['--data-dir=' + argumentTarget] })
     expect(resolution.source).toBe('argument')
@@ -96,10 +86,10 @@ describe('resolveStorage', () => {
   })
 
   it('非绝对路径的 --data-dir 被忽略并留下告警', () => {
-    const { options, exeDir } = fixture({}, true)
+    const { options, appDataPath } = fixture()
     const resolution = resolveStorage({ ...options, argv: ['--data-dir', 'relative/data'] })
-    expect(resolution.source).toBe('portable')
-    expect(resolution.dataDir).toBe(path.join(exeDir, 'launcher-data'))
+    expect(resolution.source).toBe('install')
+    expect(resolution.dataDir).toBe(path.join(appDataPath, 'DSH-launcher-KEWU'))
     expect(resolution.warning).toContain('--data-dir')
     expect(resolution.warning).toContain('不是绝对路径')
   })
@@ -110,19 +100,19 @@ describe('resolveStorage', () => {
     ['{"dataDir":"relative/dir"}', '不是绝对路径'],
     ['{"other":1}', '缺少 dataDir 字段'],
   ])('损坏的 launcher-storage.json 被忽略并留下告警：%s', (text, expected) => {
-    const { options, exeDir, pointerFile } = fixture({}, true)
+    const { options, appDataPath, pointerFile } = fixture()
     writeFileSync(pointerFile, text)
     const resolution = resolveStorage(options)
-    expect(resolution.source).toBe('portable')
-    expect(resolution.dataDir).toBe(path.join(exeDir, 'launcher-data'))
+    expect(resolution.source).toBe('install')
+    expect(resolution.dataDir).toBe(path.join(appDataPath, 'DSH-launcher-KEWU'))
     expect(resolution.warning).toContain(expected)
     expect(resolution.warning).toContain('storage reset')
   })
 
   it('开发态用 <appData>/dsh-launcher，不提供指针文件也不读 EXE 旁的配置', () => {
-    const { options, exeDir, appDataPath } = fixture({ isPackaged: false }, true)
+    const { options, exeDir, appDataPath } = fixture({ isPackaged: false })
     writeFileSync(path.join(exeDir, STORAGE_POINTER_FILENAME), JSON.stringify({ dataDir: temporary() }))
-    const resolution = resolveStorage({ ...options, env: {}, argv: [] })
+    const resolution = resolveStorage({ ...options, argv: [] })
     expect(resolution.source).toBe('development')
     expect(resolution.dataDir).toBe(path.join(appDataPath, 'dsh-launcher'))
     expect(resolution.portableDir).toBeNull()
@@ -241,7 +231,7 @@ describe('describeLegacyData', () => {
 
 describe('createStorageController', () => {
   it('切换数据目录会写指针文件并把 restartRequired 置为 true', () => {
-    const { options, pointerFile, appDataPath } = fixture({}, true)
+    const { options, pointerFile, appDataPath } = fixture()
     const controller = createStorageController({ resolution: resolveStorage(options), appDataPath })
     const target = temporary()
     expect(controller.get().restartRequired).toBe(false)
@@ -254,13 +244,13 @@ describe('createStorageController', () => {
   })
 
   it('reset 删掉指针文件并保留本次进程正在用的目录', () => {
-    const { options, pointerFile, appDataPath } = fixture({}, true)
+    const { options, pointerFile, appDataPath } = fixture()
     const controller = createStorageController({ resolution: resolveStorage(options), appDataPath })
     const target = temporary()
     controller.set(target)
     const after = controller.reset()
     expect(after.restartRequired).toBe(true)
-    // 语义：dataDir 仍是本次进程正在用的目录，重启后才回到 EXE 旁的默认位置。
+    // 语义：dataDir 仍是本次进程正在用的目录，重启后才回到 %APPDATA% 下的默认位置。
     expect(after.dataDir).toBe(target)
     expect(existsSync(pointerFile)).toBe(false)
   })
@@ -274,7 +264,7 @@ describe('createStorageController', () => {
   })
 
   it('状态里带上旧版目录的探测结果和解析告警', () => {
-    const { options, appDataPath } = fixture({}, true)
+    const { options, appDataPath } = fixture()
     mkdirSync(path.join(appDataPath, 'dsh-launcher'), { recursive: true })
     writeFileSync(path.join(appDataPath, 'dsh-launcher', 'packs.json'), '{}')
     const controller = createStorageController({ resolution: resolveStorage({ ...options, argv: ['--data-dir', 'relative/data'] }), appDataPath })

@@ -62,9 +62,9 @@ node bin/launcher-control.cjs pack stop <包ID>
 node bin/launcher-control.cjs pack config set <包ID> --port-mode fixed --port 3081
 ```
 
-开发启动使用 `npm ci`、`npm run dev`，或双击 `START-DSH-LAUNCHER.cmd`；Windows 便携版使用 `npm run package:win` 构建。包启动前会安装默认 `launcher-control` skill（保留用户自建同名 skill）。完整命令、配置字段和连接方式见 [CLI 文档](docs/launcher-cli.md)。CLI 的包导入／导出尚未开放，继续使用已有界面。
+开发启动使用 `npm ci`、`npm run dev`，或双击 `START-DSH-LAUNCHER.cmd`；Windows 安装包使用 `npm run package:win` 构建。包启动前会安装默认 `launcher-control` skill（保留用户自建同名 skill）。完整命令、配置字段和连接方式见 [CLI 文档](docs/launcher-cli.md)。CLI 的包导入／导出尚未开放，继续使用已有界面。
 
-共享引用可通过 CLI 的 `pack.resources.link` 管理；共享项以来源标签和不同底色显示。源资源仍被引用时，禁止移除源或停用目录型源技能，先解除引用。管理员启动可能弹出 Windows UAC；实际 UAC、Windows 登录自启与最终便携 EXE 需要桌面实机验收。
+共享引用可通过 CLI 的 `pack.resources.link` 管理；共享项以来源标签和不同底色显示。源资源仍被引用时，禁止移除源或停用目录型源技能，先解除引用。管理员启动可能弹出 Windows UAC；实际 UAC、Windows 登录自启与最终安装包需要桌面实机验收。
 
 ## v1.0.4 更新亮点
 
@@ -164,7 +164,7 @@ node bin/launcher-control.cjs pack config set <包ID> --port-mode fixed --port 3
 
 ### 1. 下载
 
-前往 [**Releases**](https://github.com/kewuuuu/DSH-Melody-Launcher-Overture/releases) 下载 `DSH-launcher-KEWU-Setup-*.exe` 安装包，双击安装即可；启动器数据与整合包放在 `%APPDATA%\DSH-launcher-KEWU`，升级或卸载都不会动它。
+前往 [**Releases**](https://github.com/kewuuuu/DSH-Melody-Launcher-Overture/releases) 下载 `DSH-launcher-KEWU-Setup-*.exe` 安装包，双击安装即可；启动器数据与整合包放在 `%APPDATA%\DSH-launcher-KEWU`，升级或卸载都不会动它。卸载走安装包自带的那一个卸载器（安装目录里的 `Uninstall DSH-launcher-KEWU.exe`，或 Windows「设置 → 应用」里的条目），默认只删程序，数据留着。
 
 > [!IMPORTANT]
 > 安装包目前**未使用商业代码签名证书**。首次运行时 Windows SmartScreen 可能提示来源未知 —— 请确认文件确实来自本仓库 Release 页面后，选择「更多信息 → 仍要运行」。

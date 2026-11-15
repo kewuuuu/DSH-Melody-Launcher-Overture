@@ -15,9 +15,6 @@ import { LEGACY_DATA_DIRNAME, STORAGE_DATA_DIRNAME, STORAGE_POINTER_FILENAME } f
 export const UNINSTALL_LOGIN_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
 export const UNINSTALL_LOGIN_ITEM_NAME = 'electron.app.DSH-launcher-KEWU'
 
-/** %TEMP% 里便携版自解压目录的命名（3L 开头）。 */
-export const UNINSTALL_TEMP_RESIDUE_PREFIX = '3l'
-
 /** 单个目录树最多数这么多个条目：旧版数据有几个 GB，量化保留量不值得阻塞主进程。 */
 export const UNINSTALL_TREE_ENTRY_LIMIT = 50_000
 
@@ -40,10 +37,11 @@ export interface UninstallPlanInput {
   legacyDataDir: string
   /** DSH 家目录，通常是 ~/.dsh。 */
   dshHome: string
+  /** %TEMP% 路径。安装版不再扫这里的解压目录，只为「main 与离线脚本共用一份输入」保留。 */
   tempDir: string
   /** 是否连本版数据目录一起删；缺省 true。 */
   deleteData?: boolean
-  /** 正在运行的进程可执行文件路径；用来避开别的启动器实例的解压目录。缺省在 Windows 上问一次 PowerShell。 */
+  /** 保留字段：调用方仍会传，但计划已不读它（不再扫 %TEMP% 里的解压目录）。 */
   processImagePaths?: () => string[]
   existsSync?: (target: string) => boolean
   statTree?: (target: string) => UninstallTreeInfo | null
@@ -260,7 +258,7 @@ export async function collectUninstallTreeSizes(input: UninstallPlanInput): Prom
   const paths = resolveUninstallPaths(input)
 
   // 同步版 measure() 的目标全集：主程序、指针文件、本版数据、旧版数据、DSH 家目录、安装目录、
-  // 安装目录里的每个外来子项、%TEMP% 里每个 3L* 残留。
+  // 安装目录里的每个外来子项。（安装版不再量 %TEMP% 里的解压目录，见 createUninstallPlan。）
   const targets: string[] = [paths.executablePath, paths.dataDir, paths.dshHome]
   if (exists(paths.pointerFile)) targets.push(paths.pointerFile)
   const dataIsLegacy = isSamePath(paths.dataDir, paths.legacyDataDir)
@@ -270,14 +268,6 @@ export async function collectUninstallTreeSizes(input: UninstallPlanInput): Prom
   const { foreign, canRemoveDir } = inspectInstallDir({ paths, dataKept, exists, readDirNames })
   if (canRemoveDir) targets.push(paths.installDir)
   else if (foreign.length > 0) for (const name of foreign) targets.push(path.join(paths.installDir, name))
-
-  if (exists(paths.tempDir)) {
-    for (const name of readDirNames(paths.tempDir)) {
-      if (!name.toLowerCase().startsWith(UNINSTALL_TEMP_RESIDUE_PREFIX)) continue
-      const target = path.join(paths.tempDir, name)
-      if (exists(target)) targets.push(target)
-    }
-  }
 
   const unique = new Map<string, string>()
   for (const target of targets) {
@@ -316,11 +306,10 @@ export function createUninstallPlan(input: UninstallPlanInput): UninstallPlan {
   const exists = input.existsSync ?? defaultExistsSync
   const statTree = input.statTree ?? defaultStatTree
   const readDirNames = input.readDirNames ?? defaultReadDirNames
-  const processImagePaths = input.processImagePaths
   const deleteData = input.deleteData !== false
 
   const paths = resolveUninstallPaths(input)
-  const { executablePath, installDir, dataDir, legacyDataDir, dshHome, tempDir, pointerFile } = paths
+  const { executablePath, installDir, dataDir, legacyDataDir, dshHome, pointerFile } = paths
 
   const items: UninstallItem[] = []
   const warnings: string[] = []
@@ -487,28 +476,9 @@ export function createUninstallPlan(input: UninstallPlanInput): UninstallPlan {
     action: 'delete',
   })
 
-  // %TEMP% 里本版便携版自己解出来的 3L* 目录。
-  if (exists(tempDir)) {
-    const residues = readDirNames(tempDir).filter((name) => name.toLowerCase().startsWith(UNINSTALL_TEMP_RESIDUE_PREFIX))
-    // 有进程正住在目录里（通常是另一个启动器实例）时不能删：删了那个实例随时会崩。
-    const imagePaths = residues.length > 0 ? (processImagePaths ?? defaultProcessImagePaths)() : []
-    for (const name of residues) {
-      const target = path.join(tempDir, name)
-      if (!exists(target)) continue
-      const info = measure(target)
-      const inUse = imagePaths.some((image) => isSamePath(image, target) || isInside(image, target))
-      items.push({
-        id: 'temp-residue-' + name.toLowerCase(),
-        label: '便携版自解压残留',
-        path: target,
-        kind: 'directory',
-        sizeBytes: info.sizeBytes,
-        fileCount: info.fileCount,
-        action: inUse ? 'keep' : 'delete',
-        ...(inUse ? { reason: '有进程正从这个目录运行（可能是另一个启动器实例），按规则保留' } : {}),
-      })
-    }
-  }
+  // 安装版不再把 %TEMP% 里的 3L* 解压目录列进计划：那类目录是自解压外壳（含已停发的便携版）
+  // 自己拆出来的，既不属于本版创建的内容，也可能正被另一个启动器实例占着——列成删除项就等于
+  // 替别的实例拆房子。历史残渣由 temp-unpack-sweeper 按「7 天 + 无进程占用」自己收。
 
   const totals = summarize({ items })
   return {
