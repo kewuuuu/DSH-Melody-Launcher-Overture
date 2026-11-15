@@ -317,6 +317,18 @@
 - 发版（本机构建，GitHub API 上传，不用 Actions）：v1.1.4 的 Setup 104,155,649 字节 `FBE3D82FC97D1051CD64563B6C547E1A10E84F417BAF95DB17DAE844B4D0B683`、卸载器 139,776 字节 `CCAF99D58F8EA057CFBFD31E8BB8AFF7098FC01B8C80E766DCBD9476E86C8BC5`（Release id 446085981）；v1.1.5 的 Setup 104,155,628 字节 `19BEA901F598CE4783EDE428FC4BE74D0C43BECC840B38CCF7654BF7F49964F8`、卸载器 139,776 字节 `B06E8882988E2E16E1AC41DBA7B345CA35002A617D14F8A823F035D3403B92D0`（Release id 446089540）。两个 tag 都已推 fork，`/releases/latest` 复核 v1.1.5。
 - 安装版烟测（schtasks 脱离工具沙箱）：`/S /D=D:\engine\DSH\test\kewu-b18-smoke\app` 装出 85 个文件、FileVersion 1.1.4；运行后数据落 `%APPDATA%\DSH-launcher-KEWU`（54 文件），CLI `storage info` 报 `source:"install"`；静默卸载后程序目录消失、数据保留。`--ui-shots` 产出 21 张截图，7 个 tab × 3 个滚动位置。
 - 回归：`npx tsc --noEmit` 0 error；`npm run build` 通过；`npx vitest run` **148 文件通过 / 9 跳过，1357 passed / 11 skipped（1368）**。
-- 未验证/待办：安装版自更新的完整升级（1.1.4 点「下载更新」→ apply → FileVersion 变 1.1.5）当时正在下载（GitHub 直连约 40 KB/s，99.3 MB 需要半小时级），尚未跑完；真实 UAC 成功交班、登录自启实际开机触发仍未实测。
+- 当时未验证：安装版自更新的完整升级（GitHub 直连约 40 KB/s，99.3 MB 要半小时级，没等它下完）。这一条随后在 1.1.6 那节里跑通了。
+
+## 安装版自更新实机跑通、更新对话框停在旧快照（2026-11-15）
+
+- 把 1.1.5 的 Setup 预先放进 <userData>\launcher-update\（`performDownload` 发现同名同大小文件就直接进 `downloaded`，不重复下载），再用 CDP（`--remote-debugging-port=9334`）驱动真实点击：`检查更新` → `下载更新` → `立即更新并重启`。
+- 顺带撞出第 6 个缺陷：从启动页底部点「检查更新」时，`src/App.tsx` 把这次手动结果存进 `manualUpdate` 并让它 `??` 在 `store.launcherUpdate` 之前渲染，于是对话框永远停在那一次的快照上——下载真的完成了，按钮还是「下载更新」，`apply` 也点不到。修法：对话框的 `onDownload`/`onApply` 先 `setManualUpdate(null)` 再调 store，之后的 'downloading'/'downloaded'/'applying' 一律由 store 驱动。
+- 端到端实测（安装版）：装 1.1.4（含上面修复的测试构建）→ 点检查更新得到「发现启动器新版本 v1.1.5」→ 点下载更新立即变「更新已就绪 / 立即更新并重启」→ 点击后 `applySetupInstaller` 静默拉起 Setup（`/S`）并 `process.exit(0)` → 35 秒后安装目录 `FileVersion` 变 **1.1.5**、旧进程全部退出。这是安装版自更新第一次在真机上走完全程。
+- 因此把对话框修复单独发成 1.1.6：`package.json`/`lockfile` 升 1.1.6，构建 `release/b20`。产物：`DSH-launcher-KEWU-Setup-1.1.6.exe` 104,155,714 字节 `DD6524F76D7660CE9E7DE16A04659F45C39F042A1581E94898361C8A633911F4`；`DSH-launcher-KEWU-Uninstaller-1.1.6.exe` 139,776 字节 `2E3250F46A5CCCBFED870AD6924A656A67C01BE43FA26D52316E6FFC80D35173`。Release id 446098028，两个资产均 HTTP 201，`/releases/latest` 复核 v1.1.6。
+- 1.1.6 安装烟测：`/S /D=D:\engine\DSH\test\kewu-b20-smoke\app` → EXIT=0、`FileVersion=1.1.6`、卸载器就位；静默卸载后程序目录消失、`%APPDATA%\DSH-launcher-KEWU` 数据保留（`deleteAppDataOnUninstall:false` 再次成立）。
+- 回归：`npx tsc --noEmit` 0 error；`npx vitest run` 148 文件通过 / 9 跳过，1357 passed / 11 skipped（1368）。
+- 清理：删掉全部烟测目录（`test\kewu-b18-smoke`、`kewu-b18b-build`、`kewu-b18c-build`、`kewu-b18-verify`、`kewu-b19-build`、`kewu-b20-build`、`kewu-b20-smoke`、遗留的 `kewu-b18-build`）、`%APPDATA%\DSH-launcher-KEWU`、`%TEMP%\ns*.tmp`（剩 0 个）、`schtasks` 任务 `kewu-b19-cdp`/`kewu-b20-install`/`kewu-b20-uninst`、`_cache` 下的 `kewu-b18*`/`kewu-b19*`/`kewu-b20*` 临时脚本（只留 `kewu-opt2-backup`）；`D:\engine\DSH\test` 里只剩不属于本项目的 `pocket-*`。用户正在跑的 1.1.3 便携版实例（数据 `D:\engine\DSH\launcher-data`）、`%APPDATA%\dsh-launcher`、`~/.dsh` 一律未动。
+- 仍未验证：真实 UAC 点「是」后的父子交班（无人值守只能模拟拒绝）、登录自启的实际开机触发、卸载器 GUI 的真人点击与其它 DPI 档位。
+
 
 
