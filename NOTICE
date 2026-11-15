@@ -35,4 +35,4 @@ DSH-launcher-KEWU
   koffi                         MIT
   @xmldom/xmldom                MIT
 
-卸载器（tools/uninstaller）由本分支用 .NET Framework 的 csc 编译，不含第三方运行库。
+卸载程序由安装包（NSIS）自带的卸载器负责，不单独发布 EXE，也不含第三方运行库。

@@ -125,9 +125,11 @@ function printDeliveryTable(version, outputDir, repository) {
     '| --- | --- | --- | --- |',
     ...rows.map(row => `| ${row.label} | \`${row.name}\` | ${row.bytes.toLocaleString('en-US')} | \`${row.sha256}\` |`),
   ]
+  // 只传发布必备的产物：目录里残留的旧卸载器 EXE 不该跟着上 Release。
+  const uploadTargets = rows.filter(row => row.required).map(row => `"${outputDir}/${row.name}"`).join(' ')
   const upload = repository
-    ? `gh release upload ${tag} "${outputDir}"/*.exe --clobber --repo ${repository}`
-    : `gh release upload ${tag} "${outputDir}"/*.exe --clobber`
+    ? `gh release upload ${tag} ${uploadTargets} --clobber --repo ${repository}`
+    : `gh release upload ${tag} ${uploadTargets} --clobber`
   return { table, upload }
 }
 
