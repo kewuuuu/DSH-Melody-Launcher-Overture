@@ -655,18 +655,23 @@ export function useLauncherStore() {
     })
   }, [api, run])
 
+  /**
+   * 保存设置。设置页改完即自动保存，所以这里不占全局忙碌位、也不弹「已保存」：
+   * 状态由设置页自己显示（写盘成功→「已自动保存」，失败→行内错误 + 重试），连着改几个字段不会刷屏。
+   */
   const saveSettings = useCallback(async (next: AppSettings): Promise<boolean> => {
-    const saved = await run(BUSY.settings, async () => {
+    try {
       const stored = await api.saveSettings(next)
       setSettings(stored)
       setDshInstallation(await api.detectDshInstallation())
       setCredentialStatus(await api.getDeepSeekCredentialStatus())
       setCustomApiProviders(await api.listCustomApiProviders())
       await refreshProfile()
-      return stored
-    }, { success: '设置已保存。' })
-    return saved !== undefined
-  }, [api, refreshProfile, run])
+      return true
+    } catch {
+      return false
+    }
+  }, [api, refreshProfile])
 
   const saveApiKey = useCallback(async (apiKey: string): Promise<boolean> => {
     const status = await run(BUSY.credential, () => api.setDeepSeekApiKey(apiKey), {

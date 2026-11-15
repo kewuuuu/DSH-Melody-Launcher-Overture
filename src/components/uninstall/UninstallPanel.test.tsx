@@ -82,6 +82,12 @@ it('挂载时不调用 plan，只给一句说明和「扫描本版内容」入�
   expect(text).toContain('清理与卸载')
   expect(text).toContain('扫描本版内容')
   expect(text).toContain('不会自动开始')
+  // 交付侧只发安装包：文案要说清卸载归安装包内置的卸载程序，主按钮是它的快捷入口。
+  expect(text).toContain('只交付安装包')
+  expect(text).toContain('安装包内置的卸载程序')
+  expect(text).toContain('运行卸载程序')
+  expect(text).not.toContain('立即卸载')
+  expect(text).not.toContain('跟随底部保存设置')
   expect(text).not.toContain('将被删除')
   expect(container.querySelector('.uninstall-row')).toBeNull()
   expect(container.querySelector('.error-banner')).toBeNull()
@@ -170,29 +176,60 @@ it('生成脚本成功后显示脚本路径，并能打开所在文件夹', asyn
   expect(openPath).toHaveBeenCalledWith('C:\\Users\\demo\\Desktop')
 })
 
-it('第一次点击只是展开确认行，不调用 run', async () => {
+it('不用先扫描：点「运行卸载程序」直接调用 run，deleteData 固定 false', async () => {
   const { api, uninstall } = makeApi()
-  const container = await mountAndScan(api)
-  await click(container, '立即卸载（保留数据）')
-  expect(uninstall.run).not.toHaveBeenCalled()
-  expect(container.textContent).toContain('不可恢复')
-})
-
-it('确认后调用 run：删本版数据时 deleteData 为 true，并提示正在退出', async () => {
-  const { api, uninstall } = makeApi()
-  const container = await mountAndScan(api)
-  await click(container, '立即卸载并删除本版数据')
-  expect(uninstall.run).not.toHaveBeenCalled()
-  await click(container, '确认删除')
+  const container = await mount(api)
+  expect(container.textContent).not.toContain('将被删除')
+  await click(container, '运行卸载程序')
+  expect(uninstall.plan).not.toHaveBeenCalled()
   expect(uninstall.run).toHaveBeenCalledTimes(1)
-  expect(uninstall.run).toHaveBeenCalledWith({ deleteData: true })
-  expect(container.textContent).toContain('正在退出，卸载脚本会在后台完成删除')
+  expect(uninstall.run).toHaveBeenCalledWith({ deleteData: false })
+  expect(container.textContent).toContain('正在退出：卸载程序会在后台完成删除，本版数据保留。')
+  // 已经交给卸载程序，主按钮与扫描都不再可点。
+  expect(button(container, '运行卸载程序').disabled).toBe(true)
+  expect(button(container, '扫描本版内容').disabled).toBe(true)
 })
 
-it('保留数据那条的确认行传 deleteData: false', async () => {
+it('扫描之后「运行卸载程序」还是同一个调用，不删本版数据', async () => {
   const { api, uninstall } = makeApi()
   const container = await mountAndScan(api)
-  await click(container, '立即卸载（保留数据）')
-  await click(container, '确认删除')
+  await click(container, '运行卸载程序')
+  expect(uninstall.run).toHaveBeenCalledTimes(1)
   expect(uninstall.run).toHaveBeenCalledWith({ deleteData: false })
+  // 扫描出来的清单还在，用户能看清哪些留下。
+  expect(container.textContent).toContain('将被删除')
+  expect(container.textContent).toContain('DSH 家目录')
+})
+
+it('运行中按钮禁用并显示「正在启动卸载程序…」，连点不会发第二次', async () => {
+  let release: ((value: { started: boolean }) => void) | null = null
+  const { api, uninstall } = makeApi({ run: () => new Promise<{ started: boolean }>(resolve => { release = resolve }) })
+  const container = await mount(api)
+  const runButton = button(container, '运行卸载程序')
+  await act(async () => { runButton.click() })
+  const pending = button(container, '正在启动卸载程序…')
+  expect(pending.disabled).toBe(true)
+  expect(pending.getAttribute('aria-busy')).toBe('true')
+  await act(async () => { pending.click() })
+  expect(uninstall.run).toHaveBeenCalledTimes(1)
+  await act(async () => { release!({ started: true }) })
+  expect(container.textContent).toContain('正在退出')
+})
+
+it('卸载程序没启动起来时给中文错误，且不假装正在退出', async () => {
+  const { api } = makeApi({ run: async () => ({ started: false }) })
+  const container = await mount(api)
+  await click(container, '运行卸载程序')
+  expect(container.querySelector('.error-banner')?.textContent).toContain('卸载程序没有启动，什么也没有删除')
+  expect(container.textContent).not.toContain('正在退出')
+  expect(button(container, '运行卸载程序').disabled).toBe(false)
+})
+
+it('run 抛错时显示主进程给的原因，按钮恢复可点', async () => {
+  const { api } = makeApi({ run: async () => { throw new Error('找不到卸载程序') } })
+  const container = await mount(api)
+  await click(container, '运行卸载程序')
+  expect(container.querySelector('.error-banner')?.textContent).toContain('找不到卸载程序')
+  expect(container.textContent).not.toContain('正在退出')
+  expect(button(container, '运行卸载程序').disabled).toBe(false)
 })

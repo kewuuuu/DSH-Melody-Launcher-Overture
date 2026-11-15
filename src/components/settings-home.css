@@ -28,6 +28,9 @@
 }
 
 .settings-home-actions-hint { margin-right: auto; color: var(--quiet); font-size: 11.5px; }
+/* 自动保存状态：落盘是强调色，失败是危险色，其余（待写、刚进页面）保持安静色。 */
+.settings-home-actions-hint.is-saved { color: var(--accent); }
+.settings-home-actions-hint.is-error { color: var(--danger); }
 
 /* 数字设置：输入框与说明/报错同一列堆叠，报错行内出现，不挤占左侧标签列。 */
 .settings-number-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }

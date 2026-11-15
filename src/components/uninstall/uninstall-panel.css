@@ -1,4 +1,4 @@
-/* 「清理与卸载」区块：删除/保留两组列表 + 三步动作。只用全局变量，跟随亮/暗主题。 */
+/* 「清理与卸载」区块：卸载程序入口 + 删除/保留两组列表。只用全局变量，跟随亮/暗主题。 */
 
 .uninstall-group + .uninstall-group { margin-top: 14px; }
 
@@ -116,24 +116,21 @@
 
 .uninstall-actions button { min-height: 32px; padding: 0 12px; font-size: 12.5px; }
 
-.uninstall-confirm {
+/* 卸载程序入口：交付侧只发安装包，卸载由安装包内置的卸载程序负责，这里是同一个入口的快捷方式。 */
+.uninstall-run {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-top: 12px;
   padding: 10px 12px;
-  border: 1px solid var(--danger);
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--danger-soft);
-  color: var(--danger);
-  font-size: 12px;
+  background: var(--surface-soft);
 }
 
-.uninstall-confirm span { flex: 1 1 220px; line-height: 1.7; }
-.uninstall-confirm strong { font-variant-numeric: tabular-nums; }
-.uninstall-confirm button { min-height: 30px; padding: 0 12px; font-size: 12px; }
-.uninstall-confirm .danger-button { border-color: var(--danger); }
+.uninstall-run button { min-height: 34px; padding: 0 14px; font-size: 12.5px; white-space: nowrap; }
+.uninstall-run-note { flex: 1 1 260px; margin: 0; color: var(--quiet); font-size: 12px; line-height: 1.7; }
 
 .uninstall-script {
   display: flex;

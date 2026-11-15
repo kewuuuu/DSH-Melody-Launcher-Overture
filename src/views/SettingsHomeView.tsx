@@ -1,5 +1,5 @@
-import { Check, Folder, Globe, ImagePlus, Info, LoaderCircle, Palette, RefreshCw, Rocket, RotateCcw, Wrench } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { Check, Folder, Globe, ImagePlus, Info, Palette, RefreshCw, Rocket, RotateCcw, Wrench } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import packageMetadata from '../../package.json'
 import { useLauncherApi } from '../api/client'
 import { ApiLibraryCard } from '../components/ApiLibraryCard'
@@ -25,7 +25,9 @@ import '../components/settings-home.css'
 /**
  * 设置主页（顶栏「设置」）：把原本散在设置弹窗里的东西收成整页。
  * 分区顺序即使用频率：外观 → 启动器 → 存储位置 → API 库 → 备份管理 → 工作区 Skills → 网络 → 关于。
- * 除「随 Windows 登录启动」勾选即写登录项外，只有点「保存设置」才写盘；外观改动会实时预览，离开本页即回到已保存设置。
+ * 改完即自动保存：任何字段一改就排一次写盘，停止输入 SAVE_DEBOUNCE_MS 后整份落盘，连续改多个字段合并成一次；
+ * 底部只剩一行「已自动保存」状态，没有保存/取消按钮；离开本页或卸载时还有未落盘的改动会立刻 flush。
+ * 唯一例外是「随 Windows 登录启动」：勾选即写登录项，这一步不等防抖。
  */
 
 interface Props {
@@ -33,7 +35,7 @@ interface Props {
   busy: boolean
   /** 保存整份设置；返回 false 表示主进程拒绝，草稿保留供修正。 */
   onSave: (settings: AppSettings) => Promise<boolean>
-  /** 实时预览外观；null = 回到已保存设置。 */
+  /** 实时预览外观；null = 回到磁盘上那份设置。 */
   onPreview: (appearance: AppearanceSettings | null) => void
   /** 打开启动器更新弹窗。 */
   onCheckUpdate: () => void
@@ -52,6 +54,32 @@ const UI_THEMES: Array<{ id: UiTheme; label: string }> = [
 const CUSTOM_MIRROR = '__custom__'
 /** 比较镜像地址时忽略首尾空格与结尾斜杠（手敲的常常少一个 / ）。 */
 const normalizeMirror = (value: string): string => value.trim().replace(/\/+$/, '')
+
+/** 自动保存的防抖窗口：停止输入这么久才写盘，连续打字只落一次。 */
+const SAVE_DEBOUNCE_MS = 600
+/** 自动保存失败的统一文案：草稿还在，改内容或点「重试保存」再来一次。 */
+const SAVE_ERROR_TEXT = '自动保存失败，改动还留在这一页没有写盘；可以点「重试保存」再存一次。'
+
+/** 参数那一行文本与整份设置之间的唯一口径：空白切分、丢掉空串。 */
+const argsToArray = (text: string): string[] => text.trim().split(/\s+/).filter(Boolean)
+
+/** 设置的稳定指纹（字段顺序无关）：用来分辨 prop 变化是「刚写盘那份的回声」还是别处真的改了设置。 */
+function settingsSignature(value: AppSettings): string {
+  return JSON.stringify(value, (_key, item: unknown) => (item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)))
+    : item))
+}
+
+/** 「已自动保存」的时间：一分钟内说「刚刚」，更早的给时钟。 */
+function savedAtText(at: number, now: number): string {
+  if (now - at < 60_000) return '刚刚'
+  const date = new Date(at)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+/** 自动保存状态机：pending = 在防抖队列里，saved = 已落盘，error = 写盘失败（草稿保留）。 */
+type SavePhase = 'idle' | 'pending' | 'saved' | 'error'
 
 /** 管理员权限开关只对 Windows 有意义；在渲染时读 UA，测试可以临时替换。 */
 const isWindowsHost = (): boolean => typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
@@ -96,38 +124,138 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   const [graceError, setGraceError] = useState<string | null>(null)
   // 选图失败（格式不支持 / 超过 10MB / 文件不存在）时在设置页内就地提示。
   const [imageError, setImageError] = useState<string | null>(null)
+  // 自动保存的状态与时间：底部那行状态只描述「这一页的改动写没写进磁盘」。
+  const [savePhase, setSavePhase] = useState<SavePhase>('idle')
+  const [savedAt, setSavedAt] = useState<number | null>(null)
+  const [clock, setClock] = useState(() => Date.now())
   const [saveError, setSaveError] = useState<string | null>(null)
-  const [saved, setSaved] = useState(false)
-  // 自启开关是保存即生效的，行内状态只描述这一次点选；与底部「保存设置」的 saved 无关。
+  // 自启开关是勾选即写登录项的，行内状态只描述这一次点选，与自动保存的状态各管一段。
   const [loginBusy, setLoginBusy] = useState(false)
   const [loginStatus, setLoginStatus] = useState<string | null>(null)
   const [loginError, setLoginError] = useState<string | null>(null)
 
-  // 已保存设置变了（保存成功、切换整合包等）：草稿跟着回到最新值，别用旧草稿覆盖磁盘。
+  /** 待写内容与防抖计时器都放 ref 里：计时器回调和卸载 flush 读到的总是最新一份。 */
+  const pendingRef = useRef<AppSettings | null>(null)
+  const timerRef = useRef<number | null>(null)
+  const savingRef = useRef(false)
+/**
+   * 已经提交过写盘的设置的指纹。写盘回来的 settings 会晚一步到，甚至比下一次提交更晚，
+   * 所以记一串而不是只记最后一次：只要回流的是我们写出去的那几份之一，就原样跳过，别冲掉正在输入的草稿。
+   */
+  const submittedRef = useRef<string[]>([])
+  /** App 每次渲染都传新的 onSave 箭头函数，卸载 flush 必须读最新那个，不能把 effect 绑在它身上。 */
+  const onSaveRef = useRef(onSave)
+  useEffect(() => { onSaveRef.current = onSave }, [onSave])
+
+  /**
+   * 把待写内容立刻写盘。防抖到点、离开设置页、点「重试保存」都走这里。
+   * 写盘途中又改了字段时循环会接着再写一轮：改动永远合并、但一次都不丢。
+   */
+  const flush = useCallback(async () => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+    // 已经在写盘：它自己会把队列里的新内容接着处理掉，这里直接返回。
+    if (savingRef.current) return
+    savingRef.current = true
+    try {
+      for (;;) {
+        const next = pendingRef.current
+        if (!next) break
+        pendingRef.current = null
+        const submitted = settingsSignature(next)
+        if (!submittedRef.current.includes(submitted)) submittedRef.current = [...submittedRef.current, submitted].slice(-10)
+        let ok = false
+        try {
+          ok = await onSaveRef.current(next)
+        } catch {
+          ok = false
+        }
+        if (!ok) {
+          // 失败：内容放回队列，草稿一个字都不动，等用户重试或继续改。
+          pendingRef.current = next
+          setSaveError(SAVE_ERROR_TEXT)
+          setSavePhase('error')
+          break
+        }
+        setSaveError(null)
+        setSavedAt(Date.now())
+        setClock(Date.now())
+        setSavePhase(pendingRef.current ? 'pending' : 'saved')
+      }
+    } finally {
+      savingRef.current = false
+    }
+  }, [])
+
+  /** 排一次自动保存：SAVE_DEBOUNCE_MS 内的后续改动只覆盖待写内容并重置计时器，所以连续改多个字段只写一次盘。 */
+  const scheduleSave = (next: AppSettings) => {
+    pendingRef.current = next
+    setSavePhase('pending')
+    setSaveError(null)
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current)
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null
+      void flush()
+    }, SAVE_DEBOUNCE_MS)
+  }
+
+  // 磁盘上那份设置变了：只有别处真的改了它（换整合包、存储位置迁移）才把草稿拉回磁盘值。
+  // 刚写盘那份自己也会回流一次，那一次必须原样跳过——否则用户在写盘期间敲的字会被旧值冲掉。
   useEffect(() => {
+    if (submittedRef.current.includes(settingsSignature(settings))) return
     setDraft(settings)
     setArgsText(settings.launchArgs.join(' '))
     setIdleText(String(settings.shutdownIdleMinutes ?? SHUTDOWN_IDLE_DEFAULT))
     setGraceText(String(settings.shutdownGraceMinutes ?? SHUTDOWN_GRACE_DEFAULT))
     setIdleError(null)
     setGraceError(null)
-    setSaved(false)
+    setSavePhase('idle')
+    setSavedAt(null)
+    setSaveError(null)
   }, [settings])
-  // 离开设置页时撤掉实时预览：没保存就等于没改过。
+
+  // 「已自动保存 · 刚刚」要自己走到时钟：挂一个 30 秒的节拍，别让「刚刚」永远停在那儿。
+  useEffect(() => {
+    if (savePhase !== 'saved') return
+    const ticker = window.setInterval(() => setClock(Date.now()), 30_000)
+    return () => window.clearInterval(ticker)
+  }, [savePhase])
+
+  // 离开设置页（切标签、换整合包）时防抖计时器里的改动不能跟着组件一起消失：立刻写盘。
+  useEffect(() => () => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+    const pending = pendingRef.current
+    pendingRef.current = null
+    if (pending) void onSaveRef.current(pending)
+  }, [])
+
+  // 离开设置页时撤掉实时预览：没写盘就等于没改过。
   useEffect(() => () => onPreview(null), [onPreview])
 
   const mirrorValue = draft.network?.githubMirror ?? ''
   const matchedPreset = GITHUB_MIRROR_PRESETS.find(prefix => normalizeMirror(prefix) === normalizeMirror(mirrorValue) && mirrorValue.trim() !== '')
   const mirrorPreset = mirrorValue.trim() === '' ? '' : (matchedPreset ?? CUSTOM_MIRROR)
 
-  const patch = (next: Partial<AppSettings>) => { setDraft(current => ({ ...current, ...next })); setSaved(false) }
+  /** 写盘写的是整份设置：草稿 + 参数文本切成的数组，入口不同口径也不分叉。 */
+  const composePayload = (base: AppSettings = draft): AppSettings => ({ ...base, launchArgs: argsToArray(argsText) })
 
-  // 立即保存与「保存设置」共用同一份 payload，参数文本的口径不会分叉。
-  const payload = (next: Partial<AppSettings> = {}): AppSettings => ({
-    ...draft,
-    ...next,
-    launchArgs: argsText.trim().split(/\s+/).filter(Boolean),
-  })
+  /** 改一个字段：先更新草稿，再把整份设置排进自动保存队列。 */
+  const patch = (next: Partial<AppSettings>) => {
+    const merged = { ...draft, ...next }
+    setDraft(merged)
+    scheduleSave(composePayload(merged))
+  }
+
+  /** 参数是一整行文本：边打边改草稿，停手 SAVE_DEBOUNCE_MS 才写盘（不做 blur 提交）。 */
+  const updateArgsText = (raw: string) => {
+    setArgsText(raw)
+    scheduleSave({ ...draft, launchArgs: argsToArray(raw) })
+  }
 
   const chooseDirectory = async (kind: 'dshInstallPath' | 'dshHome' | 'workspace') => {
     const chosen = await api.chooseDirectory(kind)
@@ -138,8 +266,8 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   const theme = draft.uiTheme ?? 'deepseek'
   const previewAppearance = (next: AppSettings) => {
     setDraft(next)
-    setSaved(false)
     onPreview(next.appearance ?? null)
+    scheduleSave(composePayload(next))
   }
   const updateAppearance = (next: Partial<AppearanceSettings>) => {
     const merged = { ...appearance, ...next }
@@ -168,25 +296,9 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   }
   const fileLabel = (target: string | undefined): string => (target ? target.split(/[\\/]/).pop() ?? target : '')
 
-  const resetDraft = () => {
-    setDraft(settings)
-    setArgsText(settings.launchArgs.join(' '))
-    setIdleText(String(settings.shutdownIdleMinutes ?? SHUTDOWN_IDLE_DEFAULT))
-    setGraceText(String(settings.shutdownGraceMinutes ?? SHUTDOWN_GRACE_DEFAULT))
-    setIdleError(null)
-    setGraceError(null)
-    setImageError(null)
-    setSaveError(null)
-    setSaved(false)
-    setLoginStatus(null)
-    setLoginError(null)
-    onPreview(null)
-  }
-
-  // 分钟数只在合法时写进 draft；非法值留在输入框里，给出行内提示（保存按钮也就拿不到脏值）。
+  // 分钟数只在合法时写进 draft；非法值留在输入框里，给出行内提示，也就不会被自动保存带走。
   const updateIdleMinutes = (raw: string) => {
     setIdleText(raw)
-    setSaved(false)
     const value = Number(raw)
     if (raw.trim() === '' || !Number.isInteger(value) || value < SHUTDOWN_IDLE_MIN || value > SHUTDOWN_IDLE_MAX) {
       setIdleError('请填 1–1440 之间的整数分钟，当前值不会保存。')
@@ -198,7 +310,6 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
 
   const updateGraceMinutes = (raw: string) => {
     setGraceText(raw)
-    setSaved(false)
     const value = Number(raw)
     if (raw.trim() === '' || !Number.isInteger(value) || value < SHUTDOWN_GRACE_MIN || value > SHUTDOWN_GRACE_MAX) {
       setGraceError('请填 0–60 之间的整数分钟，当前值不会保存。')
@@ -208,19 +319,8 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
     patch({ shutdownGraceMinutes: value })
   }
 
-  const save = async () => {
-    setSaveError(null)
-    const ok = await onSave(payload())
-    if (ok) {
-      setSaved(true)
-      onPreview(null)
-    } else {
-      setSaveError('设置没有保存成功，请检查填写内容后重试。')
-    }
-  }
-
   /**
-   * 「随 Windows 登录启动」勾了就算数：立刻把整份草稿交给主进程写登录项，不等「保存设置」。
+   * 「随 Windows 登录启动」勾了就算数：立刻把整份草稿交给主进程写登录项，不等防抖。
    * 失败则把复选框退回点击前的值，并在行内说明，别让界面显示一个磁盘上没有的状态。
    */
   const toggleLaunchAtLogin = async (next: boolean) => {
@@ -230,10 +330,9 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
     setLoginStatus(null)
     setLoginError(null)
     setDraft(current => ({ ...current, launchAtLogin: next }))
-    setSaved(false)
     let ok = false
     try {
-      ok = await onSave(payload({ launchAtLogin: next }))
+      ok = await onSave(composePayload({ ...draft, launchAtLogin: next }))
     } catch {
       ok = false
     }
@@ -241,18 +340,27 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
       setLoginStatus(next ? '已写入登录项，下次登录 Windows 时生效。' : '已移除登录项，下次登录 Windows 时不再自动启动。')
     } else {
       setDraft(current => ({ ...current, launchAtLogin: previous }))
-      setLoginError('登录项没有写入，开关已恢复原状；可以稍后重试，或点底部「保存设置」再存一次。')
+      setLoginError('登录项没有写入，开关已恢复原状；可以稍后重试，或改一下别的字段让自动保存再写一次。')
     }
     setLoginBusy(false)
   }
 
   const windows = isWindowsHost()
 
+  /** 底部那一行自动保存状态：四态各有各的话，失败时旁边再给一枚重试按钮。 */
+  const saveStatusText = savePhase === 'pending'
+    ? '正在自动保存…（停止输入约 0.6 秒后写盘）'
+    : savePhase === 'saved'
+      ? `已自动保存 · ${savedAtText(savedAt ?? clock, clock)}`
+      : savePhase === 'error'
+        ? '自动保存失败，改动还留在这一页的草稿里。'
+        : '改完即自动保存：停止输入约 0.6 秒后写盘。'
+
   return (
     <div className="home-tab-page">
       <main className="settings-content">
         <div className="settings-stack">
-          <Section icon={<Palette size={16} />} title="外观" desc="界面主题、主题色、透明度与启动器图标；保存后立即生效。">
+          <Section icon={<Palette size={16} />} title="外观" desc="界面主题、主题色、透明度与启动器图标；改完即自动保存，选的时候就能看到效果。">
             <div className="theme-options" role="radiogroup" aria-label="界面主题">
               {UI_THEMES.map(option => (
                 <button
@@ -382,7 +490,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
                   disabled={loginBusy || busy}
                   onChange={event => { void toggleLaunchAtLogin(event.target.checked) }}
                 />
-                <span><strong>随 Windows 登录启动</strong><small>开机后自动把启动器收进托盘，不打开主窗口。勾选后立刻写入 Windows 登录项，不用等下面的「保存设置」。</small></span>
+                <span><strong>随 Windows 登录启动</strong><small>开机后自动把启动器收进托盘，不打开主窗口。勾选后立刻写入 Windows 登录项，不等下面的自动保存。</small></span>
               </label>
               {loginBusy && <p className="settings-field-status" role="status">正在写入登录项…</p>}
               {loginStatus && <p className="settings-field-status" role="status">{loginStatus}</p>}
@@ -398,7 +506,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
               />
               <span>
                 <strong>启动器启动时请求管理员权限</strong>
-                <small>开启后每次启动启动器都会弹一次 UAC 确认；启动器里的启动/停止整合包等操作都继承这份管理员权限，不会再额外弹窗。想只弹这一次，就把各整合包的「管理员」勾选取消。这一项跟随底部「保存设置」，下次启动启动器时生效。</small>
+                <small>开启后每次启动启动器都会弹一次 UAC 确认；启动器里的启动/停止整合包等操作都继承这份管理员权限，不会再额外弹窗。想只弹这一次，就把各整合包的「管理员」勾选取消。这一项随自动保存写入，下次启动启动器时生效。</small>
               </span>
             </label>
             {!windows && <p className="settings-field-note">仅 Windows 支持：当前系统无法在启动时请求管理员权限，这一项已禁用。</p>}
@@ -469,6 +577,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
               />
               <span><strong>关机前先停止所有整合包</strong><small>避免关机时留下半截进程；默认打开。</small></span>
             </label>
+            {/* 路径 / 参数 / 镜像 / 代理这类长串输入按防抖写盘（不做 blur 提交）：边打字边改草稿，停手 600ms 才落盘，粘贴整条路径也只写一次。 */}
             <label className="form-field">
               <span>本体安装目录</span>
               <div className="path-input">
@@ -514,6 +623,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
 
 
           <Section icon={<Globe size={16} />} title="网络" desc="默认使用国内 npm 镜像（npmmirror），并自动跟随 Windows 系统代理；留空即可。">
+            {/* 镜像与代理同为长串输入，跟路径一样走防抖自动保存，地址打到一半不会写盘。 */}
             <label className="form-field">
               <span>npm 镜像</span>
               <input value={draft.network?.npmRegistry ?? ''} placeholder="https://registry.npmmirror.com" onChange={event => patch({ network: { ...draft.network, npmRegistry: event.target.value } })} />
@@ -560,7 +670,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
           <details className="settings-panel settings-home-panel settings-advanced">
             <summary><span className="settings-group-icon"><Wrench size={16} /></span>高级设置<small>启动命令、端口、Copilot 提示词——一般不需要改动</small></summary>
             <label className="form-field"><span>可执行文件</span><input value={draft.launchExecutable} onChange={event => patch({ launchExecutable: event.target.value })} /></label>
-            <label className="form-field"><span>参数</span><input value={argsText} onChange={event => { setArgsText(event.target.value); setSaved(false) }} /></label>
+            <label className="form-field"><span>参数</span><input value={argsText} onChange={event => updateArgsText(event.target.value)} /></label>
             <label className="form-field"><span>首选 Web 端口</span><input type="number" min={1} max={65535} step={1} value={draft.webPort} onChange={event => patch({ webPort: Number(event.target.value) })} /></label>
             <p className="settings-advanced-note">DSH Copilot：默认模式会把自定义内容追加到内置提示词；开发者模式可替换基础提示词，但凭据保护、工作区边界和操作审批始终有效。</p>
             <label className="check-field"><input type="checkbox" checked={Boolean(draft.aiDeveloperMode)} onChange={event => patch({ aiDeveloperMode: event.target.checked })} /><span><strong>开发者模式</strong><small>允许使用下面的内容替换 Copilot 基础 persona。</small></span></label>
@@ -568,13 +678,12 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
             <div className="settings-inline-actions"><button type="button" className="secondary-button" onClick={() => patch({ aiPrompt: '' })}>恢复默认提示词</button></div>
           </details>
 
-          {saveError && <div className="error-banner" role="alert">{saveError}</div>}
+          {saveError && <div className="error-banner settings-save-error" role="alert">{saveError}</div>}
           <div className="settings-home-actions">
-            <span className="settings-home-actions-hint">{saved ? '已保存。' : '除「随 Windows 登录启动」是勾选即写盘，其余改动只在点「保存设置」后写入磁盘。'}</span>
-            <button type="button" className="secondary-button" disabled={busy} onClick={resetDraft}>取消更改</button>
-            <button type="button" className="primary-command" disabled={busy} onClick={() => void save()}>
-              {busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存设置
-            </button>
+            <span className={`settings-home-actions-hint is-${savePhase}`} role="status" aria-live="polite">{saveStatusText}</span>
+            {savePhase === 'error' && (
+              <button type="button" className="primary-command" onClick={() => { void flush() }}><RotateCcw size={16} />重试保存</button>
+            )}
           </div>
         </div>
       </main>

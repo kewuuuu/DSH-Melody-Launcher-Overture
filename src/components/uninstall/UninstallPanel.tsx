@@ -1,4 +1,4 @@
-import { Download, FolderOpen, LoaderCircle, ScanSearch, Trash2, TriangleAlert } from 'lucide-react'
+import { Download, FolderOpen, LoaderCircle, ScanSearch, Trash2 } from 'lucide-react'
 import { useCallback, useState } from 'react'
 import { useLauncherApi } from '../../api/client'
 import { formatBytes } from '../../lib/format'
@@ -7,9 +7,9 @@ import './uninstall-panel.css'
 
 /**
  * 设置页「清理与卸载」区块。
- * 核心理念：只删这个版本自己创建的东西——程序目录与本版数据目录。
- * 旧版启动器数据（%APPDATA%\dsh-launcher）与 DSH 家目录（~/.dsh）由主进程标成 keep，
- * 界面只负责照原样展示每条的原因；两枚卸载按钮都要两步确认，第一次点击只是把确认行展开。
+ * 交付侧只发安装包：装由安装包负责，卸载也由安装包内置的卸载程序负责，
+ * 这里的「运行卸载程序」只是同一个卸载入口在启动器里的快捷方式（deleteData 固定 false，数据默认保留）。
+ * 想连本版数据一起删，走下面的「扫描本版内容」看清清单，再用「生成卸载脚本」自己执行。
  *
  * 扫描只由用户点出来：plan() 要读完程序目录与本版数据目录里的每个文件（24 万个文件约十几秒），
  * 挂载时静默扫描会把整个设置页卡住，所以首屏只给一句说明和「扫描本版内容」。
@@ -57,8 +57,7 @@ export function UninstallPanel() {
   const [plan, setPlan] = useState<UninstallPlan | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [scanning, setScanning] = useState(false)
-  const [busy, setBusy] = useState<'export' | 'confirm' | null>(null)
-  const [pending, setPending] = useState<'keep' | 'data' | null>(null)
+  const [busy, setBusy] = useState<'export' | 'run' | null>(null)
   const [scriptPath, setScriptPath] = useState<string | null>(null)
   const [started, setStarted] = useState(false)
 
@@ -96,18 +95,20 @@ export function UninstallPanel() {
     }
   }
 
-  const run = async (deleteData: boolean) => {
+  /**
+   * 主按钮：卸载归安装包内置的卸载程序管，所以这里直接调它的入口，deleteData 固定 false（数据默认保留）。
+   * 只有一步：真正删东西的是卸载程序自己，它执行前还会再问一次，启动器这边不必先拦一道。
+   */
+  const launchUninstaller = async () => {
     if (busy || started) return
-    setBusy('confirm')
+    setBusy('run')
     setError(null)
     try {
-      const result = await api.uninstall.run({ deleteData })
-      setPending(null)
+      const result = await api.uninstall.run({ deleteData: false })
       if (result.started) setStarted(true)
-      else setError('卸载没有启动，什么也没有删除。可以重试，或者改用「生成卸载脚本」手动执行。')
+      else setError('卸载程序没有启动，什么也没有删除。可以重试，或者改用下面的「生成卸载脚本」手动执行。')
     } catch (cause) {
-      setPending(null)
-      setError(errorText(cause, '启动卸载失败。'))
+      setError(errorText(cause, '启动卸载程序失败。'))
     } finally {
       setBusy(null)
     }
@@ -115,15 +116,37 @@ export function UninstallPanel() {
 
   const deleteItems = plan ? plan.items.filter(item => item.action === 'delete') : []
   const keepItems = plan ? plan.items.filter(item => item.action === 'keep') : []
-  const disabled = busy !== null || started || scanning
-  const scanDisabled = scanning || busy !== null || started
+  // 已经交给卸载程序（started）之后不再允许重复触发，扫描也一并停掉。
+  const disabled = busy !== null || started
+  const scanDisabled = disabled || scanning
 
   return (
     <section className="settings-panel" aria-label="清理与卸载" aria-busy={busy !== null || scanning}>
       <div className="settings-panel-heading">
         <div className="settings-panel-title"><Trash2 size={17} /><span>清理与卸载</span></div>
       </div>
-      <div className="settings-hint">只删这个版本自己创建的东西：程序目录与本版数据目录。旧版启动器数据（%APPDATA%\dsh-launcher）和 DSH 家目录（~/.dsh）一律保留，下面的计划里写明每一条的原因。</div>
+      <div className="settings-hint">启动器只交付安装包：安装由安装包负责，卸载也交给安装包内置的卸载程序——在 Windows 的「设置 → 应用 → 已安装的应用」里找到 DSH 启动器就能卸载。下面的按钮是同一个卸载程序在启动器里的快捷入口，本版数据默认保留。</div>
+
+      <div className="uninstall-run">
+        <button
+          type="button"
+          className="danger-button"
+          disabled={disabled}
+          aria-busy={busy === 'run'}
+          onClick={() => { void launchUninstaller() }}
+        >
+          {busy === 'run' ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
+          {busy === 'run' ? '正在启动卸载程序…' : '运行卸载程序'}
+        </button>
+        <p className="uninstall-run-note">
+          启动前会先停掉正在运行的整合包，再把删除交给卸载程序。本版数据、旧版启动器数据（%APPDATA%\dsh-launcher）与 DSH 家目录（~/.dsh）都保留；
+          想连本版数据一起删，先扫描看清下面的清单，再用「生成卸载脚本」自己执行。
+        </p>
+      </div>
+
+      {started && (
+        <div className="uninstall-started" role="status"><LoaderCircle className="spin" size={14} /><span>正在退出：卸载程序会在后台完成删除，本版数据保留。</span></div>
+      )}
 
       <div className="uninstall-scan">
         <p className="uninstall-scan-hint">
@@ -170,24 +193,7 @@ export function UninstallPanel() {
             <button type="button" className="secondary-button" disabled={disabled} aria-busy={busy === 'export'} onClick={() => { void exportScript() }}>
               {busy === 'export' ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />}生成卸载脚本
             </button>
-            <button type="button" className="secondary-button" disabled={disabled} onClick={() => setPending(pending === 'keep' ? null : 'keep')}>
-              <Trash2 size={14} />立即卸载（保留数据）
-            </button>
-            <button type="button" className="danger-button" disabled={disabled} onClick={() => setPending(pending === 'data' ? null : 'data')}>
-              <Trash2 size={14} />立即卸载并删除本版数据
-            </button>
           </div>
-
-          {pending && (
-            <div className="uninstall-confirm" role="group" aria-label="卸载确认">
-              <TriangleAlert size={14} />
-              <span>将删除 <strong>{formatBytes(plan.deleteBytes)}</strong>{pending === 'data' ? '，其中包含本版数据目录' : '，数据目录保留'}。删除不可恢复。</span>
-              <button type="button" className="danger-button" disabled={busy === 'confirm'} aria-busy={busy === 'confirm'} onClick={() => { void run(pending === 'data') }}>
-                {busy === 'confirm' ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}确认删除
-              </button>
-              <button type="button" className="secondary-button" disabled={busy === 'confirm'} onClick={() => setPending(null)}>取消</button>
-            </div>
-          )}
 
           {scriptPath && (
             <div className="uninstall-script" role="status">
@@ -196,10 +202,6 @@ export function UninstallPanel() {
                 <FolderOpen size={14} />打开所在文件夹
               </button>
             </div>
-          )}
-
-          {started && (
-            <div className="uninstall-started" role="status"><LoaderCircle className="spin" size={14} /><span>正在退出，卸载脚本会在后台完成删除。</span></div>
           )}
         </>
       )}
