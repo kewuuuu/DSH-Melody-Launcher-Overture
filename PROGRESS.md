@@ -289,3 +289,14 @@
 - 回归：`npx tsc --noEmit` 通过；`npm run build` 通过；`npx vitest run` 146 文件通过 / 9 跳过，1344 passed / 11 skipped（1355）。
 - 未验证：真实 UAC 点「是」后的父子交班（无人值守只能模拟拒绝）、安装版从 1.1.1 自更新到 1.1.2 的完整升级、SignPath 实际签名。
 
+## 1.1.3：解压目录清扫、SignPath 流水线与发版（2026-11-13）
+
+- 1.1.2 的代价暴露了：便携壳被强杀时没人替它删解压目录，本机一天就攒了 76 个 `ns*.tmp`、17.9 GB。新增 `electron/temp-unpack-sweeper.ts` 的 `sweepTempUnpackDirs`，启动时清掉 `%TEMP%` 里 `nsXXXX.tmp` 中超过 7 天且没有进程在用的目录（进程映像路径命中就跳过，删失败只记 failed），年轻的一律不碰。`electron/main.ts` 的 `app.whenReady` 尾部接上；`electron/uninstall-plan.ts` 的 `defaultProcessImagePaths` 改为导出以复用。
+- 实机验证：造一个 30 天前的 `%TEMP%\nsKEWUFAKE.tmp`，用 1.1.3 便携版启动后它消失（`FAKE_BEFORE=True` → `FAKE_AFTER=False`），同时 `launcher-data` 正常生成、`storage info` 报 `source:"portable"`。随后手工清掉全部历史残留：删 51 个目录、释放 14.2 GB；用户正在运行的 1.1.0 实例所用目录与其数据未动。
+- 签名：用户选定 SignPath。仓库侧前置材料齐了（公开仓库、`LICENSE` MIT、`package.json` 有 `license`、有 Release），新增 `docs/signpath.md`（申请→建项目→Artifact Configuration→Signing Policy→装 GitHub App→配四个仓库变量）与 `.github/workflows/signpath.yml`（release published 触发，`vars.SIGNPATH_ORGANIZATION_ID` 为空时整个 job 跳过，签完用 `gh release upload --clobber` 回写）。未配置、未实签。
+- 许可证现状（必须记住）：上游 `rirko/dsh-melody-launcher` 与 `Miyazawai/DSH-Melody-Launcher-Overture` 的 GitHub `license` 为 `null`、`/license` 404，等于保留所有权利；本分支的 MIT 只覆盖新增代码，`NOTICE` 已如实写明来源链与现状。要「免费使用 + 要求署名」完全站得住，需要拿到上游书面许可。
+- 发版：`package.json`/lockfile 版本 1.1.3；先 `rm -rf release/b16 release/b17` 与 `D:/engine/DSH/test/kewu-b17-build` 再构建（遵守「每次构建清空产物目录」）。产物只在 `release/b17/`：便携 92,631,091 字节 `AC19D5B0F30F13B81602A75192056B88227B10D1C90FB08351ABFD46B73B24DD`、Setup 104,155,469 字节 `5BCDE2A0CED63BD74512ECBA248A3098D77C5BDBB9D4460A274B9AD2F9573892`、卸载器 139,776 字节 `5F47F9A27375C1BFFBFC4D5C4059777DC8D957FC307CDBE692A1ABFDC71F0EB2`。
+- 推送/发布：`git push fork main`（9ebeaa4..a68867e）与 `git push fork v1.1.3` 成功；`POST /releases` 建 v1.1.3（id 445998926），三个资产上传全 201，`/releases/latest` 复核 v1.1.3 + 三个同名资产。midway 的 v1.1.2（id 445990557）保留在 Releases 里。
+- 回归：`npx tsc --noEmit` 0 error；`npm run build` 通过；`npx vitest run` **147 文件通过 / 9 跳过，1350 passed / 11 skipped（1361）**。
+- 未验证：SignPath 真正签名（未申请）、1.1.2→1.1.3 自动更新的完整升级、真实 UAC 成功交班。
+
