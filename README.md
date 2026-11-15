@@ -10,8 +10,7 @@
 
 <br />
 
-[![Release](https://img.shields.io/github/v/release/Miyazawai/DSH-Melody-Launcher-Overture?style=for-the-badge&logo=github&color=6C7BFF)](https://github.com/Miyazawai/DSH-Melody-Launcher-Overture/releases/latest)
-[![Build](https://img.shields.io/github/actions/workflow/status/Miyazawai/DSH-Melody-Launcher-Overture/build.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=build)](https://github.com/Miyazawai/DSH-Melody-Launcher-Overture/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/kewuuuu/DSH-Melody-Launcher-Overture?style=for-the-badge&logo=github&color=6C7BFF)](https://github.com/kewuuuu/DSH-Melody-Launcher-Overture/releases/latest)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Miyazawai/DSH-Melody-Launcher-Overture/releases)
 [![Upstream](https://img.shields.io/badge/上游-rirko%2Fdsh--melody--launcher-6C7BFF?style=for-the-badge&logo=github&logoColor=white)](https://github.com/rirko/dsh-melody-launcher)
 [![Tests](https://img.shields.io/badge/tests-962%20passing-6E9F18?style=for-the-badge&logo=vitest&logoColor=white)](https://github.com/Miyazawai/DSH-Melody-Launcher-Overture)
@@ -165,10 +164,10 @@ node bin/launcher-control.cjs pack config set <包ID> --port-mode fixed --port 3
 
 ### 1. 下载
 
-前往 [**Releases**](https://github.com/Miyazawai/DSH-Melody-Launcher-Overture/releases) 下载 `DSH-Launcher-*-portable.exe`，单文件、免安装。
+前往 [**Releases**](https://github.com/kewuuuu/DSH-Melody-Launcher-Overture/releases) 下载 `DSH-launcher-KEWU-Setup-*.exe` 安装包，双击安装即可；启动器数据与整合包放在 `%APPDATA%\DSH-launcher-KEWU`，升级或卸载都不会动它。
 
 > [!IMPORTANT]
-> 便携版目前**未使用商业代码签名证书**。首次运行时 Windows SmartScreen 可能提示来源未知 —— 请确认文件确实来自本仓库 Release 页面后，选择「更多信息 → 仍要运行」。
+> 安装包目前**未使用商业代码签名证书**。首次运行时 Windows SmartScreen 可能提示来源未知 —— 请确认文件确实来自本仓库 Release 页面后，选择「更多信息 → 仍要运行」。
 
 ### 2. 等官方包就位
 
@@ -189,30 +188,28 @@ node bin/launcher-control.cjs pack config set <包ID> --port-mode fixed --port 3
 ## 从源码运行
 
 ```powershell
-git clone https://github.com/Miyazawai/DSH-Melody-Launcher-Overture.git
+git clone https://github.com/kewuuuu/DSH-Melody-Launcher-Overture.git
 cd DSH-Melody-Launcher-Overture
 npm install
 npm run dev           # 开发模式
 npm test              # Vitest 全量测试
 npm run build         # 类型检查 + 产物构建
-npm run package:win   # 打包 Windows 便携 exe
+npm run package:win   # 打包 Windows 安装包（NSIS）
 ```
 
 要求 Node.js ≥ 20。
 
 > [!TIP]
-> **发版**：推 `v*` 标签即可触发 CI 自动打包并把便携 exe 挂到 Release：
-> `git tag -a v0.1.1 -m "v0.1.1" && git push origin v0.1.1`
-> 同时把 `official-pack-v<版本>.zip`（整合包页导出后改名）上传到对应 Release，官方包机制按 `OFFICIAL_PACK_VERSION` 常量核对。
+> **发版（本地完成，不依赖 GitHub Actions）**：`npm run package:win` 出安装包、`npm run package:uninstaller` 出卸载器，然后 `npm run release` 打印带 SHA256 的交付表，再用 GitHub API（或 `gh release upload`）把产物挂到 Release。需要整合包时，把 `official-pack-v<版本>.zip`（整合包页导出后改名）一并上传，官方包机制按 `OFFICIAL_PACK_VERSION` 常量核对。
 
 ## 数据与配置
 
 | 内容 | 位置 |
 | --- | --- |
-| 启动器数据（packs.json / 设置 / 运行时） | `%APPDATA%\dsh-launcher` |
-| 整合包家目录（含包自带工具 `tools/`） | `%APPDATA%\dsh-launcher\dsh-packs\<包id>` |
-| DSH 版本缓存 | `%APPDATA%\dsh-launcher\dsh-runtime\versions` |
-| 机器级托管工具（OfficeCLI 兜底下载） | `%APPDATA%\dsh-launcher\dsh-tools` |
+| 启动器数据（packs.json / 设置 / 运行时），安装版 | `%APPDATA%\DSH-launcher-KEWU` |
+| 整合包家目录（含包自带工具 `tools/`） | `%APPDATA%\DSH-launcher-KEWU\dsh-packs\<包id>` |
+| DSH 版本缓存 | `%APPDATA%\DSH-launcher-KEWU\dsh-runtime\versions` |
+| 机器级托管工具（OfficeCLI 兜底下载） | `%APPDATA%\DSH-launcher-KEWU\dsh-tools` |
 | 默认 DSH 家目录 | `~/.dsh` |
 
 > 导出整合包时，API Key、会话记录、用量统计、任务板等**个人数据一律不进包**。
@@ -220,7 +217,7 @@ npm run package:win   # 打包 Windows 便携 exe
 ## 与上游的关系
 
 - 上游主线：[rirko/dsh-melody-launcher](https://github.com/rirko/dsh-melody-launcher) —— 启动器主线开发与插件目录 PR 的目标仓库
-- 本仓库：序曲（Overture）独立发布线 —— 便携 exe 与官方默认整合包都发布在这里的 Releases
+- 本仓库：序曲（Overture）独立发布线 —— 安装包、卸载器与官方默认整合包都发布在这里的 Releases
 - 两边共享核心架构（派生家目录咽喉点、packs.json 唯一清单等）；本分支的增量以「首公里上手体验」为准绳：**零依赖部署、官方包开箱即玩、整包搬运**
 
 ## 联系与反馈

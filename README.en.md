@@ -8,8 +8,7 @@
 
 Download one executable: the first run auto-imports the **official default modpack** — DSH itself, a full web UI, and Office document skills. Hit Launch and you can chat, build slide decks and write reports. Nothing to preinstall.
 
-[![Release](https://img.shields.io/github/v/release/Miyazawai/DSH-Melody-Launcher-Overture?style=for-the-badge&logo=github&color=6C7BFF)](https://github.com/Miyazawai/DSH-Melody-Launcher-Overture/releases/latest)
-[![Build](https://img.shields.io/github/actions/workflow/status/Miyazawai/DSH-Melody-Launcher-Overture/build.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=build)](https://github.com/Miyazawai/DSH-Melody-Launcher-Overture/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/kewuuuu/DSH-Melody-Launcher-Overture?style=for-the-badge&logo=github&color=6C7BFF)](https://github.com/kewuuuu/DSH-Melody-Launcher-Overture/releases/latest)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Miyazawai/DSH-Melody-Launcher-Overture/releases)
 [![Upstream](https://img.shields.io/badge/upstream-rirko%2Fdsh--melody--launcher-6C7BFF?style=for-the-badge&logo=github&logoColor=white)](https://github.com/rirko/dsh-melody-launcher)
 [![Tests](https://img.shields.io/badge/tests-962%20passing-6E9F18?style=for-the-badge&logo=vitest&logoColor=white)](https://github.com/Miyazawai/DSH-Melody-Launcher-Overture)
@@ -94,7 +93,7 @@ Download one executable: the first run auto-imports the **official default modpa
 
 ## Getting started
 
-1. Grab `DSH-Launcher-*-portable.exe` from [**Releases**](https://github.com/Miyazawai/DSH-Melody-Launcher-Overture/releases). The binary is not code-signed yet, so SmartScreen may warn — verify it comes from this repo, then choose "More info → Run anyway".
+1. Grab `DSH-launcher-KEWU-Setup-*.exe` from [**Releases**](https://github.com/kewuuuu/DSH-Melody-Launcher-Overture/releases) and install it. Launcher state and modpacks live in `%APPDATA%\DSH-launcher-KEWU`, so upgrades and uninstalls leave your data alone. The installer is not code-signed yet, so SmartScreen may warn — verify it comes from this repo, then choose "More info → Run anyway".
 2. Wait for the first-run import of the official modpack (~128 MB; the Modpacks page shows a progress bar with speed and source, then the import stages).
 3. Add your DeepSeek (or other) API key in **Settings** — keys are stored per-pack and never leave your machine in exports.
 4. Hit **Launch DSH**. Try: *"create a pptx titled Quarterly Report with one bullet slide"* — the Office skills handle it.
@@ -104,31 +103,31 @@ Download one executable: the first run auto-imports the **official default modpa
 Requires Node.js ≥ 20.
 
 ```powershell
-git clone https://github.com/Miyazawai/DSH-Melody-Launcher-Overture.git
+git clone https://github.com/kewuuuu/DSH-Melody-Launcher-Overture.git
 cd DSH-Melody-Launcher-Overture
 npm install
 npm run dev           # dev mode
 npm test              # Vitest
 npm run build         # typecheck + bundle
-npm run package:win   # portable exe
+npm run package:win   # NSIS installer
 ```
 
-> Releasing: push a `v*` tag to trigger CI (build + attach the portable exe to the Release), and upload the renamed pack export `official-pack-v<version>.zip` to the same Release — the launcher's official-pack mechanism resolves it by the `OFFICIAL_PACK_VERSION` constant.
+> Releasing is local, with no GitHub Actions: `npm run package:win` builds the installer, `npm run package:uninstaller` builds the uninstaller, `npm run release` prints the delivery table with SHA256, then upload the artifacts to the Release through the GitHub API (or `gh release upload`). Upload the renamed pack export `official-pack-v<version>.zip` too when shipping a modpack — the official-pack mechanism resolves it by the `OFFICIAL_PACK_VERSION` constant.
 
 ## Data locations
 
 | What | Where |
 | --- | --- |
-| Launcher state (packs.json / settings / runtimes) | `%APPDATA%\dsh-launcher` |
-| Modpack homes (incl. bundled `tools/`) | `%APPDATA%\dsh-launcher\dsh-packs\<pack-id>` |
-| DSH version cache | `%APPDATA%\dsh-launcher\dsh-runtime\versions` |
-| Machine-level managed tools (OfficeCLI fallback download) | `%APPDATA%\dsh-launcher\dsh-tools` |
+| Launcher state (packs.json / settings / runtimes), installed build | `%APPDATA%\DSH-launcher-KEWU` |
+| Modpack homes (incl. bundled `tools/`) | `%APPDATA%\DSH-launcher-KEWU\dsh-packs\<pack-id>` |
+| DSH version cache | `%APPDATA%\DSH-launcher-KEWU\dsh-runtime\versions` |
+| Machine-level managed tools (OfficeCLI fallback download) | `%APPDATA%\DSH-launcher-KEWU\dsh-tools` |
 | Default DSH home | `~/.dsh` |
 
 ## Upstream & contact
 
 - Mainline: [rirko/dsh-melody-launcher](https://github.com/rirko/dsh-melody-launcher) — plugin-catalog PRs still target upstream.
-- This repo: the Overture release line — portable exe and official modpack zips ship from its Releases.
+- This repo: the Overture release line — the installer, the uninstaller and official modpack zips ship from its Releases.
 - Issues welcome with launcher version and repro steps.
 
 ---
