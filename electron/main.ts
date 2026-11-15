@@ -7,7 +7,9 @@ import { createLauncherControl } from './launcher-control'
 import { createLauncherControlServer } from './launcher-control-server'
 import { createUninstallService } from './uninstall'
 import { registerUninstallIpc } from './uninstall-ipc'
+import { defaultProcessImagePaths } from './uninstall-plan'
 import type { UninstallPlanInput } from './uninstall-plan'
+import { sweepTempUnpackDirs } from './temp-unpack-sweeper'
 import { fileURLToPath } from 'node:url'
 import type { AppSettings, OfficialPackRelease, OfficialPackStatus, PackInstallResult, RuntimeOutput, WindowMode } from '../src/types'
 import { ACP_RUNTIME_DIRNAME, CREDENTIALS_LOCK_DIRNAME, createAiInstaller, healCredentialsLock, type AiInstaller } from './ai-install'
@@ -1390,6 +1392,12 @@ app.whenReady().then(async () => {
       error => console.error('[ui-shots]', error),
     )
   }
+  // 便携壳每次启动都在 %TEMP% 解一整份程序，壳被强杀时没人替它删：顺手清掉七天前没人用的。
+  void sweepTempUnpackDirs({ dir: os.tmpdir(), processImagePaths: defaultProcessImagePaths() })
+    .then(result => {
+      if (result.removed.length) console.log('[temp-unpack] 清掉', result.removed.length, '个过期解压目录')
+    })
+    .catch(error => console.warn('[temp-unpack] 清理过期解压目录失败。', error))
   // 官方整合包首启/更新核对：后台进行，不挡窗口。
   void services.officialPackBootstrap()
   tray = createTray({ iconPath: launcherIconPath, showMainWindow })

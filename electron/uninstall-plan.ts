@@ -72,7 +72,7 @@ function isDriveRoot(target: string): boolean {
 }
 
 /** 一次性取出所有进程的镜像路径；任何失败都当「查不到」，不影响其余计划。 */
-function defaultProcessImagePaths(): string[] {
+export function defaultProcessImagePaths(): string[] {
   if (process.platform !== 'win32') return []
   try {
     const output = execFileSync(
