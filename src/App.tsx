@@ -151,6 +151,7 @@ function LauncherShell() {
   const backgroundUrl = appearanceImageUrl(effectiveAppearance?.backgroundPath, effectiveAppearance?.backgroundVersion)
   const logoSrc = appearanceImageUrl(effectiveAppearance?.logoPath, effectiveAppearance?.logoVersion)
   // 启动页手动检查的结果优先：用户刚点过，就该看到这一次的结论。
+  // 但下载/应用必须交回 store 的结果，否则对话框会一直停在那次手动检查的快照上。
   const launcherUpdate = manualUpdate ?? store.launcherUpdate
   visitedTabs.current.add(navigation.homeTab)
 
@@ -401,8 +402,8 @@ function LauncherShell() {
           status={launcherUpdate}
           progress={store.launcherUpdateProgress}
           busy={launcherUpdateBusy}
-          onDownload={() => { void store.downloadLauncherUpdate() }}
-          onApply={() => { void store.applyLauncherUpdate() }}
+          onDownload={() => { setManualUpdate(null); void store.downloadLauncherUpdate() }}
+          onApply={() => { setManualUpdate(null); void store.applyLauncherUpdate() }}
           onClose={() => setUpdateOpen(false)}
         />
       )}
