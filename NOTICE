@@ -1,0 +1,38 @@
+DSH-launcher-KEWU
+=================
+
+本项目是 DSH 旋律启动器（DSH Melody Launcher）的衍生分支，代码沿这条链继承下来：
+
+  1. rirko / dsh-melody-launcher              https://github.com/rirko/dsh-melody-launcher
+  2. Miyazawai / DSH-Melody-Launcher-Overture https://github.com/Miyazawai/DSH-Melody-Launcher-Overture
+  3. kewuuuu / DSH-Melody-Launcher-Overture   https://github.com/kewuuuu/DSH-Melody-Launcher-Overture   （本仓库）
+
+署名
+----
+原始设计与绝大多数功能来自 rirko 与 Miyazawai 的上游项目；本分支在其上增加了多整合包隔离运行、
+控制 CLI、备份区、卸载器、自动更新与签名流程等改动。任何再分发都必须保留本文件与 LICENSE，
+并保留上面这条来源链——这就是「可以用，但要署名」的落地方式。
+
+许可证现状（请务必读完）
+------------------------
+上游两个仓库在发布时都没有放 LICENSE 文件，GitHub 也没有识别出许可证，按默认规则属于「保留所有权利」。
+本仓库因此无法单方面把上游代码重新授权成 MIT：LICENSE 里的 MIT 条款覆盖的是本分支作者自己的改动，
+以及对上游代码「在获得上游许可后」的使用。为了让使用者立刻可以免费使用、修改与再分发，
+本分支按 MIT 的口径向社区开放；同时我们在向上游作者申请明确授权（issue/邮件）。
+如果你是该上游代码的权利人并希望变更这一安排，请在本仓库开 issue，我们会立即配合。
+
+第三方组件
+----------
+打包产物内含 Electron / Chromium 与下列 npm 依赖，它们各自带有自己的许可证，全文见对应包的 LICENSE：
+
+  Electron, Chromium            MIT / BSD-3-Clause 等（见 electron 与 Chromium 的 LICENSE）
+  react, react-dom              MIT
+  react-markdown, remark-gfm    MIT
+  lucide-react                  ISC
+  yaml                          ISC
+  adm-zip                       MIT
+  yauzl, yazl                   MIT
+  koffi                         MIT
+  @xmldom/xmldom                MIT
+
+卸载器（tools/uninstaller）由本分支用 .NET Framework 的 csc 编译，不含第三方运行库。

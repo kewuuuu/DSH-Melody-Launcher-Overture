@@ -1,6 +1,6 @@
 {
   "name": "dsh-launcher",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "description": "A local desktop launcher and plugin organizer for DeepSeek Harness.",
   "keywords": [
@@ -14,9 +14,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rirko/dsh-melody-launcher.git"
+    "url": "git+https://github.com/kewuuuu/DSH-Melody-Launcher-Overture.git"
   },
-  "homepage": "https://github.com/rirko/dsh-melody-launcher#readme",
+  "homepage": "https://github.com/kewuuuu/DSH-Melody-Launcher-Overture#readme",
+  "license": "MIT",
   "engines": {
     "node": ">=20"
   },
@@ -81,6 +82,8 @@
       "dist-electron/**/*",
       "bin/launcher-control.cjs",
       "tools/uninstall-kewu.ps1",
+      "LICENSE",
+      "NOTICE",
       "package.json"
     ],
     "extraResources": [
@@ -98,7 +101,8 @@
       "artifactName": "DSH-launcher-KEWU-Portable-${version}.${ext}"
     },
     "portable": {
-      "artifactName": "DSH-launcher-KEWU-Portable-${version}.${ext}"
+      "artifactName": "DSH-launcher-KEWU-Portable-${version}.${ext}",
+      "unpackDirName": true
     },
     "nsis": {
       "artifactName": "DSH-launcher-KEWU-Setup-${version}.${ext}",
