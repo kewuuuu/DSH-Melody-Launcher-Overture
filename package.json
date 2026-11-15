@@ -1,6 +1,6 @@
 {
   "name": "dsh-launcher",
-  "version": "1.1.6",
+  "version": "1.3.0",
   "private": true,
   "description": "A local desktop launcher and plugin organizer for DeepSeek Harness.",
   "keywords": [
@@ -96,7 +96,7 @@
       "target": [
         "nsis"
       ],
-      "artifactName": "DSH-launcher-KEWU-Portable-${version}.${ext}"
+      "artifactName": "DSH-launcher-KEWU-Setup-${version}.${ext}"
     },
     "nsis": {
       "artifactName": "DSH-launcher-KEWU-Setup-${version}.${ext}",

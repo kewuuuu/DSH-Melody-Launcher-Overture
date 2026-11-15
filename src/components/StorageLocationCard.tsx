@@ -11,8 +11,7 @@ import './storage-location.css'
 const STORAGE_SOURCE_LABELS: Record<StorageSource, string> = {
   argument: '来自启动参数 --data-dir',
   pointer: '来自 launcher-storage.json',
-  portable: 'EXE 同级的 launcher-data（便携版默认）',
-  install: 'EXE 同级的 launcher-data（解压版默认）',
+  install: '安装版默认位置（%APPDATA%\DSH-launcher-KEWU）',
   development: '开发态默认位置（%APPDATA%\\dsh-launcher）',
 }
 

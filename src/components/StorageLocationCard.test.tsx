@@ -15,7 +15,7 @@ type Call = { kind: 'get' | 'choose' | 'reset' | 'relaunch'; arg?: string }
 function storageState(overrides: Partial<StorageState> = {}): StorageState {
   return {
     dataDir: 'D:\\launcher-data',
-    source: 'portable',
+    source: 'install',
     portableDir: 'D:\\launcher-data',
     pointerFile: null,
     legacy: { dataDir: 'C:\\Users\\demo\\AppData\\Roaming\\dsh-launcher', hasData: false },
@@ -58,10 +58,10 @@ async function mount(initial: StorageState, results: { choose?: StorageState | n
   return { container, calls, path, findButton, click }
 }
 
-it('便携来源显示 EXE 同级说明与当前路径', async () => {
-  const { container, path } = await mount(storageState({ source: 'portable', dataDir: 'D:\\launcher-data' }))
+it('安装版来源显示默认位置说明与当前路径', async () => {
+  const { container, path } = await mount(storageState({ source: 'install', dataDir: 'D:\\launcher-data' }))
   expect(path()).toBe('D:\\launcher-data')
-  expect(container.textContent).toContain('EXE 同级的 launcher-data（便携版默认）')
+  expect(container.textContent).toContain('安装版默认位置')
   expect(container.textContent).not.toContain('接管旧版数据')
 })
 
@@ -119,7 +119,7 @@ it('选择对话框取消（choose 返回 null）时界面状态不变', async (
 })
 
 it('恢复默认位置调用 reset 并采用返回的状态', async () => {
-  const resetState = storageState({ dataDir: 'D:\\launcher-data', source: 'portable', restartRequired: true })
+  const resetState = storageState({ dataDir: 'D:\\launcher-data', source: 'install', restartRequired: true })
   const { container, calls, path, click } = await mount(storageState({ dataDir: 'E:\\my-data', source: 'pointer' }), { reset: resetState })
   await click('恢复默认位置')
   expect(calls.some(call => call.kind === 'reset')).toBe(true)

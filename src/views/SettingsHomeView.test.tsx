@@ -12,8 +12,8 @@ afterEach(async () => { for (const root of roots.splice(0)) await act(async () =
 
 const storageState: StorageState = {
   dataDir: 'D:\\launcher-data',
-  source: 'portable',
-  portableDir: 'D:\\launcher-data',
+  source: 'install',
+  portableDir: null,
   pointerFile: null,
   legacy: { dataDir: 'C:\\Users\\demo\\AppData\\Roaming\\dsh-launcher', hasData: false },
   restartRequired: false,

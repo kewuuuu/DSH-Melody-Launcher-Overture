@@ -1369,8 +1369,8 @@ export interface PackControlConfig {
   launchArgs?: string[]
 }
 
-/** 数据目录的来源：命令行 > 指针文件 > EXE 旁的 portable 目录 > 安装目录 > 开发态默认。 */
-export type StorageSource = 'argument' | 'pointer' | 'portable' | 'install' | 'development'
+/** 数据目录的来源：命令行 > 指针文件 > 安装版默认位置 > 开发态默认。 */
+export type StorageSource = 'argument' | 'pointer' | 'install' | 'development'
 
 export interface StorageState {
   /** 当前进程正在使用的数据目录；切换之后要重启才会变。 */
