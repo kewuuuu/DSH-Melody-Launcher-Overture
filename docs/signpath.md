@@ -1,6 +1,8 @@
 # SignPath 签名接入（已选定路线）
 
-README 之外的单页操作清单：从「申请」到「CI 自动签名」只有六步，全部在 SignPath 与 GitHub 上做，本仓库已经准备好前置材料。
+README 之外的单页操作清单：从「申请」到「自动签名」只有六步，全部在 SignPath 与 GitHub 上做，本仓库已经准备好前置材料。
+
+> **当前阻塞**：本账号没有 GitHub Actions 额度（任何 job 都起不来，提示「account is locked due to a billing issue」），而 SignPath 的 GitHub App 走的是 Actions runner，所以本文第 6 步的自动签名现在**跑不起来**；仓库里原来那个 `signpath.yml` 已按「发布只走本地」的规则删掉。可行的两条路：① 恢复 Actions 额度后按本文重建 workflow；② 用 SignPath 的 API token 在本机提交签名请求（需在控制台确认接口后接入 `scripts/`，未验证）。
 
 ## 前置条件（本仓库现状）
 

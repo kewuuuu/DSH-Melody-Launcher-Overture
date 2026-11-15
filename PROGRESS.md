@@ -300,3 +300,9 @@
 - 回归：`npx tsc --noEmit` 0 error；`npm run build` 通过；`npx vitest run` **147 文件通过 / 9 跳过，1350 passed / 11 skipped（1361）**。
 - 未验证：SignPath 真正签名（未申请）、1.1.2→1.1.3 自动更新的完整升级、真实 UAC 成功交班。
 
+## 发布纪律：只走本地，不用 GitHub Actions（2026-11-13）
+
+- 用户定调：账号没有 Actions 额度，构建与发布一律本机做完，产物直接用 GitHub API 传到 Release（`POST /releases` + `POST uploads.github.com/.../assets`，token 从 `git credential fill` 取，curl 必须 `--ssl-no-revoke`）。这条也写进了工作区规则 `D:\engine\DSH\Workspace\.dsh\skills\wksp-rules\SKILL.md` 的「### 3. 构建产物与交付」。
+- 因此删掉 `.github/workflows/signpath.yml`（它的 GitHub App 走 Actions runner，没额度永远起不来），`docs/signpath.md` 顶部写明当前阻塞与两条可行路径；`tests/temp-unpack-sweeper.test.ts` 改为断言这个 workflow 不存在。
+- 仓库里上游原有的 `ci.yml` / `build.yml` / `release.yml` / `official-pack.yml` 未动：它们仍会在 push/tag 时触发并因账单锁定失败（不消耗额度，但会显示红叉）。是否删掉或改成只手动触发，等用户定。
+

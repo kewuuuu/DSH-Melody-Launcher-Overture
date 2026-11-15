@@ -70,18 +70,15 @@ describe('便携解压目录清扫', () => {
     expect(result).toEqual({ removed: [], skipped: [], failed: [] })
   })
 })
-describe('启动接线与签名流水线', () => {
+describe('启动接线与发布纪律', () => {
   it('主进程启动时确实会清一次过期解压目录', async () => {
     const { readFileSync } = await import('node:fs');
     const main = readFileSync('electron/main.ts', 'utf8');
     expect(main).toContain('sweepTempUnpackDirs({ dir: os.tmpdir(), processImagePaths: defaultProcessImagePaths() })');
   })
 
-  it('SignPath 流水线在仓库里，且没配变量时整条 job 跳过', async () => {
-    const { readFileSync } = await import('node:fs');
-    const workflow = readFileSync('.github/workflows/signpath.yml', 'utf8');
-    expect(workflow).toContain('signpath/github-action-submit-signing-request@v1');
-    expect(workflow).toContain("vars.SIGNPATH_ORGANIZATION_ID != ''");
-    expect(workflow).toContain('gh release upload');
+  it('没有依赖 GitHub Actions 的发布流水线（账号没有 Actions 额度，发布只走本地）', async () => {
+    const { existsSync } = await import('node:fs');
+    expect(existsSync('.github/workflows/signpath.yml')).toBe(false);
   })
 })
