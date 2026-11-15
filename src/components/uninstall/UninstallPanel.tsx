@@ -145,7 +145,7 @@ export function UninstallPanel() {
       </div>
 
       {started && (
-        <div className="uninstall-started" role="status"><LoaderCircle className="spin" size={14} /><span>正在退出：卸载程序会在后台完成删除，本版数据保留。</span></div>
+        <div className="uninstall-started" role="status"><LoaderCircle className="spin" size={14} /><span>正在退出：卸载程序已启动，接下来由它完成删除，本版数据保留。</span></div>
       )}
 
       <div className="uninstall-scan">

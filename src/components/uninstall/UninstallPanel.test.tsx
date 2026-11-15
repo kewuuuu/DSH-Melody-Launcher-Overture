@@ -184,7 +184,7 @@ it('不用先扫描：点「运行卸载程序」直接调用 run，deleteData �
   expect(uninstall.plan).not.toHaveBeenCalled()
   expect(uninstall.run).toHaveBeenCalledTimes(1)
   expect(uninstall.run).toHaveBeenCalledWith({ deleteData: false })
-  expect(container.textContent).toContain('正在退出：卸载程序会在后台完成删除，本版数据保留。')
+  expect(container.textContent).toContain('正在退出：卸载程序已启动，接下来由它完成删除，本版数据保留。')
   // 已经交给卸载程序，主按钮与扫描都不再可点。
   expect(button(container, '运行卸载程序').disabled).toBe(true)
   expect(button(container, '扫描本版内容').disabled).toBe(true)
