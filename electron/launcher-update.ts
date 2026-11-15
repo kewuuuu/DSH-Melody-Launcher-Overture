@@ -94,13 +94,11 @@ function pickNewestAsset(candidates: readonly ResolvedLauncherAsset[]): Resolved
   return best
 }
 
-/** 从 /releases/latest 响应里解析出便携版 exe 资产；缺失即抛错。 */
-export function resolvePortableAsset(release: GitHubLatestRelease): ResolvedLauncherAsset {
+/** 从 /releases/latest 响应里解析出便携版 exe 资产；只发安装版的 Release 返回 null。 */
+export function resolvePortableAsset(release: GitHubLatestRelease): ResolvedLauncherAsset | null {
   const tag = typeof release.tag_name === 'string' ? release.tag_name : ''
   if (!tag) throw new Error('Release 返回异常（缺少版本号）。')
-  const found = pickNewestAsset(collectAssets(release, PORTABLE_ASSET_MARKER))
-  if (!found) throw new Error('新版本没有可下载的便携版安装包。')
-  return found
+  return pickNewestAsset(collectAssets(release, PORTABLE_ASSET_MARKER))
 }
 
 /** 安装版的 Setup 资产：可选 —— 只发便携包的 Release 不该因此判成异常。 */
@@ -112,7 +110,8 @@ async function fetchLatestRelease(fetchImpl: typeof fetch): Promise<{
   tag: string
   htmlUrl: string
   notes: string | null
-  asset: ResolvedLauncherAsset
+  /** 便携包；Release 只发安装版时为 null。 */
+  asset: ResolvedLauncherAsset | null
   setup: ResolvedLauncherAsset | null
 }> {
   const endpoint = `${GITHUB_API_ROOT}/repos/${LAUNCHER_RELEASE_REPOSITORY}/releases/latest`
@@ -129,6 +128,9 @@ async function fetchLatestRelease(fetchImpl: typeof fetch): Promise<{
       }
       const release = await response.json() as GitHubLatestRelease
       const asset = resolvePortableAsset(release)
+      const setup = resolveSetupAsset(release)
+      // 只发安装版的 Release 里没有便携包，这不是错误；一个包都没有才算异常。
+      if (!asset && !setup) throw new Error('新版本没有可下载的安装包。')
       const rawNotes = typeof release.body === 'string' ? release.body.trim() : ''
       return {
         tag: typeof release.tag_name === 'string' ? release.tag_name : '',
@@ -136,7 +138,7 @@ async function fetchLatestRelease(fetchImpl: typeof fetch): Promise<{
         // 正文截到 4000 字符：详情弹窗展示用，超长部分去 Release 页看。
         notes: rawNotes ? rawNotes.slice(0, 4000) : null,
         asset,
-        setup: resolveSetupAsset(release),
+        setup,
       }
     } catch (error) {
       failures.push(url === endpoint ? errorMessage(error) : '镜像不可用。')
@@ -168,8 +170,8 @@ function errorMessage(error: unknown): string {
 interface PendingUpdate {
   tag: string
   htmlUrl: string
-  /** 便携版：原位替换用。 */
-  asset: ResolvedLauncherAsset
+  /** 便携版：原位替换用；只发安装版的 Release 为 null。 */
+  asset: ResolvedLauncherAsset | null
   /** 安装版：Setup 覆盖安装用；Release 只发便携包时为 null。 */
   setup: ResolvedLauncherAsset | null
 }
@@ -193,8 +195,8 @@ async function readUpdate(getVersion: () => string, fetchImpl: typeof fetch): Pr
           remoteVersion,
           releaseUrl: release.htmlUrl || null,
           releaseNotes: release.notes,
-          assetName: release.asset.name,
-          assetSize: release.asset.size || null,
+          assetName: (release.asset ?? release.setup)?.name ?? null,
+          assetSize: (release.asset ?? release.setup)?.size || null,
           checkedAt: checkedAt(),
           message: `发现新版本 ${remoteVersion}。`,
         },
@@ -347,9 +349,14 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
   async function performDownload(): Promise<LauncherUpdateStatus> {
     const target = pending as PendingUpdate
     // 安装版没有可替换的 exe，只能下 Setup 覆盖安装；便携版（以及开发态）下便携包。
-    const asset = detectInstallMode(execPathOf()) === 'installed' ? target.setup : target.asset
+    const mode = detectInstallMode(execPathOf())
+    const asset = mode === 'installed' ? target.setup : target.asset
     if (!asset) {
-      status = { ...status, state: 'error', message: '新版本没有可下载的安装版安装包。' }
+      status = {
+        ...status,
+        state: 'error',
+        message: mode === 'installed' ? '新版本没有可下载的安装版安装包。' : '新版本没有可下载的便携版安装包。',
+      }
       return status
     }
     const targetPath = path.join(updateRoot, asset.name)
@@ -431,8 +438,10 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
       await applySetupInstaller(target)
       return
     }
+    const portableAsset = target.asset
+    if (!portableAsset) throw new Error('新版本没有可下载的便携版安装包。')
     const execBase = path.basename(execPath)
-    const tempPath = path.join(updateRoot, target.asset.name)
+    const tempPath = path.join(updateRoot, portableAsset.name)
     const scriptPath = path.join(updateRoot, `apply-${process.pid}.cmd`)
     await mkdir(updateRoot, { recursive: true })
     await writeFile(scriptPath, buildApplyScript(execBase, tempPath, execPath))

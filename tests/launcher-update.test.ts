@@ -64,8 +64,8 @@ describe('resolvePortableAsset', () => {
     })
   })
 
-  it('throws when no portable exe asset exists', () => {
-    expect(() => resolvePortableAsset(releaseBody('v0.1.10', '') as never)).toThrow('没有可下载的便携版安装包')
+  it('returns null when no portable exe asset exists', () => {
+    expect(resolvePortableAsset(releaseBody('v0.1.10', '') as never)).toBeNull()
   })
 
   it('throws when the tag is missing', () => {
@@ -76,12 +76,12 @@ describe('resolvePortableAsset', () => {
 describe('资产匹配：忽略大小写与版本位置', () => {
   it('选中改名后的 DSH-launcher-KEWU-Portable-1.1.0.exe', () => {
     const asset = resolvePortableAsset(assetsBody('v1.1.0', [{ name: PORTABLE_KEWU }]) as never)
-    expect(asset.name).toBe(PORTABLE_KEWU)
+    expect(asset?.name).toBe(PORTABLE_KEWU)
   })
 
   it('旧命名 DSH-Launcher-1.0.4-portable.exe 仍然被选中', () => {
     const legacy = 'DSH-Launcher-1.0.4-portable.exe'
-    expect(resolvePortableAsset(assetsBody('v1.0.4', [{ name: legacy }]) as never).name).toBe(legacy)
+    expect(resolvePortableAsset(assetsBody('v1.0.4', [{ name: legacy }]) as never)?.name).toBe(legacy)
   })
 
   it('多个便携版资产时取文件名里版本号最大的那个', () => {
@@ -92,18 +92,18 @@ describe('资产匹配：忽略大小写与版本位置', () => {
         { name: 'DSH-launcher-KEWU-Portable-1.0.10.exe' },
       ]) as never,
     )
-    expect(asset.name).toBe('DSH-launcher-KEWU-Portable-1.1.0.exe')
+    expect(asset?.name).toBe('DSH-launcher-KEWU-Portable-1.1.0.exe')
   })
 
   it('大小写混写（Portable / PORTABLE）都能命中', () => {
     const upper = 'DSH-launcher-KEWU-PORTABLE-1.1.0.EXE'
-    expect(resolvePortableAsset(assetsBody('v1.1.0', [{ name: upper }]) as never).name).toBe(upper)
+    expect(resolvePortableAsset(assetsBody('v1.1.0', [{ name: upper }]) as never)?.name).toBe(upper)
   })
 
-  it('没有 portable 资产时抛原文案（只有 Setup 也不算）', () => {
-    expect(() => resolvePortableAsset(assetsBody('v1.1.0', [{ name: SETUP_KEWU }, { name: 'latest.yml' }]) as never)).toThrow(
-      '新版本没有可下载的便携版安装包。',
-    )
+  it('只有 Setup 资产时便携包为 null，安装包照常解析', () => {
+    const release = assetsBody('v1.1.0', [{ name: SETUP_KEWU }, { name: 'latest.yml' }]) as never
+    expect(resolvePortableAsset(release)).toBeNull()
+    expect(resolveSetupAsset(release)).toMatchObject({ name: SETUP_KEWU })
   })
 
   it('缺 Setup 资产时 resolveSetupAsset 返回 null 而不是抛错', () => {
@@ -173,10 +173,17 @@ describe('checkLauncherUpdate', () => {
     expect(status.message).toContain('额度')
   })
 
-  it('returns an error state when the release has no portable asset', async () => {
+  it('returns an error state when the release ships no asset at all', async () => {
     const status = await checkLauncherUpdate(() => '0.1.9', latestFetch(releaseBody('v0.1.10', '')))
     expect(status.state).toBe('error')
-    expect(status.message).toContain('没有可下载的便携版安装包')
+    expect(status.message).toContain('没有可下载的安装包')
+  })
+
+  it('只发安装版（没有便携包）时仍然报告可更新，并带上 Setup 的名字', async () => {
+    const body = assetsBody('v1.1.4', [{ name: SETUP_KEWU }, { name: 'DSH-launcher-KEWU-Uninstaller-1.1.4.exe' }])
+    const status = await checkLauncherUpdate(() => '1.1.3', latestFetch(body))
+    expect(status.state).toBe('update-available')
+    expect(status.assetName).toBe(SETUP_KEWU)
   })
 
   it('returns an error state on malformed JSON', async () => {
