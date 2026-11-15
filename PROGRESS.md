@@ -277,3 +277,15 @@
 - 注意：1.0.x 与 1.1.0 之前的旧 EXE 不认识 `launchElevated`，用旧版打开这份数据会忽略该键、并在下次保存设置时丢掉；这份配置要用 b14 及以后的版本。
 - 回归：`npx tsc --noEmit` 0 error；`npx vitest run` **143 文件通过 / 9 跳过，1328 passed / 11 skipped（1339）**。
 
+## 便携版解压目录与 1.1.2 三件产物（2026-11-13）
+
+- 用户报的现象：1.1.0 自动更新后文件名仍是 1.1.0（设计上原位替换、保留文件名），双击后窗口标题在、界面全白、任务栏只有进程。现场 `%TEMP%\3M31ODrrJNE6CIRYwMR1QnhdD4u` 只剩 8 个文件，`debug.log` 是 `Invalid file descriptor to ICU data received.`，进程树里一个 `--type=renderer` 都没有——界面文件被删了，不是锁、不是磁盘、不是 Defender。
+- 真因（`node_modules/app-builder-lib/out/targets/nsis/NsisTarget.js:242-248`）：`if (typeof unpackDirName === "string" || !unpackDirName) defines.UNPACK_DIR_NAME = unpackDirName || generateKsuid()`。只要这个键是字符串或假值，electron-builder 就把一个构建期固定名字烧进便携壳；`templates/nsis/portable.nsi:33-38` 于是每次都 `RMDir /r "$TEMP\<固定名>"` 再解压。同一份便携 EXE 的第二次启动（正是「启动即提权」重启自身那条路，`electron/main.ts:1269`）因此会把正在运行那份的 dll 与 icudtl.dat 删掉。
+- 修法：`package.json` 的 `build.portable.unpackDirName` 设成 `true`（真值、但不是字符串），走到 `$PLUGINSDIR\app` 的模板默认分支——每次启动一个新临时目录。这是唯一能关掉固定目录的写法；`false` 反而命中 `!false` 继续写死。
+- 副作用与回退：为这条一度给便携版加了「不重启自身提权」的守卫（`shouldRelaunchElevated` 的 `portable` 参数、设置页把开关置灰并提示「仅安装版可用」），真修法落地后整段撤回——便携版照样支持启动即提权，`src/views/SettingsHomeView.tsx` 与 `tests/startup-elevation.test.ts` 恢复原样。
+- 实测：同一份便携 EXE 起两个实例，分别解压到 `…\Temp\nsr309C.tmp\app` 与 `…\nsd404C.tmp\app`，各自 2 个 renderer、各自生成 `launcher-data`；`test/kewu16-elev` 里 `launchElevated=true` 重启一遍，最终 `BROWSERS=3 RENDERERS=2`、`launcher-boot.json` 存在、CLI `settings get` 正常应答。
+- 许可证：上游 `rirko/dsh-melody-launcher` 与 `Miyazawai/DSH-Melody-Launcher-Overture` 的 GitHub `license` 字段都是 `null`、`/license` 端点 404（保留所有权利），因此本分支不能单方面再授权。新增 `LICENSE`（MIT 全文，版权行写 rirko / Miyazawai / kewuuuu 三方）与该口径的 `NOTICE`（来源链、署名要求、许可证现状、第三方组件清单），`package.json` 补 `"license": "MIT"`、`repository.url`/`homepage` 指本 fork，`files` 收进 LICENSE 与 NOTICE；`tests/portable-unpack.test.ts` 守这两件事。
+- 构建与产物（先 `rm -rf release/b16`，遵守「每次构建清空产物目录」）：`release/b16/DSH-launcher-KEWU-Portable-1.1.2.exe` 92,630,738 字节 `287FE086B6B9689CEBA947DF5EDD7EB38CA6502B046FCDE2C0C3D22814B199C2`；`DSH-launcher-KEWU-Setup-1.1.2.exe` 104,155,392 字节 `7820E20D3D97513DEFF9D46220964F6251DE0E7608AB88ED364C4AF7E08F03C6`；`DSH-launcher-KEWU-Uninstaller-1.1.2.exe` 139,776 字节 `72219EF15F84B353E64A9C6C068618CADE80767CA8405CFB39E3629B78664A9A`。项目树带 Low 完整性标签，NSIS 与便携解包仍在 `D:\engine\DSH\test\` 下做，成品只留在 `release\b16`。
+- 回归：`npx tsc --noEmit` 通过；`npm run build` 通过；`npx vitest run` 146 文件通过 / 9 跳过，1344 passed / 11 skipped（1355）。
+- 未验证：真实 UAC 点「是」后的父子交班（无人值守只能模拟拒绝）、安装版从 1.1.1 自更新到 1.1.2 的完整升级、SignPath 实际签名。
+
