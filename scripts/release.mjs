@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 发版准备：一条命令做完前置校验、打印三件产物的构建命令，产物齐了再打印可粘贴的交付表
+// 发版准备：一条命令做完前置校验、打印安装包的构建命令，产物齐了再打印可粘贴的交付表
 // （文件名 / 字节 / SHA256）。它不执行构建、不 git add/commit/push/tag —— 发版动作由人执行。
 //
 //   node scripts/release.mjs                 校验工作树 + 打印构建命令（产物已存在则打印交付表）
@@ -19,8 +19,8 @@ const CONSTANTS_FILE = path.join(repoRoot, 'src', 'constants.ts')
 
 const HELP = `用法：node scripts/release.mjs [选项]
 
-校验工作树是否干净、打印当前版本与三件产物的构建命令（便携版 / 安装包 / 卸载器），
-产物就绪后计算 SHA256 并打印可直接粘贴的交付表。脚本自己不会执行构建，也不会
+校验工作树是否干净、打印当前版本与安装包的构建命令（卸载由安装包自带的卸载程序负责，
+不再单独出卸载器），产物就绪后计算 SHA256 并打印可直接粘贴的交付表。脚本自己不会执行构建，也不会
 git tag / git push / gh release —— 这些发版动作由人执行。
 
 选项：
@@ -96,23 +96,17 @@ function gitStatusPorcelain() {
   return result.stdout.split('\n').map(line => line.trim()).filter(Boolean)
 }
 
-/** 安装包与卸载器是发布必备；便携版已经停发，目录里还留着才算进交付表。 */
+/** 只有安装包是发布必备（卸载程序由它自己安装）；便携版已经停发，目录里还留着才算进交付表。 */
 function artifactList(version) {
   return [
     { label: '安装包', name: `DSH-launcher-KEWU-Setup-${version}.exe`, required: true },
-    { label: '卸载器', name: `DSH-launcher-KEWU-Uninstaller-${version}.exe`, required: true },
     { label: '便携版（已停发）', name: `DSH-launcher-KEWU-Portable-${version}.exe`, required: false },
   ]
 }
 
-function buildCommands(version, outputDir) {
-  const uninstaller = path.join(outputDir, `DSH-launcher-KEWU-Uninstaller-${version}.exe`)
+function buildCommands(_version, outputDir) {
   return [
     { label: '安装包', command: `npm run package:win -- -c.directories.output=${outputDir}` },
-    {
-      label: '卸载器',
-      command: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-uninstaller.ps1 -OutputPath "${uninstaller}"`,
-    },
   ]
 }
 
@@ -160,7 +154,7 @@ function notesSkeleton(version, repository) {
 ## 验证
 
 - \`npx tsc --noEmit\` / \`npx vitest run\`：待填写
-- 三件产物 SHA256：待填写（\`node scripts/release.mjs\` 会打印）
+- 安装包 SHA256：待填写（\`node scripts/release.mjs\` 会打印）
 
 ## 已知限制
 
@@ -209,7 +203,7 @@ function main() {
 
   const missing = artifactList(version).filter(artifact => artifact.required && !existsSync(path.join(repoRoot, outputDir, artifact.name)))
   if (missing.length > 0) {
-    console.log('按顺序执行下面三条构建命令（脚本不代跑）：')
+    console.log('按顺序执行下面的构建命令（脚本不代跑）：')
     buildCommands(version, outputDir).forEach((step, index) => {
       console.log(`  ${index + 1}. [${step.label}] ${step.command}`)
     })

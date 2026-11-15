@@ -1,10 +1,13 @@
-// 卸载执行层：算计划、导出脚本、把真正的删除动作交给一个独立的 helper 进程去做。
-//
-// 为什么不自己删：EXE 正被自己占用，数据目录里可能还有运行中的运行时；所以把 ps1 和 run.cmd
-// 写进 %TEMP% 的一个独立目录，detached 拉起后调用方立刻退出，helper 自己轮询等本进程消失再删。
+// 卸载执行层：算计划、导出脚本，再把真正的删除动作交出去。两条路，安装版优先：
+// ① 安装版：安装目录里就有 Setup 注册的 `Uninstall DSH-launcher-KEWU.exe`，交互式拉起它即可，
+//    删程序、删快捷方式、清注册表项都是它自己的事；
+// ② 便携版 / 开发态：没有那个 EXE，退回老路——把 ps1 和 run.cmd 写进 %TEMP% 的一个独立目录，
+//    detached 拉起后调用方立刻退出，helper 自己轮询等本进程消失再删。
+// 两条路都先退出启动器：EXE 正被自己占用，数据目录里可能还有运行中的运行时。
 
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -29,6 +32,12 @@ export const UNINSTALL_HELPER_COMMAND_FILENAME = 'run.cmd'
 
 export const UNINSTALL_STOP_TIMEOUT_MESSAGE = '还有整合包在运行，已中止卸载'
 
+/** electron-builder 的 NSIS 卸载器文件名：Setup 按 productName 生成，装完就躺在安装目录里。 */
+export const NSIS_UNINSTALLER_FILENAME = 'Uninstall DSH-launcher-KEWU.exe'
+
+/** 走 NSIS 卸载器时 deleteData 代劳不了，结果里必须如实说（后面接数据目录）。 */
+export const NSIS_DELETE_DATA_NOTE = '安装包自带的卸载程序只删程序、不动数据，本版数据目录需自行删除：'
+
 /** 计划缓存的有效期：设置页反复进出时不必每次都重扫几十万个文件。 */
 export const UNINSTALL_PLAN_CACHE_TTL_MS = 30_000
 
@@ -44,6 +53,8 @@ export interface UninstallServiceDeps {
   /** 停整合包的超时，缺省 UNINSTALL_STOP_TIMEOUT_MS。 */
   stopTimeoutMs?: number
   spawnImpl?: typeof spawn
+  /** 判断安装目录里有没有 NSIS 卸载器，缺省 node 的 existsSync；测试用。 */
+  existsSync?: (target: string) => boolean
   /** 随机后缀，缺省 randomBytes(4) 的 16 进制（8 位）。 */
   randomSuffix?: () => string
   /** 计划缓存有效期，缺省 UNINSTALL_PLAN_CACHE_TTL_MS。 */
@@ -52,10 +63,21 @@ export interface UninstallServiceDeps {
   now?: () => number
 }
 
+/** 一次卸载交出去之后的结局：走了哪条路、数据目录这次到底删不删。 */
+export interface UninstallRunResult {
+  started: boolean
+  /** nsis = 安装包自带的卸载器；helper = %TEMP% 里的 ps1 兜底流程。 */
+  mode: 'nsis' | 'helper'
+  /** 本版数据目录这次是否会被删。走 NSIS 时永远是 false——它只删程序。 */
+  dataRemoved: boolean
+  /** 需要用户自己再补一步时的中文说明。 */
+  note?: string
+}
+
 export interface UninstallService {
   plan(): Promise<UninstallPlan>
   exportScript(outDir: string, options?: { deleteData?: boolean }): Promise<UninstallScriptResult>
-  run(options: UninstallRunOptions & { waitPid?: number }): Promise<{ started: boolean }>
+  run(options: UninstallRunOptions & { waitPid?: number }): Promise<UninstallRunResult>
 }
 
 /** %TEMP%\\kewu-uninstall-<8位随机> 的完整路径。 */
@@ -109,6 +131,19 @@ export function createUninstallService(deps: UninstallServiceDeps): UninstallSer
     }
   }
 
+  /** 安装目录里的 NSIS 卸载器：交互式拉起，不加 /S，删什么由用户的确认按钮说了算。 */
+  function launchNsisUninstaller(uninstallerPath: string): void {
+    const spawnImpl = deps.spawnImpl ?? spawn
+    // 它启动后会把自己复制到 %TEMP% 再动手，所以启动器随后退出不挡路。
+    const child = spawnImpl(uninstallerPath, [], {
+      cwd: path.dirname(uninstallerPath),
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+    })
+    child.unref()
+  }
+
   function launchHelper(commandPath: string): void {
     const spawnImpl = deps.spawnImpl ?? spawn
     // Node 20.12+ 拒绝直接 spawn 批处理文件（EINVAL），只能借 cmd.exe /c 把它拉起来。
@@ -135,12 +170,27 @@ export function createUninstallService(deps: UninstallServiceDeps): UninstallSer
     return { scriptPath, commandPath }
   }
 
-  async function run(options: UninstallRunOptions & { waitPid?: number }): Promise<{ started: boolean }> {
+  async function run(options: UninstallRunOptions & { waitPid?: number }): Promise<UninstallRunResult> {
     const deleteData = options?.deleteData === true
     const waitPid =
       typeof options?.waitPid === 'number' && options.waitPid > 0 ? Math.trunc(options.waitPid) : selfPid()
     // 整合包还开着就整件事别做：helper 起来以后再去抢文件只会删一半。
     await stopPacks()
+    // 安装版优先：Setup 已经把卸载器装进安装目录、也写好了注册表卸载项，叫它就够了，
+    // 比手写 ps1 更不容易漏掉快捷方式和注册表。
+    const nsisUninstaller = path.join(path.resolve(deps.plan.installDir), NSIS_UNINSTALLER_FILENAME)
+    const exists = deps.existsSync ?? existsSync
+    if (exists(nsisUninstaller)) {
+      launchNsisUninstaller(nsisUninstaller)
+      return {
+        started: true,
+        mode: 'nsis',
+        // 卸载器只删程序：deleteData 在这一路上没人代劳，就如实写在结果里，别假装删了。
+        dataRemoved: false,
+        ...(deleteData ? { note: NSIS_DELETE_DATA_NOTE + path.resolve(deps.plan.dataDir) } : {}),
+      }
+    }
+    // 便携版 / 开发态没有那个 EXE：老路径照旧，写 helper 再拉起。
     const helperDir = buildUninstallHelperDir(helperTempDir(), deps.randomSuffix?.())
     await mkdir(helperDir, { recursive: true })
     const scriptPath = path.join(helperDir, UNINSTALL_SCRIPT_FILENAME)
@@ -160,7 +210,7 @@ export function createUninstallService(deps: UninstallServiceDeps): UninstallSer
       'utf8',
     )
     launchHelper(commandPath)
-    return { started: true }
+    return { started: true, mode: 'helper', dataRemoved: deleteData }
   }
 
   return {

@@ -43,6 +43,11 @@ Config flags: --port, --port-mode, --run-as-admin, --auto-start, --pinned-at,
 API flags (api add only): --name, --base-url, --protocol, --models, --api-key
 Resume flags: --resume "<prompt>" --session <id> (both with pack restart only), --pack <id> (pending list only)
 Upgrade flag: --dsh-version <version> (pack upgrade only; upgrades only, the pack must be stopped)
+Uninstall: "uninstall now" stops running packs first, then on an installed build launches the
+           uninstaller the Setup registered (Uninstall DSH-launcher-KEWU.exe, interactive) and
+           returns {started, mode:"nsis", dataRemoved:false}; --delete-data cannot be honored on
+           that path, so the result carries a note and the data directory must be removed by
+           hand. Portable and development builds fall back to the %TEMP% helper script.
 Protocols: openai-completions, openai-responses, anthropic-messages
 Set DSH_LAUNCHER_USER_DATA instead of --user-data if desired.
 --launcher starts only the executable supplied, when control is unavailable.

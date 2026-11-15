@@ -320,7 +320,9 @@ node bin/launcher-control.cjs uninstall now --delete-data --yes
 
 - uninstall plan 只算不删：返回 {executablePath, installDir, dataDir, items, deleteBytes, keepBytes, warnings}。每个 item 是 {id,label,path,kind,sizeBytes,fileCount,action,reason?}，kind 为 file / directory / registry，action 为 delete / keep；keep 一定带 reason。
 - uninstall script --out <目录> 把 uninstall-kewu.ps1 与 uninstall-kewu.cmd 写进该目录：ps1 里已经填好当前 EXE 与数据目录，cmd 只负责用 --ExecutionPolicy Bypass 把 ps1 拉起来（-ExePath ... -DataDir ... -Yes）。默认导出的是「只删程序、保留数据」的版本，加 --delete-data 才连本版数据一起删。用户在选目录对话框里取消时返回 null。
-- uninstall now --yes [--delete-data] 才真的动手：先停掉所有整合包（最多等 20 秒，超时抛「还有整合包在运行，已中止卸载」），再把 ps1 与 run.cmd 写进 %TEMP%\kewu-uninstall-<8位随机>\，detached 拉起后立刻返回 {started:true}；主进程随即 app.quit()，helper 自己轮询等启动器退出（最多 120 秒）再删，最后删掉自己的临时目录。默认保留本版数据（launcher-data），只删程序文件；--delete-data 才连数据一起删。日志写在 helper 目录旁边的 kewu-uninstall-<8位随机>.log，不随 helper 目录一起消失。
+- uninstall now --yes [--delete-data] 才真的动手，先停掉所有整合包（最多等 20 秒，超时抛「还有整合包在运行，已中止卸载」），然后分两条路走：
+  - 安装版（Setup 装出来的）：安装目录里就有 Setup 注册的那一个 `Uninstall DSH-launcher-KEWU.exe`，直接交互式拉起它（不加 /S，删除范围由用户在它自己的确认窗口里点头），返回 {started:true, mode:"nsis", dataRemoved:false}，主进程随即 app.quit()。它只删程序、快捷方式与注册表项，所以 --delete-data 在这一路上代劳不了：结果里带 note 写明「本版数据目录需自行删除」以及那个目录的路径，绝不假装删过。
+  - 便携版与开发态：安装目录里没有那个 EXE，退回老办法——把 ps1 与 run.cmd 写进 %TEMP%\kewu-uninstall-<8位随机>\，detached 拉起后立刻返回 {started:true, mode:"helper", dataRemoved:<本次是否连数据一起删>}；helper 自己轮询等启动器退出（最多 120 秒）再删，最后删掉自己的临时目录。默认保留本版数据（launcher-data），只删程序文件；--delete-data 才连数据一起删。日志写在 helper 目录旁边的 kewu-uninstall-<8位随机>.log，不随 helper 目录一起消失。
 - 自解压残留（%TEMP%\3L*）默认删不掉才留：计划与脚本都会先看有没有进程正从那个目录运行（例如另一个启动器实例），有就改判 keep 并写明原因，绝不删别人正在用的解压目录。
 
 规则来自用户原则「删掉启动这个软件之后新增的内容，之前的都不要动」：

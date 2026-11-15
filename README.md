@@ -200,7 +200,7 @@ npm run package:win   # 打包 Windows 安装包（NSIS）
 要求 Node.js ≥ 20。
 
 > [!TIP]
-> **发版（本地完成，不依赖 GitHub Actions）**：`npm run package:win` 出安装包、`npm run package:uninstaller` 出卸载器，然后 `npm run release` 打印带 SHA256 的交付表，再用 GitHub API（或 `gh release upload`）把产物挂到 Release。需要整合包时，把 `official-pack-v<版本>.zip`（整合包页导出后改名）一并上传，官方包机制按 `OFFICIAL_PACK_VERSION` 常量核对。
+> **发版（本地完成，不依赖 GitHub Actions）**：`npm run package:win` 出安装包，然后 `npm run release` 打印带 SHA256 的交付表，再用 GitHub API（或 `gh release upload`）把产物挂到 Release。交付物只有安装包一件：卸载器由安装包自己装进安装目录（Setup 注册的 `Uninstall DSH-launcher-KEWU.exe`），不再单独产出一个卸载器 EXE。需要整合包时，把 `official-pack-v<版本>.zip`（整合包页导出后改名）一并上传，官方包机制按 `OFFICIAL_PACK_VERSION` 常量核对。
 
 ## 数据与配置
 
@@ -217,7 +217,7 @@ npm run package:win   # 打包 Windows 安装包（NSIS）
 ## 与上游的关系
 
 - 上游主线：[rirko/dsh-melody-launcher](https://github.com/rirko/dsh-melody-launcher) —— 启动器主线开发与插件目录 PR 的目标仓库
-- 本仓库：序曲（Overture）独立发布线 —— 安装包、卸载器与官方默认整合包都发布在这里的 Releases
+- 本仓库：序曲（Overture）独立发布线 —— 安装包与官方默认整合包都发布在这里的 Releases
 - 两边共享核心架构（派生家目录咽喉点、packs.json 唯一清单等）；本分支的增量以「首公里上手体验」为准绳：**零依赖部署、官方包开箱即玩、整包搬运**
 
 ## 联系与反馈

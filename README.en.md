@@ -112,7 +112,7 @@ npm run build         # typecheck + bundle
 npm run package:win   # NSIS installer
 ```
 
-> Releasing is local, with no GitHub Actions: `npm run package:win` builds the installer, `npm run package:uninstaller` builds the uninstaller, `npm run release` prints the delivery table with SHA256, then upload the artifacts to the Release through the GitHub API (or `gh release upload`). Upload the renamed pack export `official-pack-v<version>.zip` too when shipping a modpack — the official-pack mechanism resolves it by the `OFFICIAL_PACK_VERSION` constant.
+> Releasing is local, with no GitHub Actions: `npm run package:win` builds the installer, `npm run release` prints the delivery table with SHA256, then upload the artifacts to the Release through the GitHub API (or `gh release upload`). The installer is the only deliverable: uninstalling is served by the `Uninstall DSH-launcher-KEWU.exe` the Setup registers in the install directory, and no standalone uninstaller EXE ships any more. Upload the renamed pack export `official-pack-v<version>.zip` too when shipping a modpack — the official-pack mechanism resolves it by the `OFFICIAL_PACK_VERSION` constant.
 
 ## Data locations
 
@@ -127,7 +127,7 @@ npm run package:win   # NSIS installer
 ## Upstream & contact
 
 - Mainline: [rirko/dsh-melody-launcher](https://github.com/rirko/dsh-melody-launcher) — plugin-catalog PRs still target upstream.
-- This repo: the Overture release line — the installer, the uninstaller and official modpack zips ship from its Releases.
+- This repo: the Overture release line — the installer and official modpack zips ship from its Releases.
 - Issues welcome with launcher version and repro steps.
 
 ---
