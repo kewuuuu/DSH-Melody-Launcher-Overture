@@ -1061,6 +1061,8 @@ function createServices(bootSettings?: SettingsStore): Services {
     userDataPath: userData,
     githubFetch: githubAuth.fetch,
     emitProgress: progress => events.launcherUpdateProgress(progress),
+    // 覆盖安装前先停掉托管中的整合包：apply 走 process.exit(0)，不会经过 before-quit 的 shutdown。
+    stopPacks: () => packControl?.shutdown() ?? Promise.resolve(),
   })
 
   // 启动自愈：上次 AI 会话若在凭据锁期间崩溃（进程被杀、finally 未跑），
