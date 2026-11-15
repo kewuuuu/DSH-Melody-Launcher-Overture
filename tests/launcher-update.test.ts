@@ -1,192 +1,258 @@
 import { mkdtempSync } from 'node:fs'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  buildApplyScript,
+  APPLY_STOP_PACKS_TIMEOUT_MESSAGE,
   checkLauncherUpdate,
   createLauncherUpdater,
   detectInstallMode,
-  resolvePortableAsset,
+  isPortableRuntime,
   resolveSetupAsset,
   versionFromAssetName,
 } from '../electron/launcher-update'
+import type { LauncherUpdater } from '../electron/launcher-update'
 import { LAUNCHER_RELEASE_REPOSITORY } from '../src/constants'
 
-const PORTABLE = 'DSH-Launcher-0.1.10-portable.exe'
-/** 改名后的产物命名：大写 Portable、版本号在中间。 */
-const PORTABLE_KEWU = 'DSH-launcher-KEWU-Portable-1.1.0.exe'
 const SETUP_KEWU = 'DSH-launcher-KEWU-Setup-1.1.0.exe'
+const LEGACY_SETUP = 'DSH-Launcher-1.0.4-setup.exe'
 /** 安装版进程的 exe：不在 node_modules 里，名字也不带 portable。 */
 const INSTALLED_EXEC = 'C:\\Program Files\\DSH-launcher-KEWU\\DSH-launcher-KEWU.exe'
+const INSTALLED_DIR = 'C:\\Program Files\\DSH-launcher-KEWU'
+/** 开发态：execPath 落在 node_modules 里。 */
+const DEV_EXEC = 'C:\\dev\\dshlauncher\\node_modules\\electron\\dist\\electron.exe'
+
+type UpdaterOptions = Parameters<typeof createLauncherUpdater>[0]
 
 /** 构造带任意资产的 Release 响应（多资产场景用）。 */
 function assetsBody(remoteTag: string, assets: Array<{ name: string; size?: number }>): unknown {
   return {
     tag_name: remoteTag,
-    html_url: `https://github.com/${LAUNCHER_RELEASE_REPOSITORY}/releases/tag/${remoteTag}`,
+    html_url: 'https://github.com/' + LAUNCHER_RELEASE_REPOSITORY + '/releases/tag/' + remoteTag,
     assets: assets.map(asset => ({
       name: asset.name,
-      browser_download_url: `https://github.com/${LAUNCHER_RELEASE_REPOSITORY}/releases/download/${remoteTag}/${asset.name}`,
+      browser_download_url: 'https://github.com/' + LAUNCHER_RELEASE_REPOSITORY + '/releases/download/' + remoteTag + '/' + asset.name,
       size: asset.size ?? 9,
     })),
   }
 }
 
-/** 构造 /releases/latest 的响应，可替换资产/版本。默认体积与下载测试的数据（9 字节）一致。 */
-function releaseBody(remoteTag = 'v0.1.10', assetName = PORTABLE, assetSize = 9): unknown {
-  return {
-    tag_name: remoteTag,
-    html_url: `https://github.com/rirko/dsh-melody-launcher/releases/tag/${remoteTag}`,
-    assets: assetName
-      ? [{ name: assetName, browser_download_url: `https://github.com/rirko/dsh-melody-launcher/releases/download/${remoteTag}/${assetName}`, size: assetSize }]
-      : [],
+/** 构造 /releases/latest 的响应；默认只发 Setup（这条产品线唯一的产物）。 */
+function releaseBody(remoteTag = 'v0.1.10', assetName = SETUP_KEWU, assetSize = 9): unknown {
+  if (!assetName) {
+    return { tag_name: remoteTag, html_url: 'https://github.com/' + LAUNCHER_RELEASE_REPOSITORY + '/releases/tag/' + remoteTag, assets: [] }
   }
+  return assetsBody(remoteTag, [{ name: assetName, size: assetSize }])
 }
 
 function latestFetch(body: unknown, status = 200): typeof fetch {
   return (async input => {
-    const url = String(input)
-    if (url.endsWith(`/repos/${LAUNCHER_RELEASE_REPOSITORY}/releases/latest`)) {
+    if (String(input).endsWith('/repos/' + LAUNCHER_RELEASE_REPOSITORY + '/releases/latest')) {
       return new Response(status === 200 ? JSON.stringify(body) : '', { status })
     }
     return new Response('', { status: 404 })
   }) as typeof fetch
 }
 
-describe('resolvePortableAsset', () => {
-  it('picks the -portable.exe asset from the release', () => {
-    expect(resolvePortableAsset(releaseBody() as never)).toEqual({
-      name: PORTABLE,
+/** 分块发送内容的假 fetch，模拟 GitHub 资产下载。 */
+function chunkedAssetFetch(chunkSize = 3, total = 9, body: unknown = releaseBody()): typeof fetch {
+  return (async input => {
+    const url = String(input)
+    if (url.endsWith('/releases/latest')) return new Response(JSON.stringify(body), { status: 200 })
+    if (url.includes('/releases/download/')) {
+      const bytes = new Uint8Array(total)
+      bytes.fill(0x41)
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          let offset = 0
+          while (offset < total) {
+            controller.enqueue(bytes.slice(offset, Math.min(offset + chunkSize, total)))
+            offset += chunkSize
+          }
+          controller.close()
+        },
+      })
+      return new Response(stream, { status: 200, headers: { 'content-length': String(total) } })
+    }
+    return new Response('', { status: 404 })
+  }) as typeof fetch
+}
+
+function tempUserData(): string {
+  return mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
+}
+
+interface Harness {
+  updater: LauncherUpdater
+  userDataPath: string
+  updateRoot: string
+  /** 按发生顺序记录 stopPacks 与 spawn 的调用。 */
+  calls: string[]
+  spawned: Array<{ command: string; args: string[]; options?: Record<string, unknown> }>
+  exitCodes: number[]
+}
+
+/**
+ * 造一个「已下载好 Setup、可以 apply」的安装版启动器：
+ * 下载目录里先放一份与资产同大小的文件，download() 会走「已存在同大小」分支，不碰网络。
+ */
+async function readyUpdater(overrides: Partial<UpdaterOptions> = {}): Promise<Harness> {
+  const userDataPath = overrides.userDataPath ?? tempUserData()
+  const updateRoot = path.join(userDataPath, 'launcher-update')
+  await mkdir(updateRoot, { recursive: true })
+  await writeFile(path.join(updateRoot, SETUP_KEWU), new Uint8Array(9))
+  const calls: string[] = []
+  const spawned: Harness['spawned'] = []
+  const exitCodes: number[] = []
+  const fakeSpawn = ((command: string, args: string[], spawnOptions: Record<string, unknown>) => {
+    calls.push('spawn')
+    spawned.push({ command, args, options: spawnOptions })
+    return { unref: () => undefined }
+  }) as never
+  const fakeExit = ((code: number) => {
+    exitCodes.push(code)
+    return undefined
+  }) as never
+  const updater = createLauncherUpdater({
+    getVersion: () => '1.0.4',
+    userDataPath,
+    getExecPath: () => INSTALLED_EXEC,
+    githubFetch: latestFetch(assetsBody('v1.1.0', [{ name: SETUP_KEWU }])),
+    emitProgress: () => undefined,
+    spawnProcess: fakeSpawn,
+    exitProcess: fakeExit,
+    stopPacks: () => {
+      calls.push('stop')
+    },
+    ...overrides,
+  } as UpdaterOptions)
+  await updater.check()
+  const status = await updater.download()
+  expect(status.state).toBe('downloaded')
+  return { updater, userDataPath, updateRoot, calls, spawned, exitCodes }
+}
+
+describe('resolveSetupAsset', () => {
+  it('从 Release 里挑出 Setup 安装包', () => {
+    expect(resolveSetupAsset(releaseBody() as never)).toEqual({
+      name: SETUP_KEWU,
       size: 9,
-      url: `https://github.com/rirko/dsh-melody-launcher/releases/download/v0.1.10/${PORTABLE}`,
+      url: 'https://github.com/' + LAUNCHER_RELEASE_REPOSITORY + '/releases/download/v0.1.10/' + SETUP_KEWU,
     })
   })
 
-  it('returns null when no portable exe asset exists', () => {
-    expect(resolvePortableAsset(releaseBody('v0.1.10', '') as never)).toBeNull()
+  it('没有 Setup 资产时返回 null（便携包与 latest.yml 都不算）', () => {
+    const release = assetsBody('v1.1.0', [
+      { name: 'DSH-launcher-KEWU-Portable-1.1.0.exe' },
+      { name: 'latest.yml' },
+    ]) as never
+    expect(resolveSetupAsset(release)).toBeNull()
   })
 
-  it('throws when the tag is missing', () => {
-    expect(() => resolvePortableAsset(releaseBody('') as never)).toThrow('缺少版本号')
+  it('多个 Setup 资产时取文件名里版本号最大的那个', () => {
+    const release = assetsBody('v1.1.0', [
+      { name: 'DSH-launcher-KEWU-Setup-1.0.4.exe' },
+      { name: 'DSH-launcher-KEWU-Setup-1.1.0.exe' },
+      { name: 'DSH-launcher-KEWU-Setup-1.0.10.exe' },
+    ]) as never
+    expect(resolveSetupAsset(release)?.name).toBe(SETUP_KEWU)
+  })
+
+  it('旧命名 DSH-Launcher-1.0.4-setup.exe 仍然被选中（大小写无关）', () => {
+    const release = assetsBody('v1.0.4', [{ name: LEGACY_SETUP }]) as never
+    expect(resolveSetupAsset(release)?.name).toBe(LEGACY_SETUP)
   })
 })
 
-describe('资产匹配：忽略大小写与版本位置', () => {
-  it('选中改名后的 DSH-launcher-KEWU-Portable-1.1.0.exe', () => {
-    const asset = resolvePortableAsset(assetsBody('v1.1.0', [{ name: PORTABLE_KEWU }]) as never)
-    expect(asset?.name).toBe(PORTABLE_KEWU)
-  })
-
-  it('旧命名 DSH-Launcher-1.0.4-portable.exe 仍然被选中', () => {
-    const legacy = 'DSH-Launcher-1.0.4-portable.exe'
-    expect(resolvePortableAsset(assetsBody('v1.0.4', [{ name: legacy }]) as never)?.name).toBe(legacy)
-  })
-
-  it('多个便携版资产时取文件名里版本号最大的那个', () => {
-    const asset = resolvePortableAsset(
-      assetsBody('v1.1.0', [
-        { name: 'DSH-launcher-KEWU-Portable-1.0.4.exe' },
-        { name: 'DSH-launcher-KEWU-Portable-1.1.0.exe' },
-        { name: 'DSH-launcher-KEWU-Portable-1.0.10.exe' },
-      ]) as never,
-    )
-    expect(asset?.name).toBe('DSH-launcher-KEWU-Portable-1.1.0.exe')
-  })
-
-  it('大小写混写（Portable / PORTABLE）都能命中', () => {
-    const upper = 'DSH-launcher-KEWU-PORTABLE-1.1.0.EXE'
-    expect(resolvePortableAsset(assetsBody('v1.1.0', [{ name: upper }]) as never)?.name).toBe(upper)
-  })
-
-  it('只有 Setup 资产时便携包为 null，安装包照常解析', () => {
-    const release = assetsBody('v1.1.0', [{ name: SETUP_KEWU }, { name: 'latest.yml' }]) as never
-    expect(resolvePortableAsset(release)).toBeNull()
-    expect(resolveSetupAsset(release)).toMatchObject({ name: SETUP_KEWU })
-  })
-
-  it('缺 Setup 资产时 resolveSetupAsset 返回 null 而不是抛错', () => {
-    expect(resolveSetupAsset(assetsBody('v1.1.0', [{ name: PORTABLE_KEWU }]) as never)).toBeNull()
-    expect(resolveSetupAsset(assetsBody('v1.1.0', [{ name: SETUP_KEWU }]) as never)).toMatchObject({ name: SETUP_KEWU })
-  })
-
-  it('versionFromAssetName 取文件名里最后一个版本号', () => {
-    expect(versionFromAssetName(PORTABLE_KEWU)).toBe('1.1.0')
-    expect(versionFromAssetName('DSH-Launcher-1.0.4-portable.exe')).toBe('1.0.4')
+describe('versionFromAssetName', () => {
+  it('取文件名里最后一个版本号', () => {
+    expect(versionFromAssetName(SETUP_KEWU)).toBe('1.1.0')
+    expect(versionFromAssetName('DSH-launcher-KEWU-Setup-1.0.10.exe')).toBe('1.0.10')
     expect(versionFromAssetName('launcher.exe')).toBeNull()
   })
 })
 
 describe('detectInstallMode', () => {
-  it('PORTABLE_EXECUTABLE_FILE 存在即便携版', () => {
-    expect(detectInstallMode('C:\\x\\launcher.exe', 'C:\\x\\launcher.exe')).toBe('portable')
-  })
-
-  it('exe 名带 -portable 视为便携版', () => {
-    expect(detectInstallMode('C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe', null)).toBe('portable')
-  })
-
-  it('execPath 落在 node_modules 里视为开发模式', () => {
-    expect(detectInstallMode('C:\\dev\\dshlauncher\\node_modules\\electron\\dist\\electron.exe', null)).toBe('dev')
-  })
-
-  it('安装版 exe（不在 node_modules、名不带 portable）视为安装版', () => {
+  it('安装版 exe（不在 node_modules、名不带 portable）视为 installed', () => {
     expect(detectInstallMode(INSTALLED_EXEC, null)).toBe('installed')
+  })
+
+  it('execPath 落在 node_modules 里视为 dev', () => {
+    expect(detectInstallMode(DEV_EXEC, null)).toBe('dev')
+  })
+
+  it('PORTABLE_EXECUTABLE_FILE 存在也判成 dev：便携版已停发', () => {
+    expect(detectInstallMode('C:\\x\\launcher.exe', 'C:\\x\\launcher.exe')).toBe('dev')
+  })
+
+  it('exe 名带 -portable 同样判成 dev', () => {
+    expect(detectInstallMode('C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe', null)).toBe('dev')
+  })
+})
+
+describe('isPortableRuntime', () => {
+  it('环境变量有值时是历史便携包', () => {
+    expect(isPortableRuntime(INSTALLED_EXEC, 'C:\\Launcher\\DSH-launcher-KEWU.exe')).toBe(true)
+  })
+
+  it('安装版不是便携包', () => {
+    expect(isPortableRuntime(INSTALLED_EXEC, null)).toBe(false)
+    expect(isPortableRuntime(INSTALLED_EXEC, '   ')).toBe(false)
   })
 })
 
 describe('checkLauncherUpdate', () => {
-  it('reports update-available with asset details when remote is newer', async () => {
+  it('远端更新时报告 update-available，并带上 Setup 的名字与大小', async () => {
     const status = await checkLauncherUpdate(() => '0.1.9', latestFetch(releaseBody()))
     expect(status).toMatchObject({
       state: 'update-available',
       localVersion: '0.1.9',
       remoteVersion: '0.1.10',
-      assetName: PORTABLE,
+      assetName: SETUP_KEWU,
       assetSize: 9,
-      releaseUrl: 'https://github.com/rirko/dsh-melody-launcher/releases/tag/v0.1.10',
+      releaseUrl: 'https://github.com/' + LAUNCHER_RELEASE_REPOSITORY + '/releases/tag/v0.1.10',
     })
   })
 
   it('把 Release 正文带进 update-available 状态（详情弹窗的「更新内容」）', async () => {
-    const status = await checkLauncherUpdate(() => '0.1.9', latestFetch({ ...(releaseBody() as object), body: '### v0.1.10\n- 修复官方整合包' }))
+    const body = { ...(releaseBody() as object), body: '### v0.1.10\n- 修复官方整合包' }
+    const status = await checkLauncherUpdate(() => '0.1.9', latestFetch(body))
     expect(status.state).toBe('update-available')
     expect(status.releaseNotes).toBe('### v0.1.10\n- 修复官方整合包')
   })
 
-  it('reports up-to-date when versions match (leading v tolerated)', async () => {
+  it('版本相同报告 up-to-date（容忍前导 v），且不带资产名', async () => {
     const status = await checkLauncherUpdate(() => '0.1.9', latestFetch(releaseBody('v0.1.9')))
     expect(status.state).toBe('up-to-date')
     expect(status.remoteVersion).toBe('0.1.9')
     expect(status.assetName).toBeNull()
   })
 
-  it('reports up-to-date when the local version is newer', async () => {
+  it('本地更新时报告 up-to-date', async () => {
     const status = await checkLauncherUpdate(() => '0.1.11', latestFetch(releaseBody('v0.1.10')))
     expect(status.state).toBe('up-to-date')
   })
 
-  it('returns an error state instead of throwing on HTTP failure', async () => {
+  it('HTTP 失败时返回 error 状态而不是抛异常', async () => {
     const status = await checkLauncherUpdate(() => '0.1.9', latestFetch(releaseBody(), 403))
     expect(status.state).toBe('error')
     expect(status.message).toContain('额度')
   })
 
-  it('returns an error state when the release ships no asset at all', async () => {
+  it('Release 一个安装包都没有时返回中文 error', async () => {
     const status = await checkLauncherUpdate(() => '0.1.9', latestFetch(releaseBody('v0.1.10', '')))
     expect(status.state).toBe('error')
     expect(status.message).toContain('没有可下载的安装包')
   })
 
-  it('只发安装版（没有便携包）时仍然报告可更新，并带上 Setup 的名字', async () => {
-    const body = assetsBody('v1.1.4', [{ name: SETUP_KEWU }, { name: 'DSH-launcher-KEWU-Uninstaller-1.1.4.exe' }])
-    const status = await checkLauncherUpdate(() => '1.1.3', latestFetch(body))
-    expect(status.state).toBe('update-available')
-    expect(status.assetName).toBe(SETUP_KEWU)
+  it('Release 缺版本号时返回中文 error', async () => {
+    const status = await checkLauncherUpdate(() => '0.1.9', latestFetch({ assets: [] }))
+    expect(status.state).toBe('error')
+    expect(status.message).toContain('缺少版本号')
   })
 
-  it('returns an error state on malformed JSON', async () => {
+  it('JSON 坏掉时返回 error 状态', async () => {
     const malformed = (async input => {
       if (String(input).endsWith('/releases/latest')) return new Response('not json', { status: 200 })
       return new Response('', { status: 404 })
@@ -195,7 +261,7 @@ describe('checkLauncherUpdate', () => {
     expect(status.state).toBe('error')
   })
 
-  it('falls back to a mirror when the primary API is rate limited', async () => {
+  it('主接口被限流时回退镜像', async () => {
     const withMirror = (async input => {
       const url = String(input)
       if (url.startsWith('https://api.github.com/')) return new Response('', { status: 403 })
@@ -205,10 +271,10 @@ describe('checkLauncherUpdate', () => {
     const status = await checkLauncherUpdate(() => '0.1.9', withMirror)
     expect(status.state).toBe('update-available')
     expect(status.remoteVersion).toBe('0.1.10')
-    expect(status.assetName).toBe(PORTABLE)
+    expect(status.assetName).toBe(SETUP_KEWU)
   })
 
-  it('prefers the primary endpoint when it still works', async () => {
+  it('主接口可用时只请求一次', async () => {
     const hits: string[] = []
     const tracking = (async input => {
       hits.push(String(input))
@@ -221,102 +287,66 @@ describe('checkLauncherUpdate', () => {
   })
 })
 
-/** 分块发送内容的假 fetch，模拟 GitHub 资产下载。 */
-function chunkedAssetFetch(chunkSize = 3, total = 9, body: unknown = releaseBody()): typeof fetch {
-  return (async input => {
-    const url = String(input)
-    if (url.endsWith('/releases/latest')) return new Response(JSON.stringify(body), { status: 200 })
-    if (url.includes('/releases/download/')) {
-      const body = new Uint8Array(total)
-      body.fill(0x41) // 'A'
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          let offset = 0
-          while (offset < total) {
-            controller.enqueue(body.slice(offset, Math.min(offset + chunkSize, total)))
-            offset += chunkSize
-          }
-          controller.close()
-        },
-      })
-      return new Response(stream, { status: 200, headers: { 'content-length': String(total) } })
-    }
-    return new Response('', { status: 404 })
-  }) as typeof fetch
-}
-
 describe('createLauncherUpdater download', () => {
-  it('downloads via chunked asset fetch and reports byte-accurate progress', async () => {
-    const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
+  it('分块下载 Setup，进度按字节上报到 100%', async () => {
+    const userDataPath = tempUserData()
     const progresses: Array<{ phase: string; percent: number }> = []
     const updater = createLauncherUpdater({
       getVersion: () => '0.1.9',
       userDataPath,
-      getExecPath: () => 'C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe',
+      getExecPath: () => INSTALLED_EXEC,
       githubFetch: chunkedAssetFetch(3, 9),
-      emitProgress: p => progresses.push(p),
+      emitProgress: progress => progresses.push(progress),
     })
     await updater.check()
     const status = await updater.download()
     expect(status.state).toBe('downloaded')
     expect(progresses.length).toBeGreaterThan(0)
-    expect(progresses.every(p => p.phase === 'downloading')).toBe(true)
+    expect(progresses.every(progress => progress.phase === 'downloading')).toBe(true)
     expect(progresses.at(-1)?.percent).toBe(100)
-    const saved = await import('node:fs/promises').then(fs => fs.readFile(path.join(userDataPath, 'launcher-update', PORTABLE)))
+    const saved = await readFile(path.join(userDataPath, 'launcher-update', SETUP_KEWU))
     expect(saved.length).toBe(9)
     expect(saved[0]).toBe(0x41)
   })
-  async function setUp(tag = 'v0.1.10') {
-    const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
-    const progresses: Array<{ phase: string; percent: number }> = []
-    const updater = createLauncherUpdater({
-      getVersion: () => '0.1.9',
-      userDataPath,
-      getExecPath: () => 'C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe',
-      githubFetch: latestFetch(releaseBody(tag)),
-      emitProgress: p => progresses.push(p),
-    })
-    return { updater, userDataPath, progresses }
-  }
 
-  it('re-download does nothing when the temp file already matches the size', async () => {
-    const { updater, userDataPath } = await setUp()
-    const updateRoot = path.join(userDataPath, 'launcher-update')
-    await mkdir(updateRoot, { recursive: true })
-    await writeFile(path.join(updateRoot, PORTABLE), new Uint8Array(9).fill(0x42))
-    await updater.check()
-    const status = await updater.download()
-    expect(status.state).toBe('downloaded')
-    // 内容保持原样（幂等，未重下）。
-    const saved = await import('node:fs/promises').then(fs => fs.readFile(path.join(updateRoot, PORTABLE)))
-    expect(saved[0]).toBe(0x42)
+  it('已存在同大小的安装包时不重新下载（幂等）', async () => {
+    const { updateRoot } = await readyUpdater()
+    const saved = await readFile(path.join(updateRoot, SETUP_KEWU))
+    expect(saved[0]).toBe(0x00)
   })
 
-  it('returns the current status without downloading when no update is pending', async () => {
-    const { updater } = await setUp('v0.1.9')
+  it('没有待更新时原样返回当前状态', async () => {
+    const updater = createLauncherUpdater({
+      getVersion: () => '1.1.0',
+      userDataPath: tempUserData(),
+      getExecPath: () => INSTALLED_EXEC,
+      githubFetch: latestFetch(assetsBody('v1.1.0', [{ name: SETUP_KEWU }])),
+      emitProgress: () => undefined,
+    })
     await updater.check()
     const status = await updater.download()
     expect(status.state).toBe('up-to-date')
   })
 
-  it('fails over to error state when the downloaded bytes mismatch the asset size', async () => {
-    const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
-    // 声明 1000 字节，实际只发 5 字节。
+  it('下载字节数与资产大小不符时进 error 状态', async () => {
     const lying = (async input => {
       const url = String(input)
-      if (url.endsWith('/releases/latest')) return new Response(JSON.stringify(releaseBody()), { status: 200 })
+      if (url.endsWith('/releases/latest')) return new Response(JSON.stringify(releaseBody('v1.1.0')), { status: 200 })
       if (url.includes('/releases/download/')) {
         const stream = new ReadableStream<Uint8Array>({
-          start(controller) { controller.enqueue(new Uint8Array([1, 2, 3, 4, 5])); controller.close() },
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3, 4, 5]))
+            controller.close()
+          },
         })
         return new Response(stream, { status: 200, headers: { 'content-length': '1000' } })
       }
       return new Response('', { status: 404 })
     }) as typeof fetch
     const updater = createLauncherUpdater({
-      getVersion: () => '0.1.9',
-      userDataPath,
-      getExecPath: () => 'C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe',
+      getVersion: () => '1.0.4',
+      userDataPath: tempUserData(),
+      getExecPath: () => INSTALLED_EXEC,
       githubFetch: lying,
       emitProgress: () => undefined,
     })
@@ -327,153 +357,113 @@ describe('createLauncherUpdater download', () => {
   })
 })
 
-describe('apply', () => {
-  it('builds a batch script that waits, moves, starts and self-deletes', () => {
-    const script = buildApplyScript('DSH-Launcher-0.1.9-portable.exe', 'C:\\temp\\new.exe', 'C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe')
-    expect(script).toContain('@echo off')
-    expect(script).toContain('%SystemRoot%\\System32\\tasklist.exe /fi "imagename eq DSH-Launcher-0.1.9-portable.exe"')
-    expect(script).toContain('move /y "C:\\temp\\new.exe" "C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe"')
-    expect(script).toContain('start "" "C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe"')
-    expect(script).toContain('del "%~f0"')
-  })
-
-  it('cleans up the script even when the move fails', () => {
-    const script = buildApplyScript('Old.exe', 'C:\\temp\\new.exe', 'C:\\Launcher\\Old.exe')
-    // 不再用 exit /b 1 提前退出：那会跳过 del，让 cmd 残留在 userData/launcher-update 里。
-    expect(script).not.toContain('exit /b 1')
-    expect(script).toContain('if not errorlevel 1 start "" "C:\\Launcher\\Old.exe"')
-    expect(script).toContain('del "%~f0"')
-  })
-
-  it('throws when called without a downloaded update', async () => {
-    const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
+describe('apply（安装版：一次性助手覆盖安装）', () => {
+  it('没有已下载的更新就 apply 时抛中文错误', async () => {
     const updater = createLauncherUpdater({
-      getVersion: () => '0.1.9',
-      userDataPath,
+      getVersion: () => '1.0.4',
+      userDataPath: tempUserData(),
+      getExecPath: () => INSTALLED_EXEC,
       githubFetch: latestFetch(releaseBody()),
       emitProgress: () => undefined,
     })
     await expect(updater.apply()).rejects.toThrow('没有已下载的启动器更新')
   })
 
-  it('refuses to apply over a non-portable executable in dev mode', async () => {
+  it('dev 模式拒绝自动更新', async () => {
     delete process.env.PORTABLE_EXECUTABLE_FILE
-    const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
-    const updateRoot = path.join(userDataPath, 'launcher-update')
-    await mkdir(updateRoot, { recursive: true })
-    await writeFile(path.join(updateRoot, PORTABLE), new Uint8Array(9))
-    const updater = createLauncherUpdater({
-      getVersion: () => '0.1.9',
-      userDataPath,
-      getExecPath: () => 'C:\\dev\\dshlauncher\\node_modules\\electron\\dist\\electron.exe',
-      githubFetch: latestFetch(releaseBody()),
-      emitProgress: () => undefined,
-    })
-    await updater.check()
-    await updater.download()
-    await expect(updater.apply()).rejects.toThrow('自动更新仅支持便携版启动器')
+    const { updater } = await readyUpdater({ getExecPath: () => DEV_EXEC })
+    await expect(updater.apply()).rejects.toThrow('自动更新仅支持安装版启动器')
   })
 
-  it('writes the apply script, spawns it via wscript and exits the app', async () => {
-    const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
-    const updateRoot = path.join(userDataPath, 'launcher-update')
-    await mkdir(updateRoot, { recursive: true })
-    await writeFile(path.join(updateRoot, PORTABLE), new Uint8Array(9))
+  it('便携包环境给出「便携版已停发」中文错误', async () => {
+    const previous = process.env.PORTABLE_EXECUTABLE_FILE
+    process.env.PORTABLE_EXECUTABLE_FILE = 'C:\\Launcher\\DSH-launcher-KEWU.exe'
+    try {
+      const { updater } = await readyUpdater()
+      await expect(updater.apply()).rejects.toThrow('便携版已停发，请改用安装版。')
+    } finally {
+      if (previous === undefined) delete process.env.PORTABLE_EXECUTABLE_FILE
+      else process.env.PORTABLE_EXECUTABLE_FILE = previous
+    }
+  })
 
-    const spawned: Array<{ command: string; args: string[] }> = []
-    let exitCode: number | undefined
-    let unrefCalled = false
-    const fakeSpawn = ((command: string, args: string[]) => {
-      spawned.push({ command, args })
-      return { unref: () => { unrefCalled = true } }
-    }) as never
-    const fakeExit = ((code: number) => { exitCode = code }) as never
-
-    const updater = createLauncherUpdater({
-      getVersion: () => '0.1.9',
-      userDataPath,
-      getExecPath: () => 'C:\\Launcher\\DSH-Launcher-0.1.9-portable.exe',
-      githubFetch: latestFetch(releaseBody()),
-      emitProgress: () => undefined,
-      spawnProcess: fakeSpawn,
-      exitProcess: fakeExit,
-    })
-    await updater.check()
-    await updater.download()
-    // 强制走「已存在同大小 temp」分支，保证 pending 仍指向 0.1.10。
+  it('先停整合包，再写 cmd+vbs、以 wscript 隐藏拉起并退出应用', async () => {
+    delete process.env.PORTABLE_EXECUTABLE_FILE
+    const { updater, updateRoot, calls, spawned, exitCodes } = await readyUpdater()
     await updater.apply()
 
+    // 顺序：先停整合包，再拉起助手。
+    expect(calls).toEqual(['stop', 'spawn'])
     expect(spawned).toHaveLength(1)
     expect(spawned[0].command).toBe('wscript.exe')
-    expect(String(spawned[0].args[0])).toContain(`apply-${process.pid}.vbs`)
-    expect(unrefCalled).toBe(true)
-    expect(exitCode).toBe(0)
-
-    // 通过 wscript（GUI 子系统，无控制台）隐藏运行 cmd 脚本；vbs 运行后自删。
-    const vbs = await import('node:fs/promises').then(fs => fs.readFile(spawned[0].args[0] as string, 'utf8'))
-    expect(vbs).toContain('WScript.Shell')
-    expect(vbs).toContain('DeleteFile WScript.ScriptFullName')
-    const scriptPath = /shell\.Run """(.*\.cmd)""", 0, False/.exec(vbs)?.[1] as string
-    const script = await import('node:fs/promises').then(fs => fs.readFile(scriptPath, 'utf8'))
-    expect(script).toContain('move /y')
-    expect(script).toContain('start ""')
-  })
-})
-
-describe('安装版自更新（Setup 覆盖安装）', () => {
-  it('下载 Setup 并以 detached 方式启动安装程序，然后退出应用', async () => {
-    const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
-    const body = assetsBody('v1.1.0', [{ name: PORTABLE_KEWU }, { name: SETUP_KEWU }])
-    const spawned: Array<{ command: string; args: string[]; options?: Record<string, unknown> }> = []
-    let exitCode: number | undefined
-    const fakeSpawn = ((command: string, args: string[], spawnOptions: Record<string, unknown>) => {
-      spawned.push({ command, args, options: spawnOptions })
-      return { unref: () => undefined }
-    }) as never
-    const fakeExit = ((code: number) => { exitCode = code }) as never
-    const updater = createLauncherUpdater({
-      getVersion: () => '1.0.4',
-      userDataPath,
-      getExecPath: () => INSTALLED_EXEC,
-      githubFetch: chunkedAssetFetch(3, 9, body),
-      emitProgress: () => undefined,
-      spawnProcess: fakeSpawn,
-      exitProcess: fakeExit,
-    })
-
-    await updater.check()
-    const status = await updater.download()
-    expect(status.state).toBe('downloaded')
-    expect(status.assetName).toBe(SETUP_KEWU)
-
-    const setupPath = path.join(userDataPath, 'launcher-update', SETUP_KEWU)
-    const saved = await import('node:fs/promises').then(fs => fs.readFile(setupPath))
-    expect(saved.length).toBe(9)
-
-    // 安装版不再抛「开发模式」，而是启动安装程序。
-    await updater.apply()
-    expect(spawned).toHaveLength(1)
-    expect(spawned[0].command).toBe(setupPath)
-    expect(spawned[0].args).toEqual(['/S'])
+    const launcherPath = spawned[0].args[0]
+    expect(launcherPath).toContain('apply-' + process.pid + '.vbs')
+    expect(spawned[0].options?.windowsHide).toBe(true)
     expect(spawned[0].options?.detached).toBe(true)
-    expect(spawned[0].options?.stdio).toBe('ignore')
-    expect(exitCode).toBe(0)
+    expect(exitCodes).toEqual([0])
+
+    // vbs 只用窗口模式 0 拉起 cmd：隐藏运行，不留黑框；跑完自删。
+    const launcherScript = await readFile(launcherPath, 'utf8')
+    expect(launcherScript).toContain('WScript.Shell')
+    expect(launcherScript).toContain(', 0, False')
+    expect(launcherScript).toContain('DeleteFile WScript.ScriptFullName')
+    const commandPath = /shell\.Run """(.*\.cmd)""", 0, False/.exec(launcherScript)?.[1] as string
+    expect(commandPath).toBe(path.join(updateRoot, 'apply-' + process.pid + '.cmd'))
+
+    // cmd：等 PID 退出 → Setup /S /D=<当前安装目录> → 只有成功才 start 新 exe。
+    const command = await readFile(commandPath, 'utf8')
+    expect(command).toContain('/D=' + INSTALLED_DIR)
+    expect(command).toContain('"PID eq ' + process.pid + '"')
+    expect(command).toContain('goto wait')
+    expect(command).toContain('start "" "' + INSTALLED_EXEC + '"')
+    expect(command).toContain('if not "%CODE%"=="0" goto setup_failed')
+
+    // 日志落在 <userData>/launcher-update/apply-<时间戳>.log
+    const logNames = (await import('node:fs/promises').then(fs => fs.readdir(updateRoot))).filter(name => name.endsWith('.log'))
+    expect(logNames).toHaveLength(1)
+    expect(command).toContain(logNames[0])
   })
 
-  it('安装版没有 Setup 资产时给出中文错误，而不是「开发模式」文案', async () => {
-    const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'launcher-update-'))
+  it('装失败时不启动新版本（失败分支里没有 start）', async () => {
+    delete process.env.PORTABLE_EXECUTABLE_FILE
+    const { updater, updateRoot } = await readyUpdater()
+    await updater.apply()
+    const command = await readFile(path.join(updateRoot, 'apply-' + process.pid + '.cmd'), 'utf8')
+    const label = '\r\n:setup_failed\r\n'
+    const endLabel = '\r\n:done\r\n'
+    const failedBranch = command.slice(command.indexOf(label), command.indexOf(endLabel))
+    expect(failedBranch).toContain(':setup_failed')
+    expect(failedBranch).not.toContain('start ""')
+    expect(failedBranch).toContain('setup failed with exit code %CODE%')
+  })
+
+  it('整合包停不下来时中止更新，且不拉起安装助手', async () => {
+    delete process.env.PORTABLE_EXECUTABLE_FILE
+    const { updater, spawned, exitCodes } = await readyUpdater({
+      stopPacks: () => new Promise<void>(() => undefined),
+      stopPacksTimeoutMs: 10,
+    })
+    await expect(updater.apply()).rejects.toThrow(APPLY_STOP_PACKS_TIMEOUT_MESSAGE)
+    expect(spawned).toHaveLength(0)
+    expect(exitCodes).toHaveLength(0)
+  })
+
+  it('安装包没下载完就 apply 时抛中文错误', async () => {
+    delete process.env.PORTABLE_EXECUTABLE_FILE
+    const userDataPath = tempUserData()
+    const updateRoot = path.join(userDataPath, 'launcher-update')
+    await mkdir(updateRoot, { recursive: true })
     const updater = createLauncherUpdater({
       getVersion: () => '1.0.4',
       userDataPath,
       getExecPath: () => INSTALLED_EXEC,
-      githubFetch: latestFetch(assetsBody('v1.1.0', [{ name: PORTABLE_KEWU }])),
+      githubFetch: latestFetch(assetsBody('v1.1.0', [{ name: SETUP_KEWU }])),
       emitProgress: () => undefined,
+      spawnProcess: (() => ({ unref: () => undefined })) as never,
+      exitProcess: (() => undefined) as never,
     })
     await updater.check()
     const status = await updater.download()
     expect(status.state).toBe('error')
-    expect(status.message).toContain('没有可下载的安装版安装包')
-    expect(status.message).not.toContain('开发模式')
   })
 })
-

@@ -5,10 +5,19 @@ import { LAUNCHER_RELEASE_REPOSITORY } from '../src/constants'
 import type { LauncherUpdateProgress, LauncherUpdateStatus } from '../src/types'
 import { compareVersions, normalizeVersion } from './dsh-update'
 import { downloadReleaseAsset } from './release-download'
+import {
+  buildApplyCommand,
+  buildApplyCommandPath,
+  buildApplyLauncherPath,
+  buildApplyLogPath,
+  buildHiddenLauncherScript,
+  installDirFromExecPath,
+} from './launcher-update-helper'
 
 /**
- * 启动器自更新：启动时检测 GitHub Release 是否有新版本 → 自动后台下载新 exe
- * （带进度）→ 便携版原位替换当前 exe 并重启，安装版交给 Setup 覆盖安装。
+ * 启动器自更新：启动时检测 GitHub Release 是否有新版本 → 自动后台下载 Setup（带进度）
+ * → 退出前交给一次性助手：等本进程退出，再 `Setup /S /D=<当前安装目录>` 静默覆盖安装，
+ * 只有装成功才重新拉起启动器。便携版已停发，只发安装版。
  * 检测逻辑与 dsh-update 对齐：任何网络/解析失败都收敛成 error 状态，绝不阻塞启动。
  */
 
@@ -21,8 +30,13 @@ const GITHUB_HEADERS = {
   'User-Agent': 'DSH-Launcher',
   'X-GitHub-Api-Version': '2022-11-28',
 }
-/** 新 exe 体积上限（portable 约 91MB，放宽到 512MiB 防极端情况）。 */
+/** 新安装包体积上限（Setup 约 91MB，放宽到 512MiB 防极端情况）。 */
 const MAX_LAUNCHER_BYTES = 512 * 1024 * 1024
+
+/** 停整合包最多等这么久：等不到就中止更新——覆盖安装不能撞上正在运行的文件。 */
+export const APPLY_STOP_PACKS_TIMEOUT_MS = 20_000
+
+export const APPLY_STOP_PACKS_TIMEOUT_MESSAGE = '还有整合包在运行，已中止更新'
 
 interface GitHubReleaseAsset {
   name?: unknown
@@ -44,13 +58,10 @@ export interface ResolvedLauncherAsset {
   url: string
 }
 
-/** 便携版资产的文件名标记。匹配前统一转小写：历史命名 `-portable.exe` 与现在的
- * `DSH-launcher-KEWU-Portable-1.1.0.exe`（大写 P、版本在中间）都要能命中。 */
-const PORTABLE_ASSET_MARKER = 'portable'
-/** NSIS 安装包（安装版自更新用）的文件名标记。 */
+/** NSIS 安装包的文件名标记：便携版停发后，这是唯一还产的资产。 */
 const SETUP_ASSET_MARKER = 'setup'
 
-/** 文件名里最后一个版本号（`DSH-launcher-KEWU-Portable-1.1.0.exe` → `1.1.0`）；没有则 null。 */
+/** 文件名里最后一个版本号（`DSH-launcher-KEWU-Setup-1.1.0.exe` → `1.1.0`）；没有则 null。 */
 export function versionFromAssetName(name: string): string | null {
   const versions = name.toLowerCase().match(/\d+(?:\.\d+)+/g)
   return versions && versions.length > 0 ? versions[versions.length - 1] : null
@@ -94,14 +105,7 @@ function pickNewestAsset(candidates: readonly ResolvedLauncherAsset[]): Resolved
   return best
 }
 
-/** 从 /releases/latest 响应里解析出便携版 exe 资产；只发安装版的 Release 返回 null。 */
-export function resolvePortableAsset(release: GitHubLatestRelease): ResolvedLauncherAsset | null {
-  const tag = typeof release.tag_name === 'string' ? release.tag_name : ''
-  if (!tag) throw new Error('Release 返回异常（缺少版本号）。')
-  return pickNewestAsset(collectAssets(release, PORTABLE_ASSET_MARKER))
-}
-
-/** 安装版的 Setup 资产：可选 —— 只发便携包的 Release 不该因此判成异常。 */
+/** 安装版的 Setup 资产；Release 里没有可用的 Setup 时返回 null，由调用方给出中文错误。 */
 export function resolveSetupAsset(release: GitHubLatestRelease): ResolvedLauncherAsset | null {
   return pickNewestAsset(collectAssets(release, SETUP_ASSET_MARKER))
 }
@@ -110,8 +114,7 @@ async function fetchLatestRelease(fetchImpl: typeof fetch): Promise<{
   tag: string
   htmlUrl: string
   notes: string | null
-  /** 便携包；Release 只发安装版时为 null。 */
-  asset: ResolvedLauncherAsset | null
+  /** 本次要运行的 Setup；Release 没发安装版时是 null。 */
   setup: ResolvedLauncherAsset | null
 }> {
   const endpoint = `${GITHUB_API_ROOT}/repos/${LAUNCHER_RELEASE_REPOSITORY}/releases/latest`
@@ -127,17 +130,16 @@ async function fetchLatestRelease(fetchImpl: typeof fetch): Promise<{
         continue
       }
       const release = await response.json() as GitHubLatestRelease
-      const asset = resolvePortableAsset(release)
+      if (typeof release.tag_name !== 'string' || !release.tag_name) throw new Error('Release 返回异常（缺少版本号）。')
       const setup = resolveSetupAsset(release)
-      // 只发安装版的 Release 里没有便携包，这不是错误；一个包都没有才算异常。
-      if (!asset && !setup) throw new Error('新版本没有可下载的安装包。')
+      // 便携版已停发：Release 里没有 Setup 就等于没有可用的安装包。
+      if (!setup) throw new Error('新版本没有可下载的安装包。')
       const rawNotes = typeof release.body === 'string' ? release.body.trim() : ''
       return {
         tag: typeof release.tag_name === 'string' ? release.tag_name : '',
         htmlUrl: typeof release.html_url === 'string' ? release.html_url : '',
         // 正文截到 4000 字符：详情弹窗展示用，超长部分去 Release 页看。
         notes: rawNotes ? rawNotes.slice(0, 4000) : null,
-        asset,
         setup,
       }
     } catch (error) {
@@ -170,9 +172,7 @@ function errorMessage(error: unknown): string {
 interface PendingUpdate {
   tag: string
   htmlUrl: string
-  /** 便携版：原位替换用；只发安装版的 Release 为 null。 */
-  asset: ResolvedLauncherAsset | null
-  /** 安装版：Setup 覆盖安装用；Release 只发便携包时为 null。 */
+  /** 本次要运行的 Setup：安装版自更新的唯一产物。 */
   setup: ResolvedLauncherAsset | null
 }
 
@@ -195,12 +195,12 @@ async function readUpdate(getVersion: () => string, fetchImpl: typeof fetch): Pr
           remoteVersion,
           releaseUrl: release.htmlUrl || null,
           releaseNotes: release.notes,
-          assetName: (release.asset ?? release.setup)?.name ?? null,
-          assetSize: (release.asset ?? release.setup)?.size || null,
+          assetName: release.setup?.name ?? null,
+          assetSize: release.setup?.size || null,
           checkedAt: checkedAt(),
           message: `发现新版本 ${remoteVersion}。`,
         },
-        pending: { tag: release.tag, htmlUrl: release.htmlUrl, asset: release.asset, setup: release.setup },
+        pending: { tag: release.tag, htmlUrl: release.htmlUrl, setup: release.setup },
       }
     }
     return {
@@ -242,46 +242,31 @@ export async function checkLauncherUpdate(
   return snapshot.status
 }
 
-/** 生成原位替换 + 重启的批处理脚本（Windows cmd）。替换失败也清理脚本自身，不留残留。 */
-export function buildApplyScript(execBase: string, tempPath: string, execPath: string): string {
-  return [
-    '@echo off',
-    'set /a tries=0',
-    ':wait',
-    // tasklist/find 用 System32 全路径：即使 PATH 被 MSYS/Git Bash 污染，也能拿到 Windows 自带的实现。
-    `%SystemRoot%\\System32\\tasklist.exe /fi "imagename eq ${execBase}" 2>nul | %SystemRoot%\\System32\\find.exe /i "${execBase}" >nul`,
-    'if %errorlevel% equ 0 (',
-    '  set /a tries+=1',
-    '  if %tries% lss 120 (',
-    '    timeout /t 1 /nobreak >nul',
-    '    goto wait',
-    '  )',
-    ')',
-    `move /y "${tempPath}" "${execPath}" >nul`,
-    'if not errorlevel 1 start "" "' + execPath + '"',
-    // 无论替换成功与否都删除脚本：move 失败说明目标被占用（旧实例还在），
-    // 残留的 cmd 没有继续执行的意义，下次启动器更新会重新生成。
-    'del "%~f0"',
-    '',
-  ].join('\r\n')
-}
+export type LauncherInstallMode = 'installed' | 'dev'
 
-export type LauncherInstallMode = 'portable' | 'installed' | 'dev'
+/**
+ * 老便携包识别：便携版已停发，但机器上可能还跑着历史便携包。
+ * 它没有安装目录、也没有 Setup 覆盖安装的前提，只能拒绝并让用户改用安装版。
+ */
+export function isPortableRuntime(
+  execPath: string,
+  portableExecutableFile: string | null | undefined = process.env.PORTABLE_EXECUTABLE_FILE,
+): boolean {
+  if (typeof portableExecutableFile === 'string' && portableExecutableFile.trim()) return true
+  return path.basename(execPath).toLowerCase().includes('-portable')
+}
 
 /**
  * 当前进程的安装形态：
- * - portable：electron-builder 便携包（有 PORTABLE_EXECUTABLE_FILE，或 exe 名带 Portable），
- *   可以下载新 exe 原位替换后重启；
- * - dev：直接跑 electron / node（execPath 落在 node_modules 里），没有可替换的独立产物，
- *   替换会把新启动器写到 Electron 二进制上，必须先拒绝；
- * - installed：NSIS 安装版，没有可替换的 exe，只能运行下载好的 Setup 覆盖安装。
+ * - installed：NSIS 安装版，唯一支持自更新的形态——Setup 覆盖安装回当前安装目录；
+ * - dev：直接跑 electron / node（execPath 落在 node_modules 里），没有可覆盖安装的产物；
+ * - 历史便携包（PORTABLE_EXECUTABLE_FILE 或 exe 名带 Portable）也归成 dev：便携版已停发。
  */
 export function detectInstallMode(
   execPath: string,
   portableExecutableFile: string | null | undefined = process.env.PORTABLE_EXECUTABLE_FILE,
 ): LauncherInstallMode {
-  if (portableExecutableFile) return 'portable'
-  if (path.basename(execPath).toLowerCase().includes('-portable')) return 'portable'
+  if (isPortableRuntime(execPath, portableExecutableFile)) return 'dev'
   if (execPath.replace(/\\/g, '/').toLowerCase().includes('node_modules')) return 'dev'
   return 'installed'
 }
@@ -289,10 +274,14 @@ export function detectInstallMode(
 export interface LauncherUpdaterOptions {
   /** 本地启动器版本。 */
   getVersion: () => string
-  /** userData 目录，下载缓存与替换脚本放这里。 */
+  /** userData 目录：下载缓存、升级助手脚本与日志都在这里的 launcher-update/。 */
   userDataPath: string
   /** 当前运行的可执行文件路径；测试注入。缺省 process.execPath。 */
   getExecPath?: () => string
+  /** 停掉所有正在运行的整合包（父级主进程接 packControl.shutdown）：装之前必须停干净。 */
+  stopPacks?: () => Promise<void> | void
+  /** 停整合包的超时，缺省 APPLY_STOP_PACKS_TIMEOUT_MS。 */
+  stopPacksTimeoutMs?: number
   /** 带 GitHub 鉴权的 fetch；缺省用全局 fetch。 */
   githubFetch?: typeof fetch
   /** 进度事件（下载百分比 / 应用阶段）。 */
@@ -312,8 +301,12 @@ export interface LauncherUpdater {
 export function createLauncherUpdater(options: LauncherUpdaterOptions): LauncherUpdater {
   const doFetch = options.githubFetch ?? fetch
   const updateRoot = path.join(options.userDataPath, 'launcher-update')
-  /** 用户手里那个 exe：便携版是 PORTABLE_EXECUTABLE_FILE，开发/安装态是 process.execPath。 */
-  const execPathOf = (): string => (options.getExecPath ?? (() => process.env.PORTABLE_EXECUTABLE_FILE || process.execPath))()
+  /** 用户手里那个 exe：安装版就是 process.execPath（便携版已停发，不再取 PORTABLE_EXECUTABLE_FILE）。 */
+  const execPathOf = (): string => (options.getExecPath ?? (() => process.execPath))()
+  const stopPacksTimeoutMs =
+    typeof options.stopPacksTimeoutMs === 'number' && options.stopPacksTimeoutMs > 0
+      ? options.stopPacksTimeoutMs
+      : APPLY_STOP_PACKS_TIMEOUT_MS
   let status: LauncherUpdateStatus = {
     state: 'up-to-date',
     localVersion: null,
@@ -348,15 +341,10 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
 
   async function performDownload(): Promise<LauncherUpdateStatus> {
     const target = pending as PendingUpdate
-    // 安装版没有可替换的 exe，只能下 Setup 覆盖安装；便携版（以及开发态）下便携包。
-    const mode = detectInstallMode(execPathOf())
-    const asset = mode === 'installed' ? target.setup : target.asset
+    // 只发安装版：永远只下 Setup。
+    const asset = target.setup
     if (!asset) {
-      status = {
-        ...status,
-        state: 'error',
-        message: mode === 'installed' ? '新版本没有可下载的安装版安装包。' : '新版本没有可下载的便携版安装包。',
-      }
+      status = { ...status, state: 'error', message: '新版本没有可下载的安装版安装包。' }
       return status
     }
     const targetPath = path.join(updateRoot, asset.name)
@@ -394,8 +382,36 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
   }
 
   /**
-   * 安装版：静默运行下载好的 Setup（/S）覆盖安装。安装器要写 Program Files 或注册表，
-   * 会在 UAC 弹窗停下等用户确认，所以这里不隐藏窗口，也不等它返回。
+   * 停掉正在运行的整合包：覆盖安装会写这些文件，任何一个还开着都可能让安装失败。
+   * 等不到就中止本次更新——宁可这次不装，也不装一半。
+   */
+  async function stopRunningPacks(): Promise<void> {
+    if (!options.stopPacks) return
+    const doStop = Promise.resolve(options.stopPacks())
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(APPLY_STOP_PACKS_TIMEOUT_MESSAGE)), stopPacksTimeoutMs)
+      // 这个计时器不该拖着进程退出。
+      if (typeof timer.unref === 'function') timer.unref()
+    })
+    try {
+      await Promise.race([doStop, timeout])
+    } catch (error) {
+      const text = errorMessage(error)
+      throw new Error(text === APPLY_STOP_PACKS_TIMEOUT_MESSAGE ? text : `停止整合包失败，已中止更新：${text}`)
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * 安装版：写一个一次性助手（cmd + vbs），由它等本进程退出后再执行
+   * 《Setup /S /D=<当前安装目录>》，装成功才重新拉起启动器。
+   *
+   * - 必须等本进程退出：Setup 要覆盖正在运行的 exe，活着装就是文件占用。
+   * - 必须带 /D=<当前安装目录>：不带的话 Setup 会装回它自己认定的默认目录，
+   *   用户自定义的安装目录（连同 EXE 同级的 launcher-storage.json 数据目录指针）就丢了。
+   * - 装失败不启动新版本，也不删安装包：用户还能再点一次。
    */
   async function applySetupInstaller(target: PendingUpdate): Promise<void> {
     const setup = target.setup
@@ -403,18 +419,36 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     const setupPath = path.join(updateRoot, setup.name)
     const existing = await stat(setupPath).catch(() => null)
     if (!existing) throw new Error('安装包还没下载完，请重新下载更新后再试。')
-    status = { ...status, state: 'applying', message: '正在启动安装程序，安装过程需要管理员确认…' }
+    const execPath = execPathOf()
+    const installDir = installDirFromExecPath(execPath)
+    if (!installDir) throw new Error('找不到当前安装目录，已中止更新。')
+    status = { ...status, state: 'applying', message: '正在重启并安装更新，请稍候…' }
     options.emitProgress({ phase: 'applying', percent: 100 })
+    await mkdir(updateRoot, { recursive: true })
+    const logPath = buildApplyLogPath(updateRoot)
+    // 先落一行「已交给助手」：万一 vbs 没能启动，这个文件就是唯一的现场证据。
+    await writeFile(logPath, `[apply] apply requested for ${setup.name} at ${new Date().toISOString()}\n`, { flag: 'a' })
+    const commandPath = buildApplyCommandPath(updateRoot, process.pid)
+    const launcherPath = buildApplyLauncherPath(updateRoot, process.pid)
+    await writeFile(commandPath, buildApplyCommand({
+      pid: process.pid,
+      setupPath,
+      installDir,
+      exePath: execPath,
+      logPath,
+    }))
+    await writeFile(launcherPath, buildHiddenLauncherScript(commandPath))
     const doSpawn = options.spawnProcess ?? nodeSpawn
     try {
-      const child = doSpawn(setupPath, ['/S'], {
+      const child = doSpawn('wscript.exe', [launcherPath], {
         detached: true,
         stdio: 'ignore',
+        windowsHide: true,
         cwd: updateRoot,
       })
       child.unref()
     } catch (error) {
-      status = { ...status, state: 'error', message: `启动安装程序失败：${errorMessage(error)}` }
+      status = { ...status, state: 'error', message: `启动安装助手失败：${errorMessage(error)}` }
       throw new Error(status.message)
     }
     const doExit = options.exitProcess ?? (code => process.exit(code))
@@ -427,46 +461,16 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     }
     const target = pending as PendingUpdate
     const execPath = execPathOf()
-    const mode = detectInstallMode(execPath)
-    // 开发模式（process.execPath 指向 node_modules/electron 等）没有可替换的产物，
-    // 原位替换会把下载的新启动器 move 到 Electron 二进制上，破坏开发环境。
-    if (mode === 'dev') {
-      throw new Error('当前以开发模式运行，自动更新仅支持便携版启动器。')
+    // 便携版已停发：历史便携包没有安装目录，也没法覆盖安装，只能请用户改用安装版。
+    if (isPortableRuntime(execPath)) {
+      throw new Error('便携版已停发，请改用安装版。')
     }
-    // 安装版：没有可原位替换的 exe，改走 Setup 覆盖安装。
-    if (mode === 'installed') {
-      await applySetupInstaller(target)
-      return
+    // 开发模式（process.execPath 指向 node_modules/electron 等）没有可覆盖安装的产物。
+    if (detectInstallMode(execPath) === 'dev') {
+      throw new Error('当前以开发模式运行，自动更新仅支持安装版启动器。')
     }
-    const portableAsset = target.asset
-    if (!portableAsset) throw new Error('新版本没有可下载的便携版安装包。')
-    const execBase = path.basename(execPath)
-    const tempPath = path.join(updateRoot, portableAsset.name)
-    const scriptPath = path.join(updateRoot, `apply-${process.pid}.cmd`)
-    await mkdir(updateRoot, { recursive: true })
-    await writeFile(scriptPath, buildApplyScript(execBase, tempPath, execPath))
-    status = { ...status, state: 'applying', message: '正在替换并重启应用…' }
-    options.emitProgress({ phase: 'applying', percent: 100 })
-    // cmd 是控制台程序：detached spawn 会让 Windows 给它新建一个可见的黑色终端
-    // （Node 的 windowsHide 在此组合下不生效）。改用 wscript 隐藏启动 cmd，
-    // 并通过 vbs 的自删保持目录干净。
-    const vbsPath = path.join(updateRoot, `apply-${process.pid}.vbs`)
-    await writeFile(vbsPath, [
-      'Set shell = CreateObject("WScript.Shell")',
-      `shell.Run """${scriptPath}""", 0, False`,
-      'CreateObject("Scripting.FileSystemObject").DeleteFile WScript.ScriptFullName',
-      '',
-    ].join('\r\n'))
-    const doSpawn = options.spawnProcess ?? nodeSpawn
-    const child = doSpawn('wscript.exe', [vbsPath], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      cwd: updateRoot,
-    })
-    child.unref()
-    const doExit = options.exitProcess ?? (code => process.exit(code))
-    doExit(0)
+    await stopRunningPacks()
+    await applySetupInstaller(target)
   }
 
   return { check, download, apply }
