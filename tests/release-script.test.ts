@@ -37,9 +37,9 @@ afterEach(() => {
 })
 
 describe('scripts/release.mjs 默认产物目录', () => {
-  it('b14 已含当前版本便携版时复用它，而不是跳到空的 b15', async () => {
+  it('b14 已含当前版本安装包时复用它，而不是跳到空的 b15', async () => {
     const root = makeRoot({
-      b14: [`DSH-launcher-KEWU-Portable-${version}.exe`],
+      b14: [`DSH-launcher-KEWU-Setup-${version}.exe`],
       b15: [],
     })
     const { resolveOutputDir } = await loadScript()
@@ -47,8 +47,8 @@ describe('scripts/release.mjs 默认产物目录', () => {
   })
 
   it('多个目录都装着当前版本时取编号最大的', async () => {
-    const portable = `DSH-launcher-KEWU-Portable-${version}.exe`
-    const root = makeRoot({ b12: [portable], b14: [portable], b13: [] })
+    const setup = `DSH-launcher-KEWU-Setup-${version}.exe`
+    const root = makeRoot({ b12: [setup], b14: [setup], b13: [] })
     const { resolveOutputDir } = await loadScript()
     expect(resolveOutputDir(version, { root })).toEqual({ dir: join('release', 'b14'), reused: true })
   })
@@ -57,6 +57,12 @@ describe('scripts/release.mjs 默认产物目录', () => {
     const root = makeRoot({ b13: [], b15: [], b16: ['DSH-launcher-KEWU-Portable-0.0.1.exe'] })
     const { resolveOutputDir } = await loadScript()
     expect(resolveOutputDir(version, { root })).toEqual({ dir: join('release', 'b17'), reused: false })
+  })
+
+  it('只发过便携版的旧轮次仍然能被认出来', async () => {
+    const root = makeRoot({ b16: [`DSH-launcher-KEWU-Portable-${version}.exe`] })
+    const { resolveOutputDir } = await loadScript()
+    expect(resolveOutputDir(version, { root })).toEqual({ dir: join('release', 'b16'), reused: true })
   })
 
   it('release 目录不存在时从 b1 开始', async () => {

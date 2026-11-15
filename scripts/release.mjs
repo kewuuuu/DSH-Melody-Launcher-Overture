@@ -78,9 +78,10 @@ export function resolveOutputDir(version, options = {}) {
         .map(matched => ({ name: matched[0], number: Number(matched[1]) }))
         .sort((left, right) => right.number - left.number)
     : []
-  const portable = `DSH-launcher-KEWU-Portable-${version}.exe`
+  // 现在的交付只发安装版：先认 Setup，再回退到旧轮次里的便携版。
+  const candidates = [`DSH-launcher-KEWU-Setup-${version}.exe`, `DSH-launcher-KEWU-Portable-${version}.exe`]
   for (const build of builds) {
-    if (existsSync(path.join(releaseRoot, build.name, portable))) {
+    if (candidates.some(name => existsSync(path.join(releaseRoot, build.name, name)))) {
       return { dir: path.join('release', build.name), reused: true }
     }
   }
@@ -95,19 +96,19 @@ function gitStatusPorcelain() {
   return result.stdout.split('\n').map(line => line.trim()).filter(Boolean)
 }
 
+/** 安装包与卸载器是发布必备；便携版已经停发，目录里还留着才算进交付表。 */
 function artifactList(version) {
   return [
-    { label: '便携版', name: `DSH-launcher-KEWU-Portable-${version}.exe` },
-    { label: '安装包', name: `DSH-launcher-KEWU-Setup-${version}.exe` },
-    { label: '卸载器', name: `DSH-launcher-KEWU-Uninstaller-${version}.exe` },
+    { label: '安装包', name: `DSH-launcher-KEWU-Setup-${version}.exe`, required: true },
+    { label: '卸载器', name: `DSH-launcher-KEWU-Uninstaller-${version}.exe`, required: true },
+    { label: '便携版（已停发）', name: `DSH-launcher-KEWU-Portable-${version}.exe`, required: false },
   ]
 }
 
 function buildCommands(version, outputDir) {
   const uninstaller = path.join(outputDir, `DSH-launcher-KEWU-Uninstaller-${version}.exe`)
   return [
-    { label: '便携版', command: `npm run package:win -- -c.directories.output=${outputDir}` },
-    { label: '安装包', command: `npx electron-builder --win nsis -c.directories.output=${outputDir}` },
+    { label: '安装包', command: `npm run package:win -- -c.directories.output=${outputDir}` },
     {
       label: '卸载器',
       command: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-uninstaller.ps1 -OutputPath "${uninstaller}"`,
@@ -120,10 +121,10 @@ function sha256Of(filePath) {
 }
 
 function printDeliveryTable(version, outputDir, repository) {
-  const rows = artifactList(version).map(artifact => {
-    const filePath = path.join(repoRoot, outputDir, artifact.name)
-    return { ...artifact, filePath, bytes: statSync(filePath).size, sha256: sha256Of(filePath) }
-  })
+  const rows = artifactList(version)
+    .map(artifact => ({ ...artifact, filePath: path.join(repoRoot, outputDir, artifact.name) }))
+    .filter(artifact => existsSync(artifact.filePath))
+    .map(artifact => ({ ...artifact, bytes: statSync(artifact.filePath).size, sha256: sha256Of(artifact.filePath) }))
   const tag = `v${version}`
   const table = [
     '| 产物 | 文件 | 字节 | SHA256 |',
@@ -202,11 +203,11 @@ function main() {
   const outputDir = resolved.dir
   console.log(`当前版本：${version}`)
   console.log(`发布仓库：${repository ?? '<未从 src/constants.ts 读到 LAUNCHER_RELEASE_REPOSITORY>'}`)
-  if (resolved.reused) console.log(`发现已构建的产物目录：${outputDir}（已含 DSH-launcher-KEWU-Portable-${version}.exe）`)
+  if (resolved.reused) console.log(`发现已构建的产物目录：${outputDir}（已含 ${version} 的安装包）`)
   else console.log(`产物目录：${outputDir}`)
   console.log('')
 
-  const missing = artifactList(version).filter(artifact => !existsSync(path.join(repoRoot, outputDir, artifact.name)))
+  const missing = artifactList(version).filter(artifact => artifact.required && !existsSync(path.join(repoRoot, outputDir, artifact.name)))
   if (missing.length > 0) {
     console.log('按顺序执行下面三条构建命令（脚本不代跑）：')
     buildCommands(version, outputDir).forEach((step, index) => {
@@ -219,7 +220,7 @@ function main() {
   }
 
   const delivery = printDeliveryTable(version, outputDir, repository)
-  console.log('三件产物齐了，直接粘贴：')
+  console.log('产物齐了，直接粘贴：')
   console.log('')
   delivery.table.forEach(line => console.log(line))
   console.log('')

@@ -23,6 +23,8 @@ export function UpdateDialog({ status, progress, busy, onDownload, onApply, onCl
   const downloading = status.state === 'downloading' || (status.state === 'update-available' && percent !== null)
   const ready = status.state === 'downloaded'
   const failed = status.state === 'error'
+  // 版本号相同（或本地更新）也是 up-to-date：这时候不能给「下载更新」，否则点了只会报「没有可下载的更新」。
+  const upToDate = status.state === 'up-to-date'
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -30,7 +32,7 @@ export function UpdateDialog({ status, progress, busy, onDownload, onApply, onCl
         <header>
           <div>
             <h2 id="update-title">
-              {failed ? '更新失败' : ready ? '更新已就绪' : `发现启动器新版本 v${status.remoteVersion ?? ''}`}
+              {failed ? '更新失败' : ready ? '更新已就绪' : upToDate ? '启动器已是最新版本' : `发现启动器新版本 v${status.remoteVersion ?? ''}`}
             </h2>
           </div>
           <button type="button" className="icon-button" onClick={onClose} disabled={busy} aria-label="关闭更新窗口"><X size={18} /></button>
@@ -75,7 +77,11 @@ export function UpdateDialog({ status, progress, busy, onDownload, onApply, onCl
           </button>
         </div>
         <footer>
-          {ready ? (
+          {upToDate ? (
+            <button type="button" className="primary-command" onClick={onClose}>
+              <Check size={16} />知道了
+            </button>
+          ) : ready ? (
             <button type="button" className="primary-command" onClick={onApply} disabled={busy}>
               {busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}立即更新并重启
             </button>
@@ -92,7 +98,7 @@ export function UpdateDialog({ status, progress, busy, onDownload, onApply, onCl
               <Check size={16} />下载更新
             </button>
           )}
-          <button type="button" className="secondary-button" onClick={onClose} disabled={busy}>暂不</button>
+          {!upToDate && <button type="button" className="secondary-button" onClick={onClose} disabled={busy}>暂不</button>}
         </footer>
       </section>
     </div>

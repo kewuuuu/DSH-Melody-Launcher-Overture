@@ -393,8 +393,18 @@ export function createPackControl(options: PackControlOptions) {
     execute,
     async autoStart() {
       const all = await readPackRegistry(options.registryPath)
-      const saved = await configs()
-      return Promise.allSettled(all.map(async r => { if ((await config(r.id)).autoStart) await execute({ command: 'pack.start', packId: r.id }) }))
+      return Promise.allSettled(all.map(async r => {
+        if (!(await config(r.id)).autoStart) return
+        try {
+          await execute({ command: 'pack.start', packId: r.id })
+          restarts.delete(r.id)
+        } catch (error) {
+          // 自启失败以前被 allSettled 吞掉：界面只剩「外部运行中」，用户看不到为什么没起来。
+          const message = '开机自启失败：' + (error instanceof Error ? error.message : String(error))
+          restarts.set(r.id, { restarting: false, lastError: message })
+          console.warn('[pack-autostart] ' + r.id + ': ' + message)
+        }
+      }))
     },
     async shutdown() { closing = true; await Promise.allSettled([...queues.values()]); await Promise.allSettled([...controllers.values()].map(c => c.stop())) },
     isRunning: () => [...controllers.values()].some(c => c.isRunning()),

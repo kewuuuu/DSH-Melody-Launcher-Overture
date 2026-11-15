@@ -43,7 +43,7 @@ type FixtureRuntimeHooks = {
   isElevated?: () => Promise<boolean>
   spawnElevatedProcess?: typeof import('../electron/elevated-runtime').spawnElevatedRuntime
 }
-async function fixture(real = false, extra: FixtureRuntimeHooks = {}) {
+async function fixture(real = false, extra: FixtureRuntimeHooks = {}, external?: { scan: () => Promise<Map<string, unknown>>; stop: () => Promise<'taskkill'> }) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pack-control-test-')); roots.push(root)
   const records = ['a', 'b'].map(id => ({ id, name: id, description: '', version: '1', homePath: path.join(root, id), source: 'created', installedAt: '', updatedAt: '', state: 'complete', plugins: [] }) as PackRecord)
   for (const r of records) await mkdir(r.homePath!, { recursive: true })
@@ -67,7 +67,7 @@ async function fixture(real = false, extra: FixtureRuntimeHooks = {}) {
       stopProcess: async child => { if (real) { child.kill(); await new Promise<void>(resolve => child.once('exit', () => resolve())) } else child.emit('exit', 0) },
     }), openExternal: async () => undefined,
     // 外部进程探测在测试里必须注入：真实实现会起 PowerShell 甚至 taskkill。
-    externalRuntime: { scan: async () => new Map(), stop: async (): Promise<'taskkill'> => 'taskkill' },
+    externalRuntime: external ?? { scan: async () => new Map(), stop: async (): Promise<'taskkill'> => 'taskkill' },
   })
   return { root, control, settings, spawned }
 }
@@ -267,6 +267,22 @@ describe('explicit pack control', () => {
       expect(elevated.mock.calls[0][0]).toBe('dsh')
       expect(spawned).toHaveLength(0)
       expect(state.pid).toBe(4243)
+    } finally { await control.shutdown() }
+  })
+  it('surfaces a failed autostart instead of silently leaving only an external instance', async () => {
+    const external = new Map([['a', { pid: 4242, port: 3080, startedAt: null, url: 'http://127.0.0.1:3080/', profileName: 'a', requiresElevation: false, elevatedSession: null }]])
+    const { control } = await fixture(false, {}, { scan: async () => external, stop: async () => 'taskkill' as const })
+    try {
+      await control.execute({ command: 'pack.config.set', packId: 'a', args: { autoStart: true } })
+      await control.autoStart()
+      const list = await control.execute({ command: 'pack.list' }) as { packs: Array<{ id: string; runtime: RuntimeState; externalRuntime: { pid: number } | null }> }
+      const a = list.packs.find(p => p.id === 'a')!
+      expect(a.runtime.running).toBe(false)
+      expect(a.externalRuntime?.pid).toBe(4242)
+      // 界面「未运行 + 外部运行中」并存时还必须说明为什么没起来，否则用户只能猜。
+      expect(a.runtime.lastError).toContain('开机自启失败')
+      expect(a.runtime.lastError).toContain('4242')
+      expect(list.packs.find(p => p.id === 'b')!.runtime.lastError).toBeNull()
     } finally { await control.shutdown() }
   })
 })
