@@ -330,5 +330,17 @@
 - 清理：删掉全部烟测目录（`test\kewu-b18-smoke`、`kewu-b18b-build`、`kewu-b18c-build`、`kewu-b18-verify`、`kewu-b19-build`、`kewu-b20-build`、`kewu-b20-smoke`、遗留的 `kewu-b18-build`）、`%APPDATA%\DSH-launcher-KEWU`、`%TEMP%\ns*.tmp`（剩 0 个）、`schtasks` 任务 `kewu-b19-cdp`/`kewu-b20-install`/`kewu-b20-uninst`、`_cache` 下的 `kewu-b18*`/`kewu-b19*`/`kewu-b20*` 临时脚本（只留 `kewu-opt2-backup`）；`D:\engine\DSH\test` 里只剩不属于本项目的 `pocket-*`。用户正在跑的 1.1.3 便携版实例（数据 `D:\engine\DSH\launcher-data`）、`%APPDATA%\dsh-launcher`、`~/.dsh` 一律未动。
 - 仍未验证：真实 UAC 点「是」后的父子交班（无人值守只能模拟拒绝）、登录自启的实际开机触发、卸载器 GUI 的真人点击与其它 DPI 档位。
 
+## 1.3.0：卸载器并入安装包、设置页自动保存、安装版自更新重做（2026-11-20）
+
+- **卸载器不再单独交付**：`electron/uninstall.ts:181-192` 先找安装目录里的 `Uninstall DSH-launcher-KEWU.exe`（`NSIS_UNINSTALLER_FILENAME`），命中就 `spawn` 它（无 `/S`、detached、可见窗口）并返回 `{started:true, mode:'nsis', dataRemoved:false}`；没有才回落到老 helper 流程。删掉 `tools/uninstaller/**`、`scripts/build-uninstaller.ps1`、`tests/uninstaller-exe.test.ts`，`package.json` 去掉 `package:uninstaller`，`scripts/release.mjs` 交付表只剩安装包一行。
+- **设置页改自动保存**（提交 42400d4）：600ms 防抖 + `pendingRef`/`scheduleSave`，`flush` 循环写盘，失败保留草稿并可「重试保存」，卸载时 `flush`，`submittedRef` 记最近 10 份指纹防回流冲草稿；状态行 `role="status"` 显示「已自动保存 · 刚刚」。底部「保存设置」按钮删除。
+- **安装版自更新重做**（提交 89eb377 + 父级接线 3b0e31b）：新 `electron/launcher-update-helper.ts` 生成 `apply-<pid>.cmd` + `apply-<pid>.vbs`，`wscript` 隐藏启动、等本进程退出（≤60s）→ `Setup /S /D=<原安装目录>` → 退出码 0 才 `start` 新 EXE；日志 `<userData>\launcher-update\apply-<时间戳>.log`（全 ASCII）。安装目录带 `& | < > ^ % "` 直接拒绝（NSIS `/D=` 不能带引号）。`createLauncherUpdater` 增加 `stopPacks`，`apply` 前先停托管整合包，避免 `process.exit(0)` 绕过 `before-quit`。便携分支（原位替换、`PORTABLE_ASSET_MARKER`、`resolvePortableAsset`）整段删除。
+- **便携版残留清理**（提交 a79ab31 + 父级 c3391d5）：删 `package:win:portable`、`build.portable` 段、`storage-root.ts` 的 portable 分支与 `exeDirectory()`，`StorageSource` 收窄为 `argument | pointer | install | development`；`uninstall-plan.ts` 不再把 `%TEMP%\3L*` 当本版残留（可能属于另一个正在跑的实例）；`temp-unpack-sweeper.ts` 保留，只捡 7 天前且无进程占用的 `ns*.tmp`。
+- **产物**：`release/b22/DSH-launcher-KEWU-Setup-1.3.0.exe` 104,158,086 字节 `76443C0DE541F66D99306ACA21FFB650F3026E5BE63F536F07BAD110D92DB878`；`scripts/release.mjs --dir release/b22` 的交付表只剩这一行（卸载器已并入安装包）。
+- **用户实机接管**（本次授权改 `D:\engine\DSH\DSH-launcher-KEWU`）：先写 EXE 同级 `launcher-storage.json` = `{"dataDir":"D:\\engine\\DSH\\launcher-data"}`，再 `/S /D=D:\engine\DSH\DSH-launcher-KEWU` 覆盖安装 → `INSTALL_EXIT=0`、`FILE_VERSION=1.3.0`、指针保留；启动后 `storage info` 返回 `source:"pointer"`、`dataDir:"D:\\engine\\DSH\\launcher-data"`，`pack list` 认得 `pack-test`，`settings.json` 仍是 `workspace=D:\engine\DSH\Workspace`、`activePackId=pack-test`、`webPort=3080`、`launchAtLogin=true`。**旧版设置由此继承，不需要迁移。**
+- **工作区规则新增第 4 节「安装类测试必须在隔离沙盒里做」**（`D:\engine\DSH\Workspace\.dsh\skills\wksp-rules\SKILL.md:44`）：沙盒根 `test\sandbox\<name>\`、数据走 `--data-dir` 或指针、`Setup /S /D=<沙盒>\app`、验完立刻 `/S` 卸载再删目录、事后核对 HKCU/HKLM 卸载项与桌面/开始菜单快捷方式与 `%TEMP%` 残留、升级链路两版都在沙盒里、用户自装实例仅在当次授权时可改且改前备份。
+- **清理**：`test\kewu-b22-upgrade\app\Uninstall DSH-launcher-KEWU.exe /S`（EXIT=0）卸载测试实例，删 `test\kewu-b21-build`、`kewu-b22-build`、`kewu-b22-upgrade`，并删掉指向测试目录的卸载注册表项（`83f6c6e9-4cd2-5205-adbf-b77553620c64`）。
+- **回归**：`npx tsc --noEmit` 0 error；`npx vitest run` 148 文件通过 / 9 跳过，1371 passed / 11 skipped；`npm run build` 通过。
+
 
 
