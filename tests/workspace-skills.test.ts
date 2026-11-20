@@ -92,7 +92,7 @@ afterEach(async () => {
 })
 
 describe('workspace skills: 扫描', () => {
-  it('workspace.json 缺失时只有全局组', async () => {
+  it('workspace.json 缺失时没有任何分组', async () => {
     const home = await makeRoot()
     const service = createWorkspaceSkillsService({ home: () => home })
     const overview = await service.list()
@@ -101,7 +101,7 @@ describe('workspace skills: 扫描', () => {
     expect(overview.skills).toEqual([])
   })
 
-  it('workspace.json 损坏时也不抛错，只有全局组', async () => {
+  it('workspace.json 损坏时也不抛错，全局技能不再进分组', async () => {
     const home = await makeRoot()
     await mkdir(path.join(home, 'storages'), { recursive: true })
     await writeFile(path.join(home, 'storages', 'workspace.json'), '{ "version": 2, "global": ', 'utf8')
@@ -109,7 +109,8 @@ describe('workspace skills: 扫描', () => {
 
     const overview = await createWorkspaceSkillsService({ home: () => home }).list()
     expect(overview.workspaces.map(group => group.id)).toEqual([])
-    expect(overview.skills.map(skill => skill.id)).toEqual(['global/only-global'])
+    // <home>/skills 归「已安装技能」那一栏，这里只扫工作区，避免同一批 skill 上下各列一遍。
+    expect(overview.skills.map(skill => skill.id)).toEqual([])
   })
 
   it('工作区 skill 被列出且 scope / workspaceId / 路径都正确，缺目录的组标 missing', async () => {
@@ -130,10 +131,8 @@ describe('workspace skills: 扫描', () => {
       { id: '22222222-2222-4222-8222-222222222222', title: '幽灵工作区', path: path.join(home, 'ghost', '.dsh', 'skills'), missing: true },
     ])
 
-    const global = overview.skills.find(skill => skill.id === 'global/global-skill')
-    expect(global).toMatchObject({ name: 'global-skill', description: '全局技能', path: path.join(home, 'skills', 'global-skill'), scope: 'global', disabled: false })
-    expect(global?.workspaceId).toBeUndefined()
-    expect(global?.workspaceTitle).toBeUndefined()
+    // <home>/skills 由「已安装技能」列出，这里不再重复。
+    expect(overview.skills.some(skill => skill.id === 'global/global-skill')).toBe(false)
 
     const workspaceSkill = overview.skills.find(skill => skill.id === `${WORKSPACE_ID}/ws-skill`)
     expect(workspaceSkill).toMatchObject({
@@ -183,16 +182,18 @@ describe('workspace skills: 停用与启用', () => {
 
   it('目标位置已存在同名技能时抛中文错误', async () => {
     const home = await makeRoot()
-    const globalRoot = path.join(home, 'skills')
-    await writeBundle(globalRoot, 'dupe', 'dupe', '启用副本')
-    await writeBundle(globalRoot, 'dupe.disabled', 'dupe', '停用副本')
+    const workspacePath = path.join(home, 'ws-dupe')
+    const workspaceRoot = path.join(workspacePath, '.dsh', 'skills')
+    await writeBundle(workspaceRoot, 'dupe', 'dupe', '启用副本')
+    await writeBundle(workspaceRoot, 'dupe.disabled', 'dupe', '停用副本')
+    await writeWorkspaceJson(home, [{ id: WORKSPACE_ID, path: workspacePath, title: '示例工作区' }])
     const service = createWorkspaceSkillsService({ home: () => home })
 
     const overview = await service.list()
-    expect(overview.skills.filter(skill => skill.id === 'global/dupe')).toHaveLength(1)
-    expect(overview.skills.find(skill => skill.id === 'global/dupe')?.disabled).toBe(false)
+    expect(overview.skills.filter(skill => skill.id === `${WORKSPACE_ID}/dupe`)).toHaveLength(1)
+    expect(overview.skills.find(skill => skill.id === `${WORKSPACE_ID}/dupe`)?.disabled).toBe(false)
 
-    await expect(service.setEnabled('global/dupe', false)).rejects.toThrow('无法停用技能「dupe」：目标位置已存在同名文件')
+    await expect(service.setEnabled(`${WORKSPACE_ID}/dupe`, false)).rejects.toThrow('无法停用技能「dupe」：目标位置已存在同名文件')
   })
 })
 

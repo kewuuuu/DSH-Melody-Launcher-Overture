@@ -56,15 +56,77 @@ export async function builtinAgentPresetsDirs(packageRoot: string): Promise<stri
   const dirs = [
     path.join(packageRoot, 'config', 'agent-presets'),
     path.join(packageRoot, 'node_modules', '@deepseek-ai', 'dsh-agent-presets', 'presets'),
+    // 0.2.x 起内置预设随 web app 发布，是一堆 *.patch.yml 而不是 preset.yml 目录。
+    path.join(packageRoot, 'node_modules', '@deepseek-ai', 'dsh-web-app', 'presets'),
   ]
   const versionRoot = path.resolve(packageRoot, '..', '..', '..')
   const pnpmRoot = path.join(versionRoot, 'node_modules', '.pnpm')
   const entries = await readdir(pnpmRoot, { withFileTypes: true }).catch(() => [])
   for (const entry of entries) {
-    if (!entry.isDirectory() || !entry.name.startsWith('@deepseek-ai+dsh-agent-pres')) continue
-    dirs.push(path.join(pnpmRoot, entry.name, 'node_modules', '@deepseek-ai', 'dsh-agent-presets', 'presets'))
+    if (!entry.isDirectory()) continue
+    if (!entry.name.startsWith('@deepseek-ai+dsh-agent-pres') && !entry.name.startsWith('@deepseek-ai+dsh-web-app@')) continue
+    // 包名会随版本变（dsh-agent-presets 之外还有 dsh-agent-preset-registry），按实际目录枚举，别写死。
+    const inner = path.join(pnpmRoot, entry.name, 'node_modules', '@deepseek-ai')
+    for (const child of await readdir(inner, { withFileTypes: true }).catch(() => [])) {
+      if (!child.isDirectory()) continue
+      if (!child.name.includes('preset') && !child.name.startsWith('dsh-web-app')) continue
+      dirs.push(path.join(inner, child.name, 'presets'))
+    }
+  }
+  const hoisted = path.join(packageRoot, 'node_modules', '@deepseek-ai')
+  for (const child of await readdir(hoisted, { withFileTypes: true }).catch(() => [])) {
+    if (!child.isDirectory()) continue
+    if (!child.name.includes('preset') && !child.name.startsWith('dsh-web-app')) continue
+    dirs.push(path.join(hoisted, child.name, 'presets'))
   }
   return dirs
+}
+
+/**
+ * 新版内置预设：一个 `*.patch.yml` 里插一条 `@deepseek-ai/dsh-agent-preset`，
+ * config.id 就是预设名（standard / ptc / minimal / cordis），config.order 决定顺序。
+ */
+async function scanPresetPatchEntries(root: string): Promise<BuiltinAgentPreset[]> {
+  let entries: Dirent[]
+  try {
+    entries = await readdir(root, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const presets: BuiltinAgentPreset[] = []
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.patch.yml')) continue
+    try {
+      const rows = await readFile(path.join(root, entry.name), 'utf8')
+      const declared = collectPresetDeclarations(parse(rows))
+      for (const row of declared) presets.push(row)
+    } catch {
+      // 单个补丁损坏不影响其余枚举。
+    }
+  }
+  return presets.sort((left, right) => (left.order ?? 999) - (right.order ?? 999) || left.name.localeCompare(right.name))
+}
+
+function collectPresetDeclarations(value: unknown, found: BuiltinAgentPreset[] = []): BuiltinAgentPreset[] {
+  if (Array.isArray(value)) {
+    for (const item of value) collectPresetDeclarations(item, found)
+    return found
+  }
+  if (!value || typeof value !== 'object') return found
+  const node = value as Record<string, unknown>
+  if (node.name === '@deepseek-ai/dsh-agent-preset' && node.config && typeof node.config === 'object') {
+    const config = node.config as Record<string, unknown>
+    if (typeof config.id === 'string' && config.id.trim()) {
+      found.push({
+        name: config.id.trim(),
+        displayName: config.id.trim(),
+        description: typeof config.description === 'string' ? config.description.trim() : '',
+        order: typeof config.order === 'number' && Number.isFinite(config.order) ? config.order : null,
+      })
+    }
+  }
+  for (const child of Object.values(node)) collectPresetDeclarations(child, found)
+  return found
 }
 
 /**
@@ -72,8 +134,13 @@ export async function builtinAgentPresetsDirs(packageRoot: string): Promise<stri
  * 依次尝试各候选布局目录，取第一个非空结果。
  */
 export async function readBuiltinAgentPresets(packageRoot: string): Promise<BuiltinAgentPreset[]> {
-  for (const dir of await builtinAgentPresetsDirs(packageRoot)) {
+  const dirs = await builtinAgentPresetsDirs(packageRoot)
+  for (const dir of dirs) {
     const presets = await scanPresetEntries(dir)
+    if (presets.length > 0) return presets
+  }
+  for (const dir of dirs) {
+    const presets = await scanPresetPatchEntries(dir)
     if (presets.length > 0) return presets
   }
   return []
@@ -299,8 +366,16 @@ export async function installPresetFromDirectory(
   }
 }
 
-/** 扫描一个预设根目录（启用或停用子目录），收集含 preset.yml 的预设。 */
-async function readPresetDirectory(presetRoot: string, enabled: boolean): Promise<InstalledPreset[]> {
+/** 预设目录的最小特征：老布局有 preset.yml，profiles/<p>/presets-local 里还可能只给 agent.cordis.yml 或 index.mjs。 */
+async function looksLikePreset(directory: string): Promise<boolean> {
+  for (const marker of [PRESET_MANIFEST, 'agent.cordis.yml', 'index.mjs']) {
+    if (await exists(path.join(directory, marker))) return true
+  }
+  return false
+}
+
+/** 扫描一个预设根目录（启用或停用子目录）。 */
+async function readPresetDirectory(presetRoot: string, enabled: boolean, manifestOnly = true): Promise<InstalledPreset[]> {
   let entries
   try {
     entries = await readdir(presetRoot, { withFileTypes: true })
@@ -311,23 +386,43 @@ async function readPresetDirectory(presetRoot: string, enabled: boolean): Promis
   for (const entry of entries) {
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
     const destination = path.join(presetRoot, entry.name)
-    if (await exists(path.join(destination, PRESET_MANIFEST))) {
-      presets.push({ name: entry.name, path: destination, enabled })
-    }
+    const matched = manifestOnly ? await exists(path.join(destination, PRESET_MANIFEST)) : await looksLikePreset(destination)
+    if (matched) presets.push({ name: entry.name, path: destination, enabled })
   }
   return presets
 }
 
 /**
- * 列出 `~/.dsh/.agent-presets/` 下已安装的预设（含 preset.yml 的目录），
- * 与 skill 一致：`.agent-presets/` 为启用、`.agent-presets/.disabled/` 为停用。
+ * 已安装预设的根目录：`<home>/.agent-presets`（启动器自己装的）与
+ * `<home>/profiles/<profile>/presets-local`（DSH 界面里存的本地预设）。
+ */
+async function presetRoots(dshHome: string): Promise<string[]> {
+  const roots = [path.join(dshHome, '.agent-presets')]
+  for (const entry of await readdir(path.join(dshHome, 'profiles'), { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory()) continue
+    roots.push(path.join(dshHome, 'profiles', entry.name, 'presets-local'))
+  }
+  return roots
+}
+
+/**
+ * 列出已安装的预设：每个根的启用目录与 `<根>/.disabled/` 子目录都算。
+ * 同名时以先出现的根为准（`.agent-presets` 优先），避免界面上出现两条同名项。
  */
 export async function readInstalledPresets(dshHome: string): Promise<InstalledPreset[]> {
-  const presetRoot = path.join(dshHome, '.agent-presets')
-  const presets = [
-    ...await readPresetDirectory(presetRoot, true),
-    ...await readPresetDirectory(path.join(presetRoot, '.disabled'), false),
-  ]
+  const seen = new Set<string>()
+  const presets: InstalledPreset[] = []
+  for (const root of await presetRoots(dshHome)) {
+    const manifestOnly = path.basename(root) !== 'presets-local'
+    for (const preset of [
+      ...await readPresetDirectory(root, true, manifestOnly),
+      ...await readPresetDirectory(path.join(root, '.disabled'), false, manifestOnly),
+    ]) {
+      if (seen.has(preset.name)) continue
+      seen.add(preset.name)
+      presets.push(preset)
+    }
+  }
   return presets.sort((a, b) => a.name.localeCompare(b.name))
 }
 
@@ -343,11 +438,13 @@ export async function toggleInstalledPreset(dshHome: string, name: string, enabl
   if (!preset) throw new Error(`未找到本地预设：${name}`)
   if (preset.enabled === enabled) return current
 
-  const disabledRoot = path.join(presetRoot, '.disabled')
+  // 预设可能来自 profiles/<p>/presets-local，启停就在它自己那个根里做。
+  const parent = path.dirname(preset.path)
+  const root = path.basename(parent) === '.disabled' ? path.dirname(parent) : parent
   const source = preset.path
   const destination = enabled
-    ? path.join(presetRoot, name)
-    : path.join(disabledRoot, name)
+    ? path.join(root, name)
+    : path.join(root, '.disabled', name)
   await mkdir(path.dirname(destination), { recursive: true })
   try {
     await rename(source, destination)
@@ -368,8 +465,8 @@ export async function uninstallInstalledPreset(dshHome: string, name: string, pr
   if (!isSkillName(name)) throw new Error('预设名称无效。')
   const preset = (await readInstalledPresets(dshHome)).find(item => item.name === name)
   if (!preset) throw new Error(`未找到本地预设：${name}`)
-  const presetRoot = path.join(dshHome, '.agent-presets')
-  assertInside(presetRoot, preset.path)
+  const roots = await presetRoots(dshHome)
+  if (!roots.some(root => preset.path.startsWith(`${path.resolve(root)}${path.sep}`))) assertInside(roots[0], preset.path)
   await rm(preset.path, { recursive: true, force: true })
   await removePresetReceipt(presetReceiptsPath, name)
   return readInstalledPresets(dshHome)

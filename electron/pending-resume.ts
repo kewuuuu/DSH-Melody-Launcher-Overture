@@ -130,7 +130,8 @@ export function parsePackBaseUrl(baseUrl: string): { origin: string; token: stri
 /** GET /connect?token=… 换出会话 cookie；续接与空闲判定共用。 */
 async function connectPackSession(fetcher: Fetcher, origin: string, token: string, signal?: AbortSignal): Promise<string> {
   const target = origin + CONNECT_PATH + '?token=' + encodeURIComponent(token)
-  const init: RequestInit = { method: 'GET' }
+  // 新版网关的 /connect 用 302 把浏览器带到 RPC 端点；会话 cookie 就在这一跳里，不能跟过去。
+  const init: RequestInit = { method: 'GET', redirect: 'manual' }
   if (signal) init.signal = signal
   let response: Response
   try {
@@ -138,7 +139,9 @@ async function connectPackSession(fetcher: Fetcher, origin: string, token: strin
   } catch (error) {
     throw new Error('连接整合包 Web 服务失败：' + messageOf(error))
   }
-  if (!response.ok) throw new Error('连接整合包 Web 服务失败（HTTP ' + response.status + '）。')
+  if (!response.ok && (response.status < 300 || response.status >= 400)) {
+    throw new Error('连接整合包 Web 服务失败（HTTP ' + response.status + '）。')
+  }
   const headers = response.headers as Headers & { getSetCookie?: () => string[] }
   const rawCookies = typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : []
   const pairs: string[] = []
@@ -156,11 +159,13 @@ async function connectPackSession(fetcher: Fetcher, origin: string, token: strin
 
 /** POST /api/<method> 发一条 RPC；错误文案由 action 决定。 */
 async function callPackRpc(fetcher: Fetcher, origin: string, method: string, args: unknown, cookie: string, action: string, signal?: AbortSignal): Promise<unknown> {
+  // 0.2.1 起网关要求每个端点都带 _request 字段，缺了会报 arguments-invalid。
+  const payloadArgs = isRecord(args) ? { _request: {}, ...args } : { _request: {} }
   const body = JSON.stringify({
     type: 'client-request',
     rpcId: randomUUID(),
     method,
-    payload: { args },
+    payload: { args: payloadArgs },
   })
   const init: RequestInit = {
     method: 'POST',
@@ -211,8 +216,9 @@ function runningSessionsOf(value: unknown): RunningSession[] {
   const running: RunningSession[] = []
   for (const item of list) {
     if (!isRecord(item)) continue
+    // 新网关用布尔 running，旧形状用 status/state 字符串，两种都认。
     const status = readString(item.status) || readString(item.state)
-    if (status !== 'running') continue
+    if (item.running !== true && status !== 'running') continue
     running.push({
       id: readString(item.id) || readString(item.sessionId) || readString(item.session_id),
       title: readString(item.title) || readString(item.name) || readString(item.summary),

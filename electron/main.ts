@@ -1176,10 +1176,6 @@ function openMainWindow(): void {
     if (isQuitting) return
     event.preventDefault()
     window.hide()
-    if (!backgroundNoticeShown) {
-      backgroundNoticeShown = true
-      tray?.notifyBackground()
-    }
   })
   mainWindow = window
 }

@@ -253,3 +253,60 @@ describe('内置预设布局探测（新版 DSH 拆包）', () => {
     expect(presets.map(p => p.name).sort()).toEqual(['cordis', 'standard'])
   })
 })
+
+describe('预设布局：0.2.x 内置补丁与 presets-local', () => {
+  it('内置预设读 dsh-web-app/presets 下的 *.patch.yml', async () => {
+    const versionRoot = await mkdtemp(path.join(os.tmpdir(), 'preset-patch-'))
+    temporaryRoots.push(versionRoot)
+    const pkg = path.join(versionRoot, 'node_modules', '@deepseek-ai', 'dsh')
+    await mkdir(pkg, { recursive: true })
+    const presetsDir = path.join(
+      versionRoot, 'node_modules', '.pnpm', '@deepseek-ai+dsh-web-app@0.2.1',
+      'node_modules', '@deepseek-ai', 'dsh-web-app', 'presets',
+    )
+    await mkdir(presetsDir, { recursive: true })
+    const patch = (id: string, order: number) => [
+      '- insert:',
+      '    - id: preset-' + id,
+      "      name: '@deepseek-ai/dsh-agent-preset'",
+      '      config:',
+      '        id: ' + id,
+      '        order: ' + order,
+      '',
+    ].join('\n')
+    await writeFile(path.join(presetsDir, 'standard.patch.yml'), patch('standard', 1), 'utf8')
+    await writeFile(path.join(presetsDir, 'minimal.patch.yml'), patch('minimal', 3), 'utf8')
+    await writeFile(path.join(presetsDir, 'notes.md'), '不是补丁', 'utf8')
+
+    const presets = await readBuiltinAgentPresets(pkg)
+    expect(presets.map(preset => preset.name)).toEqual(['standard', 'minimal'])
+    expect(presets.map(preset => preset.order)).toEqual([1, 3])
+  })
+
+  it('已安装预设也认 profiles/<profile>/presets-local，并在自己的根里启停', async () => {
+    const { dshHome } = await freshRoots()
+    const root = path.join(dshHome, 'profiles', 'pack-test', 'presets-local')
+    await mkdir(path.join(root, 'liangshen-quiet'), { recursive: true })
+    await writeFile(path.join(root, 'liangshen-quiet', 'preset.yml'), 'name: liangshen-quiet\n')
+    await mkdir(path.join(root, 'pure-chat'), { recursive: true })
+    await writeFile(path.join(root, 'pure-chat', 'index.mjs'), 'export default {}\n')
+
+    expect((await readInstalledPresets(dshHome)).map(preset => preset.name)).toEqual(['liangshen-quiet', 'pure-chat'])
+
+    const disabled = await toggleInstalledPreset(dshHome, 'liangshen-quiet', false)
+    expect(disabled.find(preset => preset.name === 'liangshen-quiet')).toMatchObject({
+      enabled: false,
+      path: path.join(root, '.disabled', 'liangshen-quiet'),
+    })
+
+    const enabled = await toggleInstalledPreset(dshHome, 'liangshen-quiet', true)
+    expect(enabled.find(preset => preset.name === 'liangshen-quiet')).toMatchObject({
+      enabled: true,
+      path: path.join(root, 'liangshen-quiet'),
+    })
+
+    const receipts = path.join(dshHome, '.launcher-preset-receipts.json')
+    await uninstallInstalledPreset(dshHome, 'pure-chat', receipts)
+    expect((await readInstalledPresets(dshHome)).map(preset => preset.name)).toEqual(['liangshen-quiet'])
+  })
+})

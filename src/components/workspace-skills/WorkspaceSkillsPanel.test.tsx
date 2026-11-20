@@ -66,17 +66,19 @@ async function mount(seed: WorkspaceSkillsOverview = sample()) {
   return { container, calls, groups, rowOf, buttonIn }
 }
 
-it('按全局与各工作区分组，缺失工作区标灰并给出提示', async () => {
+it('只按工作区分组，缺失工作区标灰并给出提示', async () => {
   const { container, groups } = await mount()
-  expect(groups().map(item => item.getAttribute('aria-label'))).toEqual(['全局 skill', '项目甲 skill', '项目乙 skill'])
+  expect(groups().map(item => item.getAttribute('aria-label'))).toEqual(['项目甲 skill', '项目乙 skill'])
   expect(groups()[0].className).not.toContain('is-missing')
-  expect(groups()[2].className).toContain('is-missing')
-  expect(groups()[2].textContent).toContain('目录不存在')
-  expect(groupSkills(sample()).map(item => item.title)).toEqual(['全局', '项目甲', '项目乙'])
+  expect(groups()[1].className).toContain('is-missing')
+  expect(groups()[1].textContent).toContain('目录不存在')
+  expect(groupSkills(sample()).map(item => item.title)).toEqual(['项目甲', '项目乙'])
   const sources = Array.from(container.querySelectorAll('.workspace-skill-source')).map(item => item.textContent)
-  expect(sources).toEqual(['全局', '项目甲', '项目乙'])
+  expect(sources).toEqual(['项目甲', '项目乙'])
   const rows = Array.from(container.querySelectorAll('.workspace-skill-row')) as HTMLElement[]
-  expect(rows.filter(item => (item.textContent ?? '').includes('wksp-rules'))).toHaveLength(2)
+  expect(rows.filter(item => (item.textContent ?? '').includes('wksp-rules'))).toHaveLength(1)
+  // 全局那批归上面的「已安装技能」，这里再列一遍就是页面上下的重复。
+  expect(container.textContent).not.toContain('全局落盘规则')
 })
 
 it('删除要两步确认，确认后对同名工作区 skill 调 remove', async () => {
@@ -90,12 +92,12 @@ it('删除要两步确认，确认后对同名工作区 skill 调 remove', async
   expect(container.textContent).not.toContain('工作区里的同名规则')
 })
 
-it('停用按钮把已启用的全局 skill 交给 setEnabled 并切换成已停用', async () => {
-  const { container, calls, rowOf, buttonIn } = await mount()
-  await act(async () => { buttonIn(rowOf('全局落盘规则'), '停用').click() })
+it('停用按钮把工作区 skill 交给 setEnabled 并切换成已停用', async () => {
+  const { calls, rowOf, buttonIn } = await mount()
+  await act(async () => { buttonIn(rowOf('工作区里的同名规则'), '停用').click() })
   await act(async () => {})
-  expect(calls.find(item => item.name === 'setEnabled')?.args).toEqual(['global:wksp-rules', false])
-  const row = rowOf('全局落盘规则')
+  expect(calls.find(item => item.name === 'setEnabled')?.args).toEqual(['ws:w1:wksp-rules', false])
+  const row = rowOf('工作区里的同名规则')
   expect(row.textContent).toContain('已停用')
   expect(buttonIn(row, '启用')).toBeTruthy()
 })

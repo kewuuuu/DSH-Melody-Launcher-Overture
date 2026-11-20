@@ -5,7 +5,8 @@ import type { WorkspaceSkillEntry, WorkspaceSkillsOverview } from '../../types'
 import './workspace-skills.css'
 
 /**
- * 「工作区技能」区块：全局 skill 与 <workspace>/.dsh/skills 下的 skill 一起列、一起管。
+ * 「工作区技能」区块：只列 <workspace>/.dsh/skills 下的 skill。
+ * 全局那批（<home>/skills）由上面的「已安装技能」管，这里再列一遍页面就会上下重复。
  * 同名不同来源靠来源标签区分；停用只是改名成 .disabled，删除会进备份。
  */
 
@@ -17,18 +18,10 @@ export interface SkillGroupView {
   skills: WorkspaceSkillEntry[]
 }
 
-/** 全局一组，其余按工作区分组；工作区已失效的条目单独成组并标灰。 */
+/** 按工作区分组；工作区已失效的条目单独成组并标灰。 */
 export function groupSkills(overview: WorkspaceSkillsOverview): SkillGroupView[] {
-  const groups: SkillGroupView[] = [{
-    key: 'global',
-    title: '全局',
-    path: '',
-    missing: false,
-    skills: overview.skills.filter(skill => skill.scope === 'global'),
-  }]
+  const groups: SkillGroupView[] = []
   for (const workspace of overview.workspaces) {
-    // 旧版后端会把全局组也塞进 workspaces，这里跳过，避免和上面那组撞 key。
-    if (workspace.id === 'global') continue
     groups.push({
       key: workspace.id,
       title: workspace.title,
@@ -58,9 +51,9 @@ export function groupSkills(overview: WorkspaceSkillsOverview): SkillGroupView[]
 const errorText = (cause: unknown, fallback: string): string =>
   cause instanceof Error && cause.message ? cause.message : fallback
 
-/** 来源标签：全局就写「全局」，工作区写工作区名——同名 skill 靠它区分。 */
+/** 来源标签：写工作区名——同一工作区里的同名 skill 靠它区分。 */
 function sourceLabel(skill: WorkspaceSkillEntry): string {
-  return skill.scope === 'global' ? '全局' : skill.workspaceTitle ?? skill.workspaceId ?? '工作区'
+  return skill.workspaceTitle ?? skill.workspaceId ?? '工作区'
 }
 
 export function WorkspaceSkillsPanel() {
@@ -86,7 +79,7 @@ export function WorkspaceSkillsPanel() {
 
   const groups = useMemo(() => (overview ? groupSkills(overview) : []), [overview])
   // 没有 skill 也没失效的工作区分组不占版面；失效的工作区必须露出来提示用户。
-  const visibleGroups = groups.filter(group => group.key === 'global' || group.skills.length > 0 || group.missing)
+  const visibleGroups = groups.filter(group => group.skills.length > 0 || group.missing)
   const total = overview?.skills.length ?? 0
 
   const run = async (key: string, action: () => Promise<WorkspaceSkillsOverview>, fallback: string) => {

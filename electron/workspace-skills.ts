@@ -2,7 +2,8 @@
  * 工作区 skill 扫描与停用/删除。
  *
  * 启动器以前只看 <home>/skills，工作区里的 <workspace>/.dsh/skills 完全看不见。
- * 这里把两处一起列出来：全局组固定 id 'global'，每个工作区用 workspace.json 里的 uuid 当组 id。
+ * 这里只列 <workspace>/.dsh/skills：<home>/skills 归「已安装技能」那一栏，两边都列会把同一批 skill 显示两次。
+ * 每个工作区用 workspace.json 里的 uuid 当组 id。
  *
  * 三条不能破的规则：
  *   1. 停用 = 目录/文件名末尾加 .disabled，绝不删文件；启用就是把后缀去掉。
@@ -16,7 +17,6 @@ import { backupBeforeDelete } from './backups'
 import { isSkillName, parseSkillDocument } from './skill-format'
 
 export const DISABLED_SUFFIX = '.disabled'
-export const GLOBAL_SKILLS_GROUP = 'global'
 const WORKSPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
 export interface WorkspaceSkillsDeps {
@@ -124,12 +124,7 @@ async function readWorkspaceRecords(home: string): Promise<StoredWorkspace[]> {
 }
 
 async function buildGroups(home: string): Promise<SkillGroup[]> {
-  const globalRoot = path.join(home, 'skills')
-  const groups: SkillGroup[] = [{
-    group: { id: GLOBAL_SKILLS_GROUP, title: '全局', path: globalRoot, missing: !(await pathExists(globalRoot)) },
-    root: globalRoot,
-    scope: 'global',
-  }]
+  const groups: SkillGroup[] = []
   for (const workspace of await readWorkspaceRecords(home)) {
     const root = path.join(workspace.path, '.dsh', 'skills')
     groups.push({
@@ -214,7 +209,7 @@ async function overview(home: string): Promise<WorkspaceSkillsOverview> {
   const skills: WorkspaceSkillEntry[] = []
   for (const group of groups) skills.push(...await scanGroup(group))
   // 全局组由界面自己按 scope 汇总，不属于「工作区」列表：混进来会多出一个同名的空分组。
-  return { skills, workspaces: groups.filter(group => group.group.id !== GLOBAL_SKILLS_GROUP).map(group => group.group) }
+  return { skills, workspaces: groups.map(group => group.group) }
 }
 
 /** id 形状是 <groupId>/<name>，两段都只允许单个路径段。 */
