@@ -342,5 +342,18 @@
 - **清理**：`test\kewu-b22-upgrade\app\Uninstall DSH-launcher-KEWU.exe /S`（EXIT=0）卸载测试实例，删 `test\kewu-b21-build`、`kewu-b22-build`、`kewu-b22-upgrade`，并删掉指向测试目录的卸载注册表项（`83f6c6e9-4cd2-5205-adbf-b77553620c64`）。
 - **回归**：`npx tsc --noEmit` 0 error；`npx vitest run` 148 文件通过 / 9 跳过，1371 passed / 11 skipped；`npm run build` 通过。
 
+## 预设读不到、技能页重复、托盘气泡与空闲关机 404（2026-11-21）
+
+- **预设两栏都是空**的真因：0.2.1-rc.3 的内置预设不再是含 `preset.yml` 的目录，而是 `@deepseek-ai/dsh-web-app/presets/*.patch.yml`（standard/ptc/minimal/cordis）里一条 `name: '@deepseek-ai/dsh-agent-preset'` 记录；本地预设在 `<home>/profiles/<profile>/presets-local/<name>/`。`electron/preset-install.ts` 补上这两类布局：`builtinAgentPresetsDirs` 加 `<packageRoot>/node_modules/@deepseek-ai/dsh-web-app/presets`，pnpm 条目同时匹配 `@deepseek-ai+dsh-agent-pres` 与 `@deepseek-ai+dsh-web-app@`；新增 `scanPresetPatchEntries` / `collectPresetDeclarations`；新增 `looksLikePreset`（`preset.yml` / `agent.cordis.yml` / `index.mjs`）、`presetRoots`（`.agent-presets` + 每个 `presets-local`）、`readPresetDirectory`；`toggleInstalledPreset` 与 `uninstallInstalledPreset` 改为在命中项自己的根里停/启/删，不再写死 `.agent-presets`。
+- 实机探针（临时测试，跑完删除）：`readBuiltinAgentPresets(...dsh-runtime/versions/0.2.1-rc.3/node_modules/@deepseek-ai/dsh)` → standard/ptc/minimal/cordis；`readInstalledPresets(D:/engine/DSH/launcher-data/dsh-packs/pack-test)` → liangshen-quiet、pure-chat。
+- **技能页上下重复**的根因：`SettingsView` 的「已安装技能」列的是 `<home>/skills`，紧跟着的 `WorkspaceSkillsPanel` 又把同一份目录当「全局」组列了一遍。`electron/workspace-skills.ts` 不再生成全局组（删 `GLOBAL_SKILLS_GROUP`），`WorkspaceSkillsPanel.tsx` 不再合成 `global` 组、不再强制显示，只列 `<workspace>/.dsh/skills`。
+- **关闭窗口弹托盘气泡**：`electron/main.ts` 的 close 处理删掉 `backgroundNoticeShown` 与 `tray?.notifyBackground()`，只留 `window.hide()`。
+- **空闲关机 404**：探针走的是 `GET /connect?token=…`，0.2.x 网关回 **302 → ./api/remote.mux**，undici 跟随重定向后拿到 404。`electron/pending-resume.ts` 改为 `redirect: 'manual'`、3xx 视为连接成功（cookie 从 `getSetCookie()` 取），RPC 参数补 `_request: {}`（缺它网关报 `gateway/arguments-invalid`），`runningSessionsOf` 同时认布尔 `running: true` 与字符串 `status: "running"`。真实服务对照（`/connect` 302 + cookie，`session/list` 200，items 111 / running 1）与新增 `tests/pending-resume-gateway.test.ts`（2 例）双向验证。
+- 测试同步：`tests/workspace-skills.test.ts` 三例改为断言「全局技能不进分组」，同名冲突用例改用 `<home>/ws-dupe/.dsh/skills`；`WorkspaceSkillsPanel.test.tsx` 只按工作区分组；`tests/preset-install.test.ts` 加「预设布局：0.2.x 内置补丁与 presets-local」。
+- 回归：`npx tsc --noEmit` 0 error；`npx vitest run` **149 文件通过 / 9 跳过，1375 passed / 11 skipped（1386）**；`npm run build` 通过。提交 1592724。
+- 产物：`release/b23/DSH-launcher-KEWU-Setup-1.3.1.exe` **104,158,235 字节 `0BB687C02082DD959ED654DA0C7D9B859838D5D66AC80DD15C8B6116E8955B6F`**（NSIS 在 `D:\engine\DSH\test\kewu-b23-build` 里构建，项目树带 Low 完整性标签跑不了中间件）。
+- **升级验证受阻（重要）**：用户当前跑的安装版映像是 `DSH-launcher-KEWU.exe`，与安装包要装的目标同名；electron-builder NSIS 的「应用正在运行」检查在静默模式下直接中止，`Setup /S /D=…` 返回 **1223（ERROR_CANCELLED）**、沙盒里一个文件都没落。之前几轮能装成功是因为用户跑的是便携版（映像是 `…-Portable-1.x.exe`）。自更新的 `apply` 会在 Setup 前等自身退出，用户点「立即更新并重启」时不会撞这条，但同一台机器上再开一个沙盒升级验证会一直撞（连 `schtasks` 直接拉 Setup 也一样）。
+- 因此「安装版自更新端到端」这一项本轮仍未验证，且只能由用户实例自己触发；那一瞬间 `stopPacks()` 会先停掉托管的 `pack-test`，也就是本对话所在的 DSH 进程会随之退出。
+
 
 
