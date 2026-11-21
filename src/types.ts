@@ -70,6 +70,8 @@ export interface AppSettings {
   shutdownGraceMinutes?: number
   /** 关机前是否先把所有整合包停掉；默认 true。 */
   shutdownStopPacks?: boolean
+  /** CLI 触发更新时最多等多少分钟让整合包的会话结束；到点还有会话就取消本次更新。默认 10。 */
+  updateWaitMinutes?: number
   /** 启动器界面配色；主表面由同一基色的明暗层级构成。 */
   uiTheme?: UiTheme
   /** 外观自定义（主题色/透明度/背景图/头像）；旧存档无此字段。 */

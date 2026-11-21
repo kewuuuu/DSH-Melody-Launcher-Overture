@@ -68,6 +68,19 @@ describe('launcher control CLI real Node processes', () => {
     const empty = await temporary()
     await expect(exec(process.execPath, [cliPath, '--user-data', empty, 'pack', 'list'])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('unavailable') })
   })
+  it('maps update commands and their wait flags', async () => {
+    const f = await fixture()
+    for (const action of ['check', 'status', 'cancel']) {
+      expect(JSON.parse((await f.run('update', action, '--json')).stdout)).toEqual({ command: 'update.' + action })
+    }
+    expect(JSON.parse((await f.run('update', 'apply', '--json')).stdout)).toEqual({ command: 'update.apply' })
+    expect(JSON.parse((await f.run('update', 'apply', '--wait', '5', '--json')).stdout)).toEqual({ command: 'update.apply', args: { waitMinutes: 5 } })
+    expect(JSON.parse((await f.run('update', 'apply', '--force', '--json')).stdout)).toEqual({ command: 'update.apply', args: { force: true } })
+    for (const args of [['update', 'apply', '--wait', '0'], ['update', 'apply', '--wait', '5.5'], ['update', 'bogus'], ['pack', 'stop', 'pack-a', '--force']]) {
+      await expect(f.run(...args, '--json')).rejects.toMatchObject({ code: 1, stdout: '', stderr: expect.stringContaining('"ok":false') })
+    }
+    expect((await f.run('--help')).stdout).toContain('update apply [--wait <minutes>] [--force]')
+  })
   it('uses environment discovery and rejects invalid authentication metadata', async () => {
     const f = await fixture()
     const result = await exec(process.execPath, [cliPath, 'pack', 'list', '--json'], { env: { ...process.env, DSH_LAUNCHER_USER_DATA: f.userData } })

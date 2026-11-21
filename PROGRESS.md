@@ -355,5 +355,19 @@
 - **升级验证受阻（重要）**：用户当前跑的安装版映像是 `DSH-launcher-KEWU.exe`，与安装包要装的目标同名；electron-builder NSIS 的「应用正在运行」检查在静默模式下直接中止，`Setup /S /D=…` 返回 **1223（ERROR_CANCELLED）**、沙盒里一个文件都没落。之前几轮能装成功是因为用户跑的是便携版（映像是 `…-Portable-1.x.exe`）。自更新的 `apply` 会在 Setup 前等自身退出，用户点「立即更新并重启」时不会撞这条，但同一台机器上再开一个沙盒升级验证会一直撞（连 `schtasks` 直接拉 Setup 也一样）。
 - 因此「安装版自更新端到端」这一项本轮仍未验证，且只能由用户实例自己触发；那一瞬间 `stopPacks()` 会先停掉托管的 `pack-test`，也就是本对话所在的 DSH 进程会随之退出。
 
+## CLI 更新接口：等会话空闲后自动更新并恢复运行中的包（1.3.2，2026-11-21）
+
+- **需求（用户原话要点）**：CLI 要开放「检查更新」与「更新」；收到更新指令后监测所有启动的整合包是否还有运行中的会话，等待设定时间，没会话了就记录当前正在运行的整合包、开始更新；更新后启动只恢复这些包，原本设为自启动的包不启动。
+- **新模块 `electron/update-flow.ts`**（纯逻辑、可测）：状态机 `idle → checking → downloading → waiting → applying`，失败进 `failed`、任何阶段可 `cancel`。`collectBusy()` 逐包判定：未托管实例、拿不到 Web 地址、探针抛错都算忙（宁可多等，也不在用户正干活时重启）；`waitUntilIdle(waitMinutes)` 以 `now() + waitMinutes*60_000` 为死线，每 15 秒探一轮，到点还有会话就抛「等待 N 分钟仍有会话在运行，已取消本次更新：…」。进入 `applying` 之前先 `listRunningPacks()` 记下「此刻还在跑」的包（过滤掉未托管的），写进 resume 文件再交给 updater；`--force` 跳过等待；下载期间被取消不再把状态写回 `waiting`。
+- **新模块 `electron/update-resume.ts`**：`<userData>/launcher-update/resume-after-update.json`（`{version,toVersion,packs:[{id,name?}],at}`），坏 JSON 返回 null 而不是抛错，写入走 `writeFileAtomic`。
+- **启动接线（`electron/main.ts`）**：`whenReady` 末尾先读 resume 文件——有就逐个 `pack.start` 恢复（失败只 warn），整段跳过 `packControl.autoStart()`；没有才走原来的自启动。名单读完即删，避免恢复失败后每次启动反复重试。`listLivePacks` 从空闲关机里提出来两处共用，口径一致。
+- **CLI**：`update check|status|apply [--wait <minutes>] [--force]|cancel`。`--wait` 只用于 `update apply`、限 1–120 整数；`--force` 只用于 `update apply`。命令名与 `docs/launcher-cli.md`、`electron/launcher-control-skill.ts`（包内默认 skill）同步。
+- **设置**：新增 `AppSettings.updateWaitMinutes`（默认 10，1–120），`electron/settings.ts` 三处归一化；`settings.get/set` 白名单放行，CLI 可 `settings set --args '{"updateWaitMinutes":30}'`。
+- **测试**：`tests/update-flow.test.ts`（11 例：会话结束后记录并安装、超时放弃并清名单、`--force` 跳过等待、未托管算忙、探针失败算忙、取消不动包、已是最新不下载、apply 失败清名单、check 只查、并发 start 拒绝、applying 阶段拒绝取消）、`tests/update-resume.test.ts`（5 例）、`tests/launcher-control-update.test.ts`（4 例，含 waitMinutes/force 透传与缺装配报错）、`tests/launcher-control-cli.test.ts` 新增 `update` 解析用例（含 `--wait 0`、`--wait 5.5`、`pack stop --force` 被本地拒绝）。
+- 回归：`npx tsc --noEmit` 0 error；`npx vitest run` **152 文件通过 / 9 跳过，1396 passed / 11 skipped（1407）**；`npm run build` 通过。
+- 产物：`release/b24/DSH-launcher-KEWU-Setup-1.3.2.exe`（NSIS 在 `D:\engine\DSH\test\kewu-b24-build` 里构建，项目树带 Low 完整性标签跑不了中间件）；只发安装包，卸载器仍由 NSIS 注册。
+- **未做真机更新流程**（用户明确「由我先手动更新，你不需要测试」）：等待→停包→Setup 覆盖→重启恢复这条链路本轮只有单元测试，没有在真实窗口里跑。
+
+
 
 

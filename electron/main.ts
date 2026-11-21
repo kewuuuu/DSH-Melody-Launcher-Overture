@@ -19,6 +19,8 @@ import { registerPathMigrationIpc } from './path-migration-ipc'
 import { registerPendingResumesIpc } from './pending-resume-ipc'
 import { readRunningSessions } from './pending-resume'
 import { createIdleShutdownService, type IdleShutdownService } from './idle-shutdown'
+import { createUpdateFlow, type UpdateFlowService } from './update-flow'
+import { clearUpdateResume, readUpdateResume, saveUpdateResume } from './update-resume'
 import { registerIdleShutdownIpc } from './idle-shutdown-ipc'
 import { registerLauncherPluginsIpc } from './launcher-plugins-ipc'
 import { createWorkspaceSkillsService } from './workspace-skills'
@@ -178,6 +180,8 @@ interface Services {
   launcherControl: ReturnType<typeof createLauncherControl>['execute']
   /** 所有整合包都空闲后自动关机的状态机；IPC、CLI、设置保存都指向这一份。 */
   idleShutdown: IdleShutdownService
+  /** CLI 触发的更新流程（等会话跑完 → 记录运行中的包 → 交给升级助手）。 */
+  updateFlow: UpdateFlowService
   settings: SettingsStore
   /** 启动器级 API 库（跨整合包共享）。 */
   apiLibrary: ReturnType<typeof createLauncherControl>['apiLibrary']
@@ -1112,22 +1116,24 @@ function createServices(bootSettings?: SettingsStore): Services {
   const uninstall = createUninstallService({ plan: uninstallPlan, stopAllPacks: () => packControl!.shutdown() })
   // 空闲自动关机：判定要读「谁在跑」和「包里的会话列」，两者都只能经 packControl 拿到；
   // packControl 在下一行才赋值，所以这里的依赖全部走闭包、在真正 tick 时才解引用。
+  // 「谁在跑、是否托管」只写一份：空闲关机与 CLI 更新流程共用，口径不一致会互相打脸。
+  const listLivePacks = async () => {
+    // 走 pack.list：一次扫描就同时带回托管运行状态与「未托管实例」。
+    // 未托管实例里可能正有会话在跑，而启动器停不掉它，只能算忙并把原因给用户看。
+    const listed = await packControl!.execute({ command: 'pack.list' }) as {
+      packs?: { id: string; name: string; runtime?: { running?: boolean; url?: string | null }; externalRuntime?: { pid: number } | null }[]
+    }
+    return (listed.packs ?? []).flatMap(pack => {
+      if (pack.runtime?.running === true) return [{ id: pack.id, name: pack.name, url: pack.runtime.url ?? null }]
+      if (pack.externalRuntime) {
+        return [{ id: pack.id, name: pack.name, url: null, unmanaged: true, note: '有一份启动器没在托管的实例在运行（PID ' + pack.externalRuntime.pid + '），先在控制面板里停止它' }]
+      }
+      return []
+    })
+  }
   const idleShutdown = createIdleShutdownService({
     settings,
-    listRunningPacks: async () => {
-      // 走 pack.list：一次扫描就同时带回托管运行状态与「未托管实例」。
-      // 未托管实例里可能正有会话在跑，而启动器停不掉它，只能算忙并把原因给用户看。
-      const listed = await packControl!.execute({ command: 'pack.list' }) as {
-        packs?: { id: string; name: string; runtime?: { running?: boolean; url?: string | null }; externalRuntime?: { pid: number } | null }[]
-      }
-      return (listed.packs ?? []).flatMap(pack => {
-        if (pack.runtime?.running === true) return [{ id: pack.id, name: pack.name, url: pack.runtime.url ?? null }]
-        if (pack.externalRuntime) {
-          return [{ id: pack.id, name: pack.name, url: null, unmanaged: true, note: '有一份启动器没在托管的实例在运行（PID ' + pack.externalRuntime.pid + '），先在控制面板里停止它再关机' }]
-        }
-        return []
-      })
-    },
+    listRunningPacks: listLivePacks,
     countRunningSessions: async (url, signal) => (await readRunningSessions({ baseUrl: url, fetch: githubAuth.fetch, signal })).length,
     // 关机前停包不弹 UAC：此刻界面可能已经关了，没人能点确认。
     stopPack: async packId => { await packControl?.execute({ command: 'pack.stop', packId, args: { noElevated: true } }) },
@@ -1144,6 +1150,17 @@ function createServices(bootSettings?: SettingsStore): Services {
       return true
     },
   })
+  // CLI 触发的更新：等会话跑完 → 记录正在运行的包 → 交升级助手覆盖安装；
+  // 新版本启动时只恢复这份名单（autoStart 的包不启动）。
+  const updateFlow: UpdateFlowService = createUpdateFlow({
+    settings,
+    updater: launcherUpdater,
+    listRunningPacks: listLivePacks,
+    countRunningSessions: async (url, signal) => (await readRunningSessions({ baseUrl: url, fetch: githubAuth.fetch, signal })).length,
+    saveResume: resume => saveUpdateResume(userData, resume),
+    clearResume: () => clearUpdateResume(userData),
+    emitOutput: text => events.output('runtime', 'info', text),
+  })
   packControl = createLauncherControl({
     userData, cliPath: path.join(app.getAppPath(), 'bin/launcher-control.cjs'), settings, packManager: packManager!, storage: storageController,
     prepareNodeRuntime: () => prepareNodeRuntime('runtime'),
@@ -1151,9 +1168,9 @@ function createServices(bootSettings?: SettingsStore): Services {
     openExternal: url => shell.openExternal(url), fallbackWorkspace: () => app.getPath('documents'),
     fetchImpl: githubAuth.fetch, emitOutput: text => events.output('runtime', 'info', text),
     legacyRuntimeRunning: () => runtime.isRunning(), prepareOfficeCliTool,
-    loginRegistration, uninstall, onUninstallStarted: quitAfterUninstallStarted, idleShutdown,
+    loginRegistration, uninstall, onUninstallStarted: quitAfterUninstallStarted, idleShutdown, updateFlow,
   })
-  return { packControl, uninstall, uninstallPlan, idleShutdown, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
+  return { packControl, uninstall, uninstallPlan, idleShutdown, updateFlow, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
 }
 
 // helper 已在 %TEMP% 里跑起来，主进程必须让位：EXE 被自己占着就永远删不掉。
@@ -1379,7 +1396,25 @@ app.whenReady().then(async () => {
     },
   })
   await services.profilePoolReady
-  void services.packControl.autoStart()
+  // 更新后首次启动：只恢复更新前正在运行的包，autoStart 的包一律不启动（用户明确要求）。
+  // 名单读完就删：恢复失败也只记日志，不能让下几次启动反复重试。
+  const booted = services
+  void readUpdateResume(app.getPath('userData'))
+    .then(async resume => {
+      if (!resume) {
+        void booted.packControl.autoStart()
+        return
+      }
+      for (const pack of resume.packs) {
+        try {
+          await booted.packControl.execute({ command: 'pack.start', packId: pack.id })
+        } catch (error) {
+          console.warn('[update] 恢复整合包 ' + pack.id + ' 失败。', error)
+        }
+      }
+      await clearUpdateResume(app.getPath('userData')).catch(error => console.warn('[update] 清理恢复名单失败。', error))
+    })
+    .catch(error => console.warn('[update] 读取更新恢复名单失败。', error))
   openMainWindow()
   if (process.argv.includes('--background')) mainWindow?.hide()
   // 开发者自查界面用：传了 --ui-shots=<目录> 才逐栏目截图，正常启动什么都不做。

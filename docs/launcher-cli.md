@@ -264,6 +264,25 @@ node bin/launcher-control.cjs settings set --args '{"shutdownWhenIdle":true,"shu
 
 shutdownIdleMinutes 收敛到 1–1440、shutdownGraceMinutes 收敛到 0–60（都是整数，越界夹到边界）；缺省值依次为 false / 10 / 10 / true。
 
+## 检查更新与自动更新（update）
+
+~~~sh
+node bin/launcher-control.cjs update check --json
+node bin/launcher-control.cjs update apply --json
+node bin/launcher-control.cjs update apply --wait 30 --json
+node bin/launcher-control.cjs update apply --force --json
+node bin/launcher-control.cjs update status --json
+node bin/launcher-control.cjs update cancel
+~~~
+
+`update check` 只比对本地版本与最新 Release（`kewuuuu/DSH-Melody-Launcher-Overture`），返回 LauncherUpdateStatus（state 为 `up-to-date` / `update-available` / `downloaded` / `error`）。`update apply` 立刻返回 `{phase:"checking",…}`，剩下的在后台推进：检查 → 下载 Setup → 等所有整合包的会话跑完 → 记录「此刻正在运行的包」→ 停包 → 交给升级助手覆盖安装并重启启动器。**流程走完启动器会自己退出重启，包括托管当前对话的那个整合包**，所以要么让用户知道会断连，要么指定一个别的时机。
+
+等待口径与空闲自动关机一致：任一整合包上还有 running 会话算忙，探针失败或拿不到 Web 地址也算忙（宁可多等），没被启动器托管的实例同样算忙（停不掉它）。上限取 `--wait` 或设置里的 `updateWaitMinutes`（默认 10 分钟，1–120），到点仍有会话就取消本次更新并把忙的原因写进 message；`--force` 跳过等待直接装。`update cancel` 只在安装开始前有效（applying 阶段会报「安装已经开始，无法取消本次更新。」）。
+
+更新后首次启动只恢复名单里那些原本在跑的整合包，`autoStart` 的包一律不启动；名单文件是 `<userData>/launcher-update/resume-after-update.json`，读完即删，恢复失败的包只记日志。更新失败（下载失败、没有安装包、`--force` 之外的取消）会删掉名单，下次启动照旧走 autoStart。
+
+`update status` 返回 UpdateFlowState：{phase,waitMinutes,localVersion,remoteVersion,busy,resumePacks,startedAt,message}，phase 为 idle/checking/downloading/waiting/applying/failed。
+
 ## 原地切换 DSH 版本（pack upgrade）
 
 ~~~sh

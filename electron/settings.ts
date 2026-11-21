@@ -58,6 +58,8 @@ export function defaultSettings(input: DefaultSettingsInput): AppSettings {
     shutdownIdleMinutes: 10,
     shutdownGraceMinutes: 10,
     shutdownStopPacks: true,
+    // CLI 触发更新时等会话结束的上限：缺省 10 分钟，到点还有会话就放弃本次更新。
+    updateWaitMinutes: 10,
   }
 }
 
@@ -214,6 +216,7 @@ export function validateSettings(input: AppSettings): AppSettings {
     shutdownIdleMinutes: validShutdownMinutes(input.shutdownIdleMinutes, 10, 1, 1440),
     shutdownGraceMinutes: validShutdownMinutes(input.shutdownGraceMinutes, 10, 0, 60),
     shutdownStopPacks: input.shutdownStopPacks !== false,
+    updateWaitMinutes: validShutdownMinutes(input.updateWaitMinutes, 10, 1, 120),
   }
 }
 
@@ -250,6 +253,7 @@ export function mergeStoredSettings(defaults: AppSettings, stored: Partial<AppSe
     shutdownIdleMinutes: validShutdownMinutes(stored.shutdownIdleMinutes, defaults.shutdownIdleMinutes ?? 10, 1, 1440),
     shutdownGraceMinutes: validShutdownMinutes(stored.shutdownGraceMinutes, defaults.shutdownGraceMinutes ?? 10, 0, 60),
     shutdownStopPacks: typeof stored.shutdownStopPacks === 'boolean' ? stored.shutdownStopPacks : defaults.shutdownStopPacks !== false,
+    updateWaitMinutes: validShutdownMinutes(stored.updateWaitMinutes, defaults.updateWaitMinutes ?? 10, 1, 120),
   }
 }
 

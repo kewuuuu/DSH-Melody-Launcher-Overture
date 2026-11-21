@@ -18,6 +18,10 @@ const HELP = `DSH Launcher control (Node >=20)
   settings launch-at-login [on|off]
   settings launch-elevated [on|off]
   idle-shutdown status|arm|disarm|cancel
+  update check
+  update status
+  update apply [--wait <minutes>] [--force]
+  update cancel
   api list
   api add <route> --name <name> --base-url <url> --protocol <protocol> --models a,b [--api-key <key>]
   api remove <route>
@@ -43,6 +47,10 @@ Config flags: --port, --port-mode, --run-as-admin, --auto-start, --pinned-at,
 API flags (api add only): --name, --base-url, --protocol, --models, --api-key
 Resume flags: --resume "<prompt>" --session <id> (both with pack restart only), --pack <id> (pending list only)
 Upgrade flag: --dsh-version <version> (pack upgrade only; upgrades only, the pack must be stopped)
+Update: "update apply" downloads the new version, waits up to --wait / settings.updateWaitMinutes
+        for every pack to have no running session, records the packs that were running, then
+        installs and restarts; --force skips the wait. The next launch restores only those packs
+        and skips autostart entries.
 Uninstall: "uninstall now" stops running packs first, then on an installed build launches the
            uninstaller the Setup registered (Uninstall DSH-launcher-KEWU.exe, interactive) and
            returns {started, mode:"nsis", dataRemoved:false}; --delete-data cannot be honored on
@@ -52,7 +60,7 @@ Protocols: openai-completions, openai-responses, anthropic-messages
 Set DSH_LAUNCHER_USER_DATA instead of --user-data if desired.
 --launcher starts only the executable supplied, when control is unavailable.
 `
-const FLAG_KEYS = ['user-data','launcher','args','port','port-mode','run-as-admin','auto-start','pinned-at','workspace','launch-args','name','base-url','protocol','models','api-key','resume','session','pack','out','dsh-version']
+const FLAG_KEYS = ['user-data','launcher','args','port','port-mode','run-as-admin','auto-start','pinned-at','workspace','launch-args','name','base-url','protocol','models','api-key','resume','session','pack','out','dsh-version','wait']
 function objectJSON(value) {
   const result = JSON.parse(value)
   if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('--args requires a JSON object')
@@ -64,7 +72,7 @@ function parse(argv) {
     const item = argv[i]
     if (!item.startsWith('--')) { words.push(item); continue }
     const key = item.slice(2)
-    if (['json', 'help', 'keep-data', 'delete-data', 'yes', 'no-elevated'].includes(key)) { flags[key] = true; continue }
+    if (['json', 'help', 'keep-data', 'delete-data', 'yes', 'no-elevated', 'force'].includes(key)) { flags[key] = true; continue }
     if (!FLAG_KEYS.includes(key)) throw new Error('Unknown option: ' + item)
     if (i + 1 >= argv.length || argv[i+1].startsWith('--')) throw new Error('Missing value for ' + item)
     flags[key] = argv[++i]
@@ -143,6 +151,10 @@ function parse(argv) {
       command = 'uninstall.run'
     }
   }
+  else if (group === 'update') {
+    if (!['check', 'status', 'apply', 'cancel'].includes(action)) throw new Error('用法：update check | update status | update apply [--wait <分钟>] [--force] | update cancel')
+    command = 'update.' + action
+  }
   else if (group === 'idle-shutdown') {
     if (!['status', 'arm', 'disarm', 'cancel'].includes(action)) throw new Error('用法：idle-shutdown status|arm|disarm|cancel')
     command = 'idleShutdown.' + action
@@ -197,6 +209,16 @@ function parse(argv) {
   if (flags.yes !== undefined) {
     if (command !== 'uninstall.run') throw new Error('--yes 只用于 uninstall now')
     args.confirm = true
+  }
+  if (flags.wait !== undefined) {
+    if (command !== 'update.apply') throw new Error('--wait 只用于 update apply')
+    const minutes = Number(flags.wait)
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 120) throw new Error('--wait 需要 1 到 120 的整数分钟')
+    args.waitMinutes = minutes
+  }
+  if (flags.force !== undefined) {
+    if (command !== 'update.apply') throw new Error('--force 只用于 update apply')
+    args.force = true
   }
   if (flags.pack !== undefined && command !== 'pending.list') throw new Error('--pack 只用于 pending list')
   if (flags.resume !== undefined) {

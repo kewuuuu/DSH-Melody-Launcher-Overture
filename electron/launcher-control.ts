@@ -16,6 +16,7 @@ import { createPackApis } from './pack-apis'
 import { createPendingResumeQueue, enqueueBeforeRestart, type PendingResumeQueue } from './pending-resume'
 import { migratePath } from './path-migration'
 import type { IdleShutdownService } from './idle-shutdown'
+import type { UpdateFlowService } from './update-flow'
 
 export function createLauncherControl(options: {
   userData: string
@@ -40,6 +41,8 @@ export function createLauncherControl(options: {
   onUninstallStarted?: () => void
   /** 空闲自动关机服务；CLI 的 idle-shutdown 命令与 settings.set 同步开关都走它。 */
   idleShutdown?: IdleShutdownService
+  /** CLI 触发更新的状态机：update.* 命令都转给它。 */
+  updateFlow?: UpdateFlowService
 }) {
   const { userData, settings } = options
   const storage = options.storage
@@ -291,6 +294,20 @@ export function createLauncherControl(options: {
         if (typeof version !== 'string' || !version.trim()) throw new Error('缺少 DSH 版本：pack upgrade <pack-id> --dsh-version <version>')
         return options.packManager.upgradePackDshVersion(request.packId, version)
       }
+      if (typeof request?.command === 'string' && request.command.startsWith('update.')) {
+        const flow = options.updateFlow
+        if (!flow) throw new Error('更新服务没有装配，无法执行 update 命令。')
+        const action = request.command.slice('update.'.length)
+        if (action === 'status') return flow.status()
+        if (action === 'cancel') return flow.cancel()
+        if (action === 'apply') {
+          const waitMinutes = request.args?.waitMinutes
+          if (waitMinutes !== undefined && (typeof waitMinutes !== 'number' || !Number.isFinite(waitMinutes))) throw new Error('update.apply 的 waitMinutes 必须是数字（分钟）。')
+          return flow.start({ waitMinutes: waitMinutes as number | undefined, force: request.args?.force === true })
+        }
+        if (action === 'check') return flow.check()
+        throw new Error('用法：update check|status|apply|cancel')
+      }
       if (typeof request?.command === 'string' && request.command.startsWith('idleShutdown.')) {
         const service = options.idleShutdown
         if (!service) throw new Error('空闲自动关机服务没有装配，无法执行 idle-shutdown 命令。')
@@ -313,11 +330,12 @@ export function createLauncherControl(options: {
           shutdownIdleMinutes: s.shutdownIdleMinutes ?? 10,
           shutdownGraceMinutes: s.shutdownGraceMinutes ?? 10,
           shutdownStopPacks: s.shutdownStopPacks !== false,
+          updateWaitMinutes: s.updateWaitMinutes ?? 10,
         }
       }
       if (request?.command === 'settings.set') {
         const patch = request.args ?? {}
-        const allowed = ['openAfterLaunch','uiTheme','appearance','network','shutdownWhenIdle','shutdownIdleMinutes','shutdownGraceMinutes','shutdownStopPacks']
+        const allowed = ['openAfterLaunch','uiTheme','appearance','network','shutdownWhenIdle','shutdownIdleMinutes','shutdownGraceMinutes','shutdownStopPacks','updateWaitMinutes']
         if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(k => !allowed.includes(k))) throw new Error('Unsupported launcher setting')
         const next = settingsQueue.catch(() => undefined).then(async () => settings.save({ ...await settings.readStored(), ...patch }))
         settingsQueue = next
@@ -335,6 +353,7 @@ export function createLauncherControl(options: {
           shutdownIdleMinutes: saved.shutdownIdleMinutes ?? 10,
           shutdownGraceMinutes: saved.shutdownGraceMinutes ?? 10,
           shutdownStopPacks: saved.shutdownStopPacks !== false,
+          updateWaitMinutes: saved.updateWaitMinutes ?? 10,
         }
       }
       if (request?.command === 'storage.info') return storage.get()
