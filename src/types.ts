@@ -62,6 +62,8 @@ export interface AppSettings {
    * 默认 true：监督进程不在时这是唯一能停下来的路径；关掉则只给可复制的命令。
    */
   elevatedStopPrompt?: boolean
+  /** 正常退出启动器时如何处理运行中的整合包；默认询问。 */
+  packExitPolicy?: 'ask' | 'stop'
   /** 空闲自动关机总开关；默认 false，必须手动打开。 */
   shutdownWhenIdle?: boolean
   /** 多久没有任何会话活动算空闲，单位分钟；默认 10。 */

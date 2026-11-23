@@ -269,19 +269,32 @@ describe('explicit pack control', () => {
       expect(state.pid).toBe(4243)
     } finally { await control.shutdown() }
   })
-  it('surfaces a failed autostart instead of silently leaving only an external instance', async () => {
+  it('skips autostart when an external instance already exists', async () => {
     const external = new Map([['a', { pid: 4242, port: 3080, startedAt: null, url: 'http://127.0.0.1:3080/', profileName: 'a', requiresElevation: false, elevatedSession: null }]])
-    const { control } = await fixture(false, {}, { scan: async () => external, stop: async () => 'taskkill' as const })
+    const { control, root, spawned } = await fixture(false, {}, { scan: async () => external, stop: async () => 'taskkill' as const })
+    await writeFile(path.join(root, 'pack-control.json'), JSON.stringify({ a: { autoStart: true } }))
     try {
-      await control.execute({ command: 'pack.config.set', packId: 'a', args: { autoStart: true } })
       await control.autoStart()
       const list = await control.execute({ command: 'pack.list' }) as { packs: Array<{ id: string; runtime: RuntimeState; externalRuntime: { pid: number } | null }> }
       const a = list.packs.find(p => p.id === 'a')!
       expect(a.runtime.running).toBe(false)
       expect(a.externalRuntime?.pid).toBe(4242)
-      // 界面「未运行 + 外部运行中」并存时还必须说明为什么没起来，否则用户只能猜。
-      expect(a.runtime.lastError).toContain('开机自启失败')
-      expect(a.runtime.lastError).toContain('4242')
+      expect(a.runtime.lastError).toBeNull()
+      expect(spawned).toHaveLength(0)
+    } finally { await control.shutdown() }
+  })
+
+  it('surfaces a genuine autostart launch failure on the affected pack', async () => {
+    const spawnElevatedProcess = vi.fn(async () => { throw new Error('Fixture launch failure') })
+    const { control, root } = await fixture(false, { isElevated: async () => false, spawnElevatedProcess })
+    await writeFile(path.join(root, 'pack-control.json'), JSON.stringify({ a: { autoStart: true, runAsAdmin: true } }))
+    try {
+      await control.autoStart()
+      const list = await control.execute({ command: 'pack.list' }) as { packs: Array<{ id: string; runtime: RuntimeState }> }
+      expect(spawnElevatedProcess).toHaveBeenCalledTimes(1)
+      const a = list.packs.find(p => p.id === 'a')!
+      expect(a.runtime.running).toBe(false)
+      expect(a.runtime.lastError).toMatch(/^开机自启失败：.*Fixture launch failure/)
       expect(list.packs.find(p => p.id === 'b')!.runtime.lastError).toBeNull()
     } finally { await control.shutdown() }
   })

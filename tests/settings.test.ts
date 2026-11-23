@@ -147,7 +147,7 @@ describe('validateSettings', () => {
 
 describe('mergeStoredSettings', () => {
   it('returns the defaults when nothing is stored', () => {
-    expect(mergeStoredSettings(baseSettings, null)).toEqual(baseSettings)
+    expect(mergeStoredSettings(baseSettings, null)).toEqual({ ...baseSettings, packExitPolicy: 'ask', shutdownWhenIdle: false })
   })
 
   it('lets stored values win over the defaults', () => {
@@ -274,6 +274,23 @@ describe('createSettingsStore 派生激活包家目录（真隔离咽喉点）',
     })
     expect((await store.read()).dshHome).toBe('/packs/pack-a')
     expect((await store.readStored()).dshHome).toBe('/home/tester/.dsh')
+  })
+
+  it('自动关机勾选只在当前启动器进程中生效', async () => {
+    const { store, filePath } = await fixture()
+    const oldSettings = { ...(await store.read()), shutdownWhenIdle: true, shutdownIdleMinutes: 25 }
+    await writeFile(filePath, JSON.stringify(oldSettings), 'utf8')
+    const reopen = () => createSettingsStore({
+      filePath,
+      createDefaults: () => baseSettings,
+      detectInstalledDsh: async () => ({ installed: false, version: null, executable: null, source: null }),
+    })
+    const restarted = reopen()
+    expect(await restarted.read()).toMatchObject({ shutdownWhenIdle: false, shutdownIdleMinutes: 25 })
+    await restarted.save(oldSettings)
+    expect((await restarted.read()).shutdownWhenIdle).toBe(true)
+    expect(JSON.parse(await readFile(filePath, 'utf8'))).not.toHaveProperty('shutdownWhenIdle')
+    expect(await reopen().read()).toMatchObject({ shutdownWhenIdle: false, shutdownIdleMinutes: 25 })
   })
 
   it('无激活包或注册表无目录时不派生', async () => {

@@ -111,7 +111,7 @@ export interface InstallInstaller {
 
 export interface PackManagerOptions {
   isPackRunning?: (packId: string) => boolean
-  beforeRemovePack?: (packId: string) => Promise<void>
+  beforeRemovePack?: (packId: string) => Promise<void | (() => void)>
   afterRemovePack?: (packId: string) => Promise<void>
   readSettings: () => Promise<AppSettings>
   saveSettings: (settings: AppSettings) => Promise<AppSettings>
@@ -2035,65 +2035,69 @@ export function createPackManager(options: PackManagerOptions): PackManager {
 
     async removePack(packId) {
       if (options.isPackRunning?.(packId)) throw new Error('Stop this pack before removing it')
-      await options.beforeRemovePack?.(packId)
-      const settings = await options.readSettings()
-      const wasActive = settings.activePackId === packId || isSelectedProfile(settings, packId)
-      // 删除未激活的包不动当前环境，DSH 运行中也允许；删激活包必须先停 DSH（它就是当前环境）。
-      const reason = guardPackStart({
-        isRuntimeRunning: () => wasActive && options.isRuntimeRunning(),
-        isInstallerBusy: options.isInstallerBusy,
-        isPackBusy: () => active,
-      })
-      if (reason) throw new Error(reason)
-      beginTask()
+      const release = await options.beforeRemovePack?.(packId)
       try {
-        const record = await findRecord(packId)
-        const stored = options.readStoredSettings ? await options.readStoredSettings() : settings
-        const privateHome = Boolean(record.homePath) && !samePath(record.homePath as string, stored.dshHome)
-        const removalTargets = privateHome
-          ? [record.homePath as string]
-          : [path.join(stored.dshHome, 'profiles', packId), packBodiesDir(stored.dshHome, packId)]
-        // 删之前先压一份进备份区：备份失败会抛错，下面的删除一行都不会执行。
-        await backupBeforeDelete({ paths: removalTargets, label: record.name, op: 'pack.delete', packId })
-        if (privateHome) {
-          // 私有家目录：整个环境连会话、登录、插件一并删除（共享的 DSH 版本二进制不动）。
-          await removeDirectoryAtomically(record.homePath as string)
-        } else {
-          const home = stored.dshHome
-          await removeDirectoryAtomically(path.join(home, 'profiles', packId))
-          await rm(packBodiesDir(home, packId), { recursive: true, force: true }).catch(() => undefined)
-        }
-        const profileReceipts = (await readPluginReceipts(options.pluginReceiptsPath)).filter(item => item.packId === packId)
-        for (const receipt of profileReceipts) {
-          await removePluginReceipt(options.pluginReceiptsPath, packId, receipt.packageName)
-        }
-        await removePackRecord(options.registryPath, packId)
-        await removePackManifest(manifestRoot, packId)
-        let nextSettings = stored
-        if (wasActive) {
-          // 删掉了激活包：落到剩余里最近的包；一个不剩就置空指针进入零包引导态
-          // （界面引导新建/导入，启动守卫拦住无包启动），不再自动新建兜底包。
-          const remaining = await readPackRegistry(options.registryPath)
-          const successor = remaining.find(record2 => record2.id === DEFAULT_PROFILE_NAME) ?? remaining[remaining.length - 1] ?? null
-          nextSettings = successor
-            ? {
-                ...nextSettings,
-                activePackId: successor.id,
-                profileName: successor.id,
-                ...(successor.dshVersion ? { dshVersion: successor.dshVersion } : {}),
-              }
-            : { ...nextSettings, activePackId: null }
-        }
-        await options.saveSettings(nextSettings)
-        await options.afterRemovePack?.(packId)
-        return {
-          removed: record.plugins.length
-            + (record.presets?.length ?? 0)
-            + (record.skills?.length ?? 0)
-            + (record.applications?.length ?? 0),
+        const settings = await options.readSettings()
+        const wasActive = settings.activePackId === packId || isSelectedProfile(settings, packId)
+        // 删除未激活的包不动当前环境，DSH 运行中也允许；删激活包必须先停 DSH（它就是当前环境）。
+        const reason = guardPackStart({
+          isRuntimeRunning: () => wasActive && options.isRuntimeRunning(),
+          isInstallerBusy: options.isInstallerBusy,
+          isPackBusy: () => active,
+        })
+        if (reason) throw new Error(reason)
+        beginTask()
+        try {
+          const record = await findRecord(packId)
+          const stored = options.readStoredSettings ? await options.readStoredSettings() : settings
+          const privateHome = Boolean(record.homePath) && !samePath(record.homePath as string, stored.dshHome)
+          const removalTargets = privateHome
+            ? [record.homePath as string]
+            : [path.join(stored.dshHome, 'profiles', packId), packBodiesDir(stored.dshHome, packId)]
+          // 删之前先压一份进备份区：备份失败会抛错，下面的删除一行都不会执行。
+          await backupBeforeDelete({ paths: removalTargets, label: record.name, op: 'pack.delete', packId })
+          if (privateHome) {
+            // 私有家目录：整个环境连会话、登录、插件一并删除（共享的 DSH 版本二进制不动）。
+            await removeDirectoryAtomically(record.homePath as string)
+          } else {
+            const home = stored.dshHome
+            await removeDirectoryAtomically(path.join(home, 'profiles', packId))
+            await rm(packBodiesDir(home, packId), { recursive: true, force: true }).catch(() => undefined)
+          }
+          const profileReceipts = (await readPluginReceipts(options.pluginReceiptsPath)).filter(item => item.packId === packId)
+          for (const receipt of profileReceipts) {
+            await removePluginReceipt(options.pluginReceiptsPath, packId, receipt.packageName)
+          }
+          await removePackRecord(options.registryPath, packId)
+          await removePackManifest(manifestRoot, packId)
+          let nextSettings = stored
+          if (wasActive) {
+            // 删掉了激活包：落到剩余里最近的包；一个不剩就置空指针进入零包引导态
+            // （界面引导新建/导入，启动守卫拦住无包启动），不再自动新建兜底包。
+            const remaining = await readPackRegistry(options.registryPath)
+            const successor = remaining.find(record2 => record2.id === DEFAULT_PROFILE_NAME) ?? remaining[remaining.length - 1] ?? null
+            nextSettings = successor
+              ? {
+                  ...nextSettings,
+                  activePackId: successor.id,
+                  profileName: successor.id,
+                  ...(successor.dshVersion ? { dshVersion: successor.dshVersion } : {}),
+                }
+              : { ...nextSettings, activePackId: null }
+          }
+          await options.saveSettings(nextSettings)
+          await options.afterRemovePack?.(packId)
+          return {
+            removed: record.plugins.length
+              + (record.presets?.length ?? 0)
+              + (record.skills?.length ?? 0)
+              + (record.applications?.length ?? 0),
+          }
+        } finally {
+          active = false
         }
       } finally {
-        active = false
+        release?.()
       }
     },
 

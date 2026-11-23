@@ -523,6 +523,16 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
               <input type="checkbox" checked={draft.openAfterLaunch} onChange={event => patch({ openAfterLaunch: event.target.checked })} />
               <span><strong>启动后打开 Harness</strong><small>识别到本地 Web 地址时，在默认浏览器中打开。</small></span>
             </label>
+            <label className="form-field">
+              <span>退出启动器时如何处理运行中的整合包</span>
+              <select
+                value={draft.packExitPolicy === 'stop' ? 'stop' : 'ask'}
+                onChange={event => patch({ packExitPolicy: event.target.value === 'stop' ? 'stop' : 'ask' })}
+              >
+                <option value="ask">每次询问</option>
+                <option value="stop">停止整合包</option>
+              </select>
+            </label>
             <label className="check-field">
               <input
                 type="checkbox"

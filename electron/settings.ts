@@ -53,6 +53,7 @@ export function defaultSettings(input: DefaultSettingsInput): AppSettings {
     launchElevated: false,
     // 停止以管理员权限运行的整合包时允许弹一次 UAC：缺省开，用户显式关掉才静默失败。
     elevatedStopPrompt: true,
+    packExitPolicy: 'ask',
     // 空闲自动关机：缺省关；布防后空闲 10 分钟、预告 10 分钟、关机前先停包。
     shutdownWhenIdle: false,
     shutdownIdleMinutes: 10,
@@ -64,6 +65,10 @@ export function defaultSettings(input: DefaultSettingsInput): AppSettings {
 }
 
 const UI_THEMES = new Set<UiTheme>(['deepseek', 'night'])
+
+function normalizePackExitPolicy(value: unknown): NonNullable<AppSettings['packExitPolicy']> {
+  return value === 'stop' ? 'stop' : 'ask'
+}
 
 function validUiTheme(value: unknown): value is UiTheme {
   return typeof value === 'string' && UI_THEMES.has(value as UiTheme)
@@ -212,6 +217,7 @@ export function validateSettings(input: AppSettings): AppSettings {
     launchAtLogin: input.launchAtLogin === true,
     launchElevated: input.launchElevated === true,
     elevatedStopPrompt: input.elevatedStopPrompt !== false,
+    packExitPolicy: normalizePackExitPolicy(input.packExitPolicy),
     shutdownWhenIdle: input.shutdownWhenIdle === true,
     shutdownIdleMinutes: validShutdownMinutes(input.shutdownIdleMinutes, 10, 1, 1440),
     shutdownGraceMinutes: validShutdownMinutes(input.shutdownGraceMinutes, 10, 0, 60),
@@ -222,7 +228,7 @@ export function validateSettings(input: AppSettings): AppSettings {
 
 /** 把磁盘上的设置合并到默认值上，丢弃结构不对的字段。 */
 export function mergeStoredSettings(defaults: AppSettings, stored: Partial<AppSettings> | null): AppSettings {
-  if (!stored || typeof stored !== 'object') return defaults
+  if (!stored || typeof stored !== 'object') return { ...defaults, packExitPolicy: 'ask', shutdownWhenIdle: false }
   const storedPort = validWebPort(stored.webPort)
     ? stored.webPort
     : webPortFromLaunchArgs(stored.launchArgs) ?? defaults.webPort
@@ -249,7 +255,8 @@ export function mergeStoredSettings(defaults: AppSettings, stored: Partial<AppSe
     launchAtLogin: typeof stored.launchAtLogin === 'boolean' ? stored.launchAtLogin : defaults.launchAtLogin === true,
     launchElevated: typeof stored.launchElevated === 'boolean' ? stored.launchElevated : defaults.launchElevated === true,
     elevatedStopPrompt: typeof stored.elevatedStopPrompt === 'boolean' ? stored.elevatedStopPrompt : defaults.elevatedStopPrompt !== false,
-    shutdownWhenIdle: typeof stored.shutdownWhenIdle === 'boolean' ? stored.shutdownWhenIdle : defaults.shutdownWhenIdle === true,
+    packExitPolicy: normalizePackExitPolicy(stored.packExitPolicy),
+    shutdownWhenIdle: false,
     shutdownIdleMinutes: validShutdownMinutes(stored.shutdownIdleMinutes, defaults.shutdownIdleMinutes ?? 10, 1, 1440),
     shutdownGraceMinutes: validShutdownMinutes(stored.shutdownGraceMinutes, defaults.shutdownGraceMinutes ?? 10, 0, 60),
     shutdownStopPacks: typeof stored.shutdownStopPacks === 'boolean' ? stored.shutdownStopPacks : defaults.shutdownStopPacks !== false,
@@ -346,7 +353,8 @@ export function createSettingsStore(options: SettingsStoreOptions): SettingsStor
         next = { ...next, launchExecutable: managedDshExecutable(next.dshInstallPath), launchArgs: ['web'] }
       }
       await mkdir(path.dirname(options.filePath), { recursive: true })
-      await writeFile(options.filePath, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+      const { shutdownWhenIdle: _sessionOnly, ...persisted } = next
+      await writeFile(options.filePath, `${JSON.stringify(persisted, null, 2)}\n`, 'utf8')
       stored = next
       cache = await derive(next)
       return cache

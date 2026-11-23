@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process'
+import { once } from 'node:events'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { LAUNCHER_RELEASE_REPOSITORY } from '../src/constants'
@@ -282,20 +283,35 @@ export interface LauncherUpdaterOptions {
   stopPacks?: () => Promise<void> | void
   /** 停整合包的超时，缺省 APPLY_STOP_PACKS_TIMEOUT_MS。 */
   stopPacksTimeoutMs?: number
+  preserveRunningPacks?: boolean
+  /** 退出前由主进程准备接管；失败须自行撤销未完成的准备，可返回后续交接失败时的撤销函数。 */
+  prepareForRelaunch?: (signal: AbortSignal) => RelaunchRollback | void | Promise<RelaunchRollback | void>
+  /** 仅在本次启动有明确的数据目录参数时提供已解析的绝对路径。 */
+  relaunchDataDir?: string
   /** 带 GitHub 鉴权的 fetch；缺省用全局 fetch。 */
   githubFetch?: typeof fetch
   /** 进度事件（下载百分比 / 应用阶段）。 */
   emitProgress: (progress: LauncherUpdateProgress) => void
   /** 测试注入的 spawn。缺省 node:child_process spawn。 */
   spawnProcess?: typeof nodeSpawn
-  /** 测试注入的进程退出。缺省 process.exit。 */
-  exitProcess?: (code?: number) => never
+  /** 助手启动后退出旧进程；主进程可注入异步清理及正常退出。缺省 process.exit。 */
+  exitProcess?: (code?: number) => void | Promise<void>
+}
+
+export class LauncherRelaunchExitError extends Error {}
+
+type RelaunchRollback = () => void | Promise<void>
+
+export interface LauncherApplyOptions {
+  signal?: AbortSignal
+  /** 安装助手即将启动，此后不能取消。 */
+  onCommit?: () => void
 }
 
 export interface LauncherUpdater {
   check(): Promise<LauncherUpdateStatus>
   download(): Promise<LauncherUpdateStatus>
-  apply(): Promise<void>
+  apply(options?: LauncherApplyOptions): Promise<void>
 }
 
 export function createLauncherUpdater(options: LauncherUpdaterOptions): LauncherUpdater {
@@ -320,17 +336,31 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
   let pending: PendingUpdate | null = null
   let downloading: Promise<LauncherUpdateStatus> | null = null
 
+  let checking: Promise<LauncherUpdateStatus> | null = null
+  const isApplying = (): boolean => status.state === 'applying'
+
   async function check(): Promise<LauncherUpdateStatus> {
-    const snapshot = await readUpdate(options.getVersion, doFetch)
-    pending = snapshot.pending
-    status = snapshot.status
-    return status
+    if (isApplying() || downloading) return status
+    if (!checking) {
+      checking = readUpdate(options.getVersion, doFetch).then(snapshot => {
+        if (isApplying() || downloading) return status
+        const nextSetup = snapshot.pending?.setup
+        const previousSetup = pending?.setup
+        const sameDownload = status.state === 'downloaded' && nextSetup && previousSetup
+          && nextSetup.url === previousSetup.url && nextSetup.name === previousSetup.name
+          && nextSetup.size === previousSetup.size
+          && snapshot.status.remoteVersion === status.remoteVersion
+        pending = snapshot.pending
+        if (!sameDownload) status = snapshot.status
+        return status
+      }).finally(() => { checking = null })
+    }
+    return checking
   }
 
   async function download(): Promise<LauncherUpdateStatus> {
-    if (status.state === 'downloaded' || status.state === 'downloading' || status.state === 'applying') return status
-    if (status.state !== 'update-available' || !pending) return status
     if (downloading) return downloading
+    if (status.state !== 'update-available' || !pending) return status
     downloading = performDownload()
     try {
       return await downloading
@@ -411,22 +441,21 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
    * - 必须等本进程退出：Setup 要覆盖正在运行的 exe，活着装就是文件占用。
    * - 必须带 /D=<当前安装目录>：不带的话 Setup 会装回它自己认定的默认目录，
    *   用户自定义的安装目录（连同 EXE 同级的 launcher-storage.json 数据目录指针）就丢了。
-   * - 装失败不启动新版本，也不删安装包：用户还能再点一次。
+   * - 装失败不拉起 exe；保留安装包和日志，供手动恢复。
    */
-  async function applySetupInstaller(target: PendingUpdate): Promise<void> {
+  async function writeSetupHelper(target: PendingUpdate, execPath: string): Promise<string> {
     const setup = target.setup
     if (!setup) throw new Error('新版本没有可下载的安装版安装包。')
     const setupPath = path.join(updateRoot, setup.name)
     const existing = await stat(setupPath).catch(() => null)
-    if (!existing) throw new Error('安装包还没下载完，请重新下载更新后再试。')
-    const execPath = execPathOf()
+    if (!existing?.isFile() || (setup.size > 0 && existing.size !== setup.size)) {
+      throw new Error('安装包还没下载完，请重新下载更新后再试。')
+    }
     const installDir = installDirFromExecPath(execPath)
     if (!installDir) throw new Error('找不到当前安装目录，已中止更新。')
-    status = { ...status, state: 'applying', message: '正在重启并安装更新，请稍候…' }
-    options.emitProgress({ phase: 'applying', percent: 100 })
     await mkdir(updateRoot, { recursive: true })
     const logPath = buildApplyLogPath(updateRoot)
-    // 先落一行「已交给助手」：万一 vbs 没能启动，这个文件就是唯一的现场证据。
+    // 写明安装请求，便于排查助手没有启动的情况。
     await writeFile(logPath, `[apply] apply requested for ${setup.name} at ${new Date().toISOString()}\n`, { flag: 'a' })
     const commandPath = buildApplyCommandPath(updateRoot, process.pid)
     const launcherPath = buildApplyLauncherPath(updateRoot, process.pid)
@@ -436,8 +465,14 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
       installDir,
       exePath: execPath,
       logPath,
+      adoptRunningPacks: options.preserveRunningPacks,
+      relaunchDataDir: options.relaunchDataDir,
     }))
-    await writeFile(launcherPath, buildHiddenLauncherScript(commandPath))
+    await writeFile(launcherPath, buildHiddenLauncherScript('.\\' + path.basename(commandPath)))
+    return launcherPath
+  }
+
+  async function startSetupHelper(launcherPath: string): Promise<void> {
     const doSpawn = options.spawnProcess ?? nodeSpawn
     try {
       const child = doSpawn('wscript.exe', [launcherPath], {
@@ -446,16 +481,15 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
         windowsHide: true,
         cwd: updateRoot,
       })
+      await once(child, 'spawn')
       child.unref()
     } catch (error) {
-      status = { ...status, state: 'error', message: `启动安装助手失败：${errorMessage(error)}` }
-      throw new Error(status.message)
+      throw new Error(`启动安装助手失败：${errorMessage(error)}`)
     }
-    const doExit = options.exitProcess ?? (code => process.exit(code))
-    doExit(0)
   }
 
-  async function apply(): Promise<void> {
+  async function apply(applyOptions: LauncherApplyOptions = {}): Promise<void> {
+    if (isApplying()) throw new Error('已有一个启动器更新正在安装。')
     if (status.state !== 'downloaded' || !pending) {
       throw new Error('没有已下载的启动器更新。')
     }
@@ -469,8 +503,46 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     if (detectInstallMode(execPath) === 'dev') {
       throw new Error('当前以开发模式运行，自动更新仅支持安装版启动器。')
     }
-    await stopRunningPacks()
-    await applySetupInstaller(target)
+    const signal = applyOptions.signal ?? new AbortController().signal
+    signal.throwIfAborted()
+    const prepare = options.prepareForRelaunch
+    if (options.preserveRunningPacks && !prepare) throw new Error('缺少整合包接管准备，已中止更新。')
+    const downloaded = status
+    let rollback: RelaunchRollback | void = undefined
+    status = { ...status, state: 'applying', message: '正在准备安装更新，请稍候…' }
+    try {
+      const launcherPath = await writeSetupHelper(target, execPath)
+      signal.throwIfAborted()
+      if (options.preserveRunningPacks && prepare) {
+        rollback = await prepare(signal)
+      } else {
+        await stopRunningPacks()
+      }
+      signal.throwIfAborted()
+      options.emitProgress({ phase: 'applying', percent: 100 })
+      signal.throwIfAborted()
+      applyOptions.onCommit?.()
+      await startSetupHelper(launcherPath)
+    } catch (error) {
+      let message = errorMessage(error)
+      try {
+        await rollback?.()
+      } catch (rollbackError) {
+        message += '；撤销接管准备失败：' + errorMessage(rollbackError)
+        throw new Error(message, { cause: error })
+      } finally {
+        status = { ...downloaded, message }
+      }
+      throw error
+    }
+    const doExit = options.exitProcess ?? (code => process.exit(code))
+    try {
+      await doExit(0)
+    } catch (error) {
+      const message = '安装助手已启动，但退出启动器失败：' + errorMessage(error)
+      status = { ...status, message }
+      throw new LauncherRelaunchExitError(message, { cause: error })
+    }
   }
 
   return { check, download, apply }

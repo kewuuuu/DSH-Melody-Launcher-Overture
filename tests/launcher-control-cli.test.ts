@@ -8,6 +8,7 @@ import { createLauncherControlServer } from '../electron/launcher-control-server
 import { ensureLauncherControlSkill } from '../electron/launcher-control-skill'
 import { createStorageController } from '../electron/storage-root'
 import { createLauncherControl } from '../electron/launcher-control'
+import { writePackRegistry } from '../electron/pack-registry'
 
 const exec = promisify(execFile)
 const cliPath = path.resolve('bin/launcher-control.cjs')
@@ -214,6 +215,12 @@ describe('launcher control pack upgrade routing', () => {
       resolution: { dataDir: path.join(root, 'launcher-data'), source: 'install', portableDir: root, pointerFile, warning: null },
       appDataPath: root,
     })
+    const packHome = path.join(root, 'pack-a')
+    await mkdir(packHome)
+    await writePackRegistry(path.join(root, 'packs.json'), [{
+      id: 'pack-a', name: 'Pack A', description: '', version: '1', homePath: packHome,
+      source: 'created', installedAt: '', updatedAt: '', state: 'complete', plugins: [],
+    }])
     const upgradePackDshVersion = vi.fn(async () => ({ id: 'pack-a', dshVersion: '1.1.0' }))
     const control = createLauncherControl({
       userData: root, cliPath: path.join(root, 'cli.cjs'), settings: { readStored: async () => ({}), read: async () => ({}), save: vi.fn() } as never,
@@ -225,6 +232,7 @@ describe('launcher control pack upgrade routing', () => {
     await expect(control.execute({ command: 'pack.upgrade', packId: 'pack-a', args: {} })).rejects.toThrow('缺少 DSH 版本')
     await expect(control.execute({ command: 'pack.upgrade', packId: 'pack-a', args: { dshVersion: '   ' } })).rejects.toThrow('缺少 DSH 版本')
     await expect(control.execute({ command: 'pack.upgrade', args: { dshVersion: '1.1.0' } })).rejects.toThrow('缺少整合包 ID')
+    expect(upgradePackDshVersion).toHaveBeenCalledTimes(1)
   })
 })
 

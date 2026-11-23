@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { AppSettings, LauncherUpdateStatus } from '../src/types'
 import { defaultSettings } from '../electron/settings'
 import { createUpdateFlow, type UpdateFlowPack } from '../electron/update-flow'
+import type { LauncherApplyOptions } from '../electron/launcher-update'
 import type { UpdateResumeFile } from '../electron/update-resume'
 
 const BASE_TIME = Date.parse('2026-11-21T08:00:00.000Z')
@@ -19,6 +20,12 @@ function status(state: LauncherUpdateStatus['state'], message = ''): LauncherUpd
   }
 }
 
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>(done => { resolve = done })
+  return { promise, resolve }
+}
+
 interface HarnessOptions {
   packs?: UpdateFlowPack[]
   sessions?: number
@@ -26,6 +33,8 @@ interface HarnessOptions {
   sessionsEndAfterPolls?: number
   waitMinutes?: number
   checkState?: LauncherUpdateStatus['state']
+  preserveRunningPacks?: boolean
+  apply?: (options?: LauncherApplyOptions) => Promise<void>
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -45,7 +54,10 @@ function harness(options: HarnessOptions = {}) {
     ...defaultSettings({ homeDirectory: 'C:\\Users\\test', documentsDirectory: 'C:\\Users\\test\\Documents', platform: 'win32' }),
     updateWaitMinutes: options.waitMinutes ?? 10,
   }
+  const listRunningPacks = vi.fn(async () => packs)
+  const wait = vi.fn(async (milliseconds: number) => { clock += milliseconds })
   const service = createUpdateFlow({
+    preserveRunningPacks: options.preserveRunningPacks,
     settings: { read: async () => settings },
     updater: {
       check: async () => status(checkState, checkState === 'up-to-date' ? '已经是最新版本。' : ''),
@@ -53,12 +65,13 @@ function harness(options: HarnessOptions = {}) {
         downloads.push(clock)
         return status('downloaded')
       },
-      apply: async () => {
+      apply: async applyOptions => {
         applied.push('apply')
         if (applyFailure) throw applyFailure
+        await options.apply?.(applyOptions)
       },
     },
-    listRunningPacks: async () => packs,
+    listRunningPacks,
     countRunningSessions: async () => {
       polls.push(clock)
       if (probeFailure) throw probeFailure
@@ -67,7 +80,7 @@ function harness(options: HarnessOptions = {}) {
     saveResume: async file => { saved.push(file) },
     clearResume: async () => { cleared.push(clock) },
     now: () => clock,
-    wait: async milliseconds => { clock += milliseconds },
+    wait,
     pollIntervalMs: 15_000,
     probeTimeoutMs: 5_000,
   })
@@ -78,6 +91,8 @@ function harness(options: HarnessOptions = {}) {
     applied,
     downloads,
     polls,
+    listRunningPacks,
+    wait,
     setPacks: (value: UpdateFlowPack[]) => { packs.splice(0, packs.length, ...value) },
     failProbe: (error: Error | null) => { probeFailure = error },
     failApply: (error: Error | null) => { applyFailure = error },
@@ -179,6 +194,70 @@ describe('update flow', () => {
     expect(h.service.status().phase).toBe('failed')
     expect(h.service.status().busy[0].reason).toContain('HTTP 404')
     expect(h.applied).toEqual([])
+  })
+
+  it.each([false, true])('preserves running sessions without listing, waiting, or touching resume (force=%s)', async force => {
+    const h = harness({ sessions: 3, preserveRunningPacks: true })
+    await h.service.start({ waitMinutes: 1, force })
+    await h.service.settled()
+    expect(h.service.status()).toMatchObject({ phase: 'applying', busy: [], resumePacks: [] })
+    expect(h.applied).toEqual(['apply'])
+    expect(h.listRunningPacks).not.toHaveBeenCalled()
+    expect(h.wait).not.toHaveBeenCalled()
+    expect(h.polls).toEqual([])
+    expect(h.saved).toEqual([])
+    expect(h.cleared).toEqual([])
+  })
+
+  it('leaves the resume file alone if live preparation fails', async () => {
+    const h = harness({ sessions: 3, preserveRunningPacks: true })
+    h.failApply(new Error('preparation failed'))
+    await h.service.start()
+    await h.service.settled()
+    expect(h.service.status()).toMatchObject({ phase: 'failed', message: 'preparation failed' })
+    expect(h.saved).toEqual([])
+    expect(h.cleared).toEqual([])
+  })
+
+  it('reserves the live flow and allows cancellation before handoff', async () => {
+    const preparing = deferred()
+    const h = harness({
+      preserveRunningPacks: true,
+      apply: async options => {
+        const signal = options?.signal as AbortSignal
+        preparing.resolve()
+        await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+        signal.throwIfAborted()
+      },
+    })
+    const started = h.service.start()
+    await expect(h.service.start()).rejects.toThrow('已有一个更新流程')
+    await started
+    await preparing.promise
+    await expect(h.service.check()).rejects.toThrow('已有一个更新流程')
+    expect(h.service.status().phase).toBe('applying')
+    await h.service.cancel()
+    await h.service.settled()
+    expect(h.service.status()).toMatchObject({ phase: 'idle', message: '已取消本次更新。' })
+    expect(h.cleared).toEqual([])
+  })
+
+  it('rejects cancellation after the preserve path commits to helper launch', async () => {
+    const committed = deferred()
+    const release = deferred()
+    const h = harness({
+      preserveRunningPacks: true,
+      apply: async options => {
+        options?.onCommit?.()
+        committed.resolve()
+        await release.promise
+      },
+    })
+    await h.service.start()
+    await committed.promise
+    await expect(h.service.cancel()).rejects.toThrow('安装已经开始')
+    release.resolve()
+    await h.service.settled()
   })
 
   it('check only inspects the release and never downloads', async () => {

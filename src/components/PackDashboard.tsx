@@ -1,7 +1,7 @@
 import { ArrowDown, ArrowUp, ExternalLink, LoaderCircle, Pin, Play, RefreshCw, Settings2, Square, Trash2 } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 import { usePackControl } from '../hooks/use-pack-control'
-import { sortPacks, type ControlledPack, type PackControlConfig, type PackSort } from '../lib/pack-control'
+import { hasUnverifiedRuntime, sortPacks, type ControlledPack, type PackControlConfig, type PackSort } from '../lib/pack-control'
 import { PackControlDialog } from './dialogs/PackControlDialog'
 import './pack-dashboard.css'
 
@@ -40,13 +40,12 @@ export function PackDashboard(props: Props) {
   const nameInputRef = useRef<HTMLInputElement>(null)
   const packs = useMemo(() => sortPacks(control.packs.filter(pack => pack.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())), sort, descending), [control.packs, query, sort, descending])
   const selectedPack = control.packs.find(pack => pack.id === selected)
-  /** 不是本启动器托管的运行实例（启动器退出、提权监督进程消失后留下的进程）：单独计数，不算进「正在运行」。 */
-  const externalCount = control.packs.filter(pack => pack.externalRuntime).length
+  const externalCount = control.packs.filter(hasUnverifiedRuntime).length
   const patch = (pack: ControlledPack, values: Partial<PackControlConfig>) => control.run('pack.config.set', pack.id, values)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
   const remove = async (pack: ControlledPack) => {
-    if (removing) return
+    if (removing || pack.runtime.ownership === 'observer' || hasUnverifiedRuntime(pack)) return
     setRemoving(pack.id)
     try {
       // 运行中的包先停：后端删除前会检查，这里替用户把「先停止」那一步做掉。
@@ -97,22 +96,42 @@ export function PackDashboard(props: Props) {
     <div className="pack-table-scroll"><table className="pack-table"><thead><tr><th><Pin size={13} aria-label="置顶" /></th><th>整合包名称</th><th>端口</th><th>运行操作</th><th>管理员</th><th>配置</th><th>自启</th><th>删除</th></tr></thead><tbody>
       {packs.map(pack => {
         const busy = control.busy.includes(pack.id)
-        const external = pack.externalRuntime ?? null
+        const unverified = hasUnverifiedRuntime(pack)
+        const external = unverified ? pack.externalRuntime : null
+        const observer = pack.runtime.ownership === 'observer'
+        const blockedObserver = observer && pack.runtime.pid == null
+        const unsafeToRemove = observer || unverified
+        const activeSessionCount = pack.runtime.activeSessionCount
+        const sessionsLabel = activeSessionCount == null ? '活跃会话数未知' : activeSessionCount + ' 个活跃会话'
         const restarting = pack.runtime.restarting === true
         const awaiting = pack.runtime.awaitingAuthorization === true
         // 重启是后台跑的：状态文字要能解释「为什么点了重启还没好」，否则用户以为卡死。
-        const stateLabel = busy ? '正在处理' : awaiting ? '等待管理员授权' : restarting ? '正在重启' : pack.runtime.running ? '运行中' : external ? '外部运行中' : '未运行'
+        const stateLabel = busy ? '正在处理'
+          : blockedObserver ? '检测到运行实例（身份待核实）'
+            : observer ? '运行中（仅观察）'
+            : unverified ? '外部实例待核实'
+              : awaiting ? '等待管理员授权'
+                : restarting ? '正在重启'
+                  : pack.runtime.running ? '运行中（本启动器管理）' : '未运行'
         // 失败原因只在没跑起来时露出：跑着的时候旧错误只会误导。
         const failure = !pack.runtime.running && !busy ? pack.runtime.lastError ?? null : null
         return <tr key={pack.id} className={pack.config.pinnedAt ? 'pack-pinned' : undefined}>
           <td><button className={'icon-button ' + (pack.config.pinnedAt ? 'is-pinned' : '')} title={pack.config.pinnedAt ? '取消置顶' : '置顶'} aria-label={(pack.config.pinnedAt ? '取消置顶 ' : '置顶 ') + pack.name} aria-pressed={Boolean(pack.config.pinnedAt)} disabled={busy} onClick={() => void patch(pack, { pinnedAt: pack.config.pinnedAt ? null : new Date().toISOString() })}><Pin size={15} /></button></td>
-          <td><button className="pack-name" onClick={() => setSelected(pack.id)}>{pack.name}</button><small><i className={pack.runtime.running || restarting || awaiting ? 'running' : external ? 'external' : ''} />{stateLabel} · DSH {pack.dshVersion ?? '未指定'}{pack.native ? ' · 共用家目录' : ''}</small></td>
+          <td><button className="pack-name" onClick={() => setSelected(pack.id)}>{pack.name}</button><small><i className={unverified ? 'external' : pack.runtime.running || restarting || awaiting ? 'running' : ''} />{stateLabel}{pack.runtime.running && !unverified ? ' · ' + sessionsLabel : ''} · DSH {pack.dshVersion ?? '未指定'}{pack.native ? ' · 共用家目录' : ''}</small></td>
           <td><PortEditor key={pack.id + ':' + pack.config.port + ':' + pack.config.portMode} pack={pack} disabled={busy} onSave={values => void patch(pack, values)} /></td>
-          <td><div className="pack-row-actions">{busy ? <LoaderCircle size={16} className="spin" /> : awaiting || restarting ? <><span className="pack-pending-state" title={awaiting ? '已经请求管理员权限，正在等 Windows 授权弹窗' : '正在停止旧进程并重新启动'}>{awaiting ? '等待授权' : '重启中'}</span><button className="danger-button" aria-label={'强制停止 ' + pack.name} title="跳过优雅停止，直接结束这个整合包的进程树" onClick={() => void control.run('pack.stop', pack.id, { force: true }, { inlineError: true })}><Square size={13} />强制停止</button></> : pack.runtime.running ? <><button className="secondary-button" onClick={() => void control.run('pack.stop', pack.id)} title="停止"><Square size={13} />停止</button><button className="icon-button" aria-label={'重启 ' + pack.name} onClick={() => void control.run('pack.restart', pack.id)}><RefreshCw size={15} /></button><button className="icon-button" aria-label={'打开网页 ' + pack.name} disabled={!pack.runtime.url} onClick={() => void control.run('pack.openWeb', pack.id)}><ExternalLink size={15} /></button></> : <button className="primary-button" disabled={external !== null} title={external ? '先停止未托管的实例' : '启动'} onClick={() => void control.run('pack.start', pack.id)}><Play size={13} />启动</button>}</div>
-            {/* 未托管实例不在内存里的运行控制器里，只能就地认领再停：给它单独一行状态和一个停止按钮。 */}
+          <td><div className="pack-row-actions">{busy ? <LoaderCircle size={16} className="spin" />
+            : blockedObserver ? null
+            : observer ? <ObserverRuntimeActions key={JSON.stringify([pack.runtime.pid, pack.runtime.startedAt])} pack={pack}
+                onOpen={() => void control.run('pack.openWeb', pack.id, undefined, { inlineError: true })}
+                onForceStop={() => void control.run('pack.stop', pack.id, { force: true }, { inlineError: true })} />
+              : unverified ? <button className="primary-button" disabled title="请在原启动环境中退出该实例，再启动此包"><Play size={13} />启动</button>
+                : awaiting || restarting ? <><span className="pack-pending-state" title={awaiting ? '已经请求管理员权限，正在等 Windows 授权弹窗' : '正在停止旧进程并重新启动'}>{awaiting ? '等待授权' : '重启中'}</span><button className="danger-button" aria-label={'强制停止 ' + pack.name} title="跳过优雅停止，直接结束这个整合包的进程树" onClick={() => void control.run('pack.stop', pack.id, { force: true }, { inlineError: true })}><Square size={13} />强制停止</button></> : pack.runtime.running ? <><button className="secondary-button" onClick={() => void control.run('pack.stop', pack.id)} title="停止"><Square size={13} />停止</button><button className="icon-button" aria-label={'重启 ' + pack.name} onClick={() => void control.run('pack.restart', pack.id)}><RefreshCw size={15} /></button><button className="icon-button" aria-label={'打开网页 ' + pack.name} disabled={!pack.runtime.url} onClick={() => void control.run('pack.openWeb', pack.id)}><ExternalLink size={15} /></button></> : <button className="primary-button" title="启动" onClick={() => void control.run('pack.start', pack.id)}><Play size={13} />启动</button>}</div>
+            {observer && !busy && <p className="pack-external-state" role="status">{blockedObserver
+              ? pack.runtime.lastError ?? '启动器无法确认进程身份。请在原启动环境中检查该实例，然后刷新。'
+              : '当前启动器观察此实例。确认强制停止会中断正在运行的任务。'}</p>}
             {external && !busy && <div className="pack-external">
-              <span className="pack-external-state" title="不是本启动器托管的实例，停止会中断它上面正在进行的对话">外部运行中 · PID {external.pid}{external.port === null ? '' : ' · :' + external.port}</span>
-              <button type="button" className="secondary-button" aria-label={'停止未托管实例 ' + pack.name} title="不是本启动器托管的实例，停止会中断它上面正在进行的对话" onClick={() => void control.run('pack.stop', pack.id, undefined, { inlineError: true })}><Square size={13} />停止</button>
+              <span className="pack-external-state">外部实例待核实 · PID {external.pid}{external.port === null ? '' : ' · :' + external.port}</span>
+              <span>启动器无法确认进程身份。请在原启动环境中退出该实例，然后刷新。</span>
             </div>}
             {!busy && control.inlineErrors[pack.id] && <p className="pack-external-error" role="alert">{control.inlineErrors[pack.id]}</p>}
             {failure && <p className="pack-external-error" role="status">{failure}</p>}
@@ -121,18 +140,29 @@ export function PackDashboard(props: Props) {
           <td><input type="checkbox" aria-label={'以管理员运行 ' + pack.name} title="勾选后这个整合包以管理员权限运行，每次启动都会弹一次 UAC；启动器本身已是管理员时直接继承，不再弹" checked={pack.config.runAsAdmin} disabled={busy} onChange={event => void patch(pack, { runAsAdmin: event.target.checked })} /></td>
           <td><button className="icon-button" aria-label={'配置 ' + pack.name} onClick={() => setSelected(pack.id)}><Settings2 size={17} /></button></td>
           <td><input type="checkbox" aria-label={'自动启动 ' + pack.name} checked={pack.config.autoStart} disabled={busy} onChange={event => void patch(pack, { autoStart: event.target.checked })} /></td>
-          <td><div className="pack-row-actions">{confirmRemove === pack.id
+          <td><div className="pack-row-actions">{!unsafeToRemove && confirmRemove === pack.id
             ? <><button className="danger-button" disabled={removing === pack.id} onClick={() => void remove(pack)}>{removing === pack.id ? '删除中…' : '确认删除'}</button><button className="secondary-button" disabled={removing === pack.id} onClick={() => setConfirmRemove(null)}>取消</button></>
-            : <button className="icon-button" aria-label={'删除 ' + pack.name} title="删除整合包（先停止运行，再整份备份进备份区）" disabled={busy} onClick={() => setConfirmRemove(pack.id)}><Trash2 size={15} /></button>}</div></td>
+            : <button className="icon-button" aria-label={'删除 ' + pack.name} title={unsafeToRemove ? '请先退出当前运行实例' : '删除整合包（先停止运行，再整份备份进备份区）'} disabled={busy || unsafeToRemove} onClick={() => setConfirmRemove(pack.id)}><Trash2 size={15} /></button>}</div></td>
         </tr>
       })}
     </tbody></table></div>
     {control.loading && <div className="pack-empty"><LoaderCircle className="spin" size={18} />正在读取整合包…</div>}
     {!control.loading && !control.error && packs.length === 0 && <div className="pack-empty">{query ? '没有匹配的整合包' : '还没有整合包。新建一个，或导入一个。'}</div>}
-    <footer className="pack-dashboard-footer"><span>{control.packs.filter(pack => pack.runtime.running).length} 个正在运行</span>{externalCount > 0 && <span className="pack-external-count">另有 {externalCount} 个未托管实例在运行</span>}<span>置顶按时间排列 · 启动参数在下次启动时生效</span>{packs.some(pack => pack.config.runAsAdmin) && <span className="pack-admin-note">已勾选「管理员」的整合包每次启动都会弹一次 UAC；想只弹一次就关掉它们、改用设置里的「启动器启动时请求管理员权限」</span>}</footer>
+    <footer className="pack-dashboard-footer"><span>{control.packs.filter(pack => pack.runtime.running && !hasUnverifiedRuntime(pack)).length} 个正在运行</span>{externalCount > 0 && <span className="pack-external-count">另有 {externalCount} 个外部实例待核实</span>}<span>置顶按时间排列 · 启动参数在下次启动时生效</span>{packs.some(pack => pack.config.runAsAdmin) && <span className="pack-admin-note">已勾选「管理员」的整合包每次启动都会弹一次 UAC；想只弹一次就关掉它们、改用设置里的「启动器启动时请求管理员权限」</span>}</footer>
     {selectedPack && <PackControlDialog key={selectedPack.id} pack={selectedPack} busy={control.busy.includes(selectedPack.id)} onClose={() => setSelected(null)} onSave={values => patch(selectedPack, values)} onRefresh={control.refresh} onExport={() => props.onExport(selectedPack.id)} onImportSessions={() => props.onImportSessions(selectedPack.id)} onCloneVersion={() => props.onCloneVersion(selectedPack.id)} installedDshVersions={props.installedDshVersions} onUpgradeVersion={version => props.onUpgradeVersion(selectedPack.id, version)} />}
   </section>
 }
+function ObserverRuntimeActions({ pack, onOpen, onForceStop }: { pack: ControlledPack; onOpen: () => void; onForceStop: () => void }) {
+  const [confirm, setConfirm] = useState(false)
+  return <>
+    <button type="button" className="icon-button" aria-label={'打开网页 ' + pack.name} disabled={!pack.runtime.url} onClick={onOpen}><ExternalLink size={15} /></button>
+    {confirm ? <>
+      <button type="button" className="danger-button" aria-label={'确认强制停止 ' + pack.name} onClick={() => { setConfirm(false); onForceStop() }}>确认强制停止</button>
+      <button type="button" className="secondary-button" aria-label={'取消强制停止 ' + pack.name} onClick={() => setConfirm(false)}>取消</button>
+    </> : <button type="button" className="danger-button" aria-label={'强制停止 ' + pack.name} onClick={() => setConfirm(true)}><Square size={13} />强制停止</button>}
+  </>
+}
+
 function PortEditor({ pack, disabled, onSave }: { pack: ControlledPack; disabled: boolean; onSave: (patch: Partial<PackControlConfig>) => void }) {
   const [port, setPort] = useState(String(pack.config.port))
   const [invalid, setInvalid] = useState(false)

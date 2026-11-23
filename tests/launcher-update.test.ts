@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events'
 import { mkdtempSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -15,6 +16,8 @@ import {
 import type { LauncherUpdater } from '../electron/launcher-update'
 import { LAUNCHER_RELEASE_REPOSITORY } from '../src/constants'
 
+import { createUpdateFlow } from '../electron/update-flow'
+
 const SETUP_KEWU = 'DSH-launcher-KEWU-Setup-1.1.0.exe'
 const LEGACY_SETUP = 'DSH-Launcher-1.0.4-setup.exe'
 /** 安装版进程的 exe：不在 node_modules 里，名字也不带 portable。 */
@@ -22,6 +25,12 @@ const INSTALLED_EXEC = 'C:\\Program Files\\DSH-launcher-KEWU\\DSH-launcher-KEWU.
 const INSTALLED_DIR = 'C:\\Program Files\\DSH-launcher-KEWU'
 /** 开发态：execPath 落在 node_modules 里。 */
 const DEV_EXEC = 'C:\\dev\\dshlauncher\\node_modules\\electron\\dist\\electron.exe'
+
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>(done => { resolve = done })
+  return { promise, resolve }
+}
 
 type UpdaterOptions = Parameters<typeof createLauncherUpdater>[0]
 
@@ -108,7 +117,9 @@ async function readyUpdater(overrides: Partial<UpdaterOptions> = {}): Promise<Ha
   const fakeSpawn = ((command: string, args: string[], spawnOptions: Record<string, unknown>) => {
     calls.push('spawn')
     spawned.push({ command, args, options: spawnOptions })
-    return { unref: () => undefined }
+    const child = Object.assign(new EventEmitter(), { unref: () => undefined })
+    queueMicrotask(() => child.emit('spawn'))
+    return child
   }) as never
   const fakeExit = ((code: number) => {
     exitCodes.push(code)
@@ -407,15 +418,16 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
     expect(launcherScript).toContain('WScript.Shell')
     expect(launcherScript).toContain(', 0, False')
     expect(launcherScript).toContain('DeleteFile WScript.ScriptFullName')
-    const commandPath = /shell\.Run """(.*\.cmd)""", 0, False/.exec(launcherScript)?.[1] as string
-    expect(commandPath).toBe(path.join(updateRoot, 'apply-' + process.pid + '.cmd'))
+    expect(launcherScript).toContain('shell.Run """.\\apply-' + process.pid + '.cmd""", 0, False')
+    const commandPath = path.join(updateRoot, 'apply-' + process.pid + '.cmd')
 
     // cmd：等 PID 退出 → Setup /S /D=<当前安装目录> → 只有成功才 start 新 exe。
     const command = await readFile(commandPath, 'utf8')
     expect(command).toContain('/D=' + INSTALLED_DIR)
     expect(command).toContain('"PID eq ' + process.pid + '"')
     expect(command).toContain('goto wait')
-    expect(command).toContain('start "" "' + INSTALLED_EXEC + '"')
+    expect(command).toContain('start "" "' + INSTALLED_EXEC + '"\r\n')
+    expect(command).not.toContain('--adopt-running-packs')
     expect(command).toContain('if not "%CODE%"=="0" goto setup_failed')
 
     // 日志落在 <userData>/launcher-update/apply-<时间戳>.log
@@ -435,6 +447,120 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
     expect(failedBranch).toContain(':setup_failed')
     expect(failedBranch).not.toContain('start ""')
     expect(failedBranch).toContain('setup failed with exit code %CODE%')
+  })
+
+  it('preserves live sessions through the CLI flow and writes the adoption relaunch command', async () => {
+    const dataDir = 'D:\\Custom data & 10% !'
+    const prepared: boolean[] = []
+    const { updater, updateRoot, calls, exitCodes } = await readyUpdater({
+      preserveRunningPacks: true,
+      prepareForRelaunch: signal => { prepared.push(signal.aborted) },
+      relaunchDataDir: dataDir,
+    })
+    const forbidden: string[] = []
+    const forbiddenCall = (name: string) => () => {
+      forbidden.push(name)
+      throw new Error(name)
+    }
+    const flow = createUpdateFlow({
+      preserveRunningPacks: true,
+      updater,
+      settings: { read: forbiddenCall('settings') },
+      listRunningPacks: forbiddenCall('list'),
+      countRunningSessions: forbiddenCall('probe'),
+      saveResume: forbiddenCall('save'),
+      clearResume: forbiddenCall('clear'),
+      wait: forbiddenCall('wait'),
+    })
+    expect((await updater.check()).state).toBe('downloaded')
+    await flow.start()
+    await flow.settled()
+    expect(forbidden).toEqual([])
+    expect(flow.status()).toMatchObject({ phase: 'applying', busy: [], resumePacks: [] })
+    expect(prepared).toEqual([false])
+    expect(calls).toEqual(['spawn'])
+    expect(exitCodes).toEqual([0])
+    const command = await readFile(path.join(updateRoot, 'apply-' + process.pid + '.cmd'), 'utf8')
+    const restart = 'start "" "' + INSTALLED_EXEC + '" --adopt-running-packs --data-dir "D:\\Custom data & 10%% !"'
+    expect(command).toContain(restart)
+    expect(command.indexOf('if not "%CODE%"=="0" goto setup_failed')).toBeLessThan(command.indexOf(restart))
+  })
+
+  it('rejects duplicate apply and rolls back cancellation during live preparation', async () => {
+    const controller = new AbortController()
+    const entered = deferred()
+    const proceed = deferred()
+    const rolledBack: boolean[] = []
+    const { updater, calls, exitCodes } = await readyUpdater({
+      preserveRunningPacks: true,
+      prepareForRelaunch: async signal => {
+        entered.resolve()
+        await proceed.promise
+        return () => { rolledBack.push(signal.aborted) }
+      },
+    })
+    const applied = updater.apply({ signal: controller.signal })
+    const rejected = expect(applied).rejects.toThrow('cancelled')
+    await entered.promise
+    expect((await updater.check()).state).toBe('applying')
+    expect((await updater.download()).state).toBe('applying')
+    await expect(updater.apply()).rejects.toThrow('正在安装')
+    controller.abort(new Error('cancelled'))
+    proceed.resolve()
+    await rejected
+    expect((await updater.check()).state).toBe('downloaded')
+    expect(rolledBack).toEqual([true])
+    expect(calls).toEqual([])
+    expect(exitCodes).toEqual([])
+  })
+
+  it('keeps the launcher alive if preparation or process spawn fails', async () => {
+    const rollback: string[] = []
+    const { updater, calls, exitCodes } = await readyUpdater({
+      preserveRunningPacks: true,
+      prepareForRelaunch: () => { throw new Error('prepare failed') },
+    })
+    await expect(updater.apply()).rejects.toThrow('prepare failed')
+    expect(calls).toEqual([])
+    expect(exitCodes).toEqual([])
+
+    const failing = await readyUpdater({
+      preserveRunningPacks: true,
+      prepareForRelaunch: () => () => { rollback.push('rollback') },
+      spawnProcess: (() => {
+        const child = new EventEmitter()
+        queueMicrotask(() => child.emit('error', new Error('wscript missing')))
+        return child
+      }) as never,
+    })
+    await expect(failing.updater.apply()).rejects.toThrow('wscript missing')
+    expect(failing.exitCodes).toEqual([])
+    expect(rollback).toEqual(['rollback'])
+    expect((await failing.updater.check()).state).toBe('downloaded')
+  })
+
+  it('awaits graceful exit after helper spawn and keeps a failed exit committed', async () => {
+    const exiting = deferred()
+    const release = deferred()
+    const rollback: string[] = []
+    const { updater, calls } = await readyUpdater({
+      preserveRunningPacks: true,
+      prepareForRelaunch: () => () => { rollback.push('rollback') },
+      exitProcess: async () => {
+        exiting.resolve()
+        await release.promise
+        throw new Error('quit failed')
+      },
+    })
+    const applied = updater.apply()
+    const rejected = expect(applied).rejects.toThrow('quit failed')
+    await exiting.promise
+    expect(calls).toEqual(['spawn'])
+    expect((await updater.check()).state).toBe('applying')
+    release.resolve()
+    await rejected
+    expect((await updater.check()).state).toBe('applying')
+    expect(rollback).toEqual([])
   })
 
   it('整合包停不下来时中止更新，且不拉起安装助手', async () => {

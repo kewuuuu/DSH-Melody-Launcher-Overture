@@ -65,25 +65,13 @@ describe('pack control with an unmanaged external DSH', () => {
     await control.shutdown()
   })
 
-  it('stops the external instance instead of reporting a fake success', async () => {
-    const { control, root, stopped } = await fixture({ external: { a: externalFor('a') } })
-    const result = (await control.execute({ command: 'pack.stop', packId: 'a' })) as Record<string, unknown>
-    expect(result).toMatchObject({ running: false, externalStopped: true, stoppedBy: 'taskkill' })
-    // 默认允许弹一次 UAC：设置里没写 elevatedStopPrompt 就是这个意思。
-    expect(stopped).toEqual([{ pid: 4000, allowElevation: true, dataDir: root }])
-    await control.shutdown()
-  })
-
-  it('honours --no-elevated and elevatedStopPrompt:false by never allowing UAC', async () => {
-    const noFlag = await fixture({ external: { a: externalFor('a') } })
-    await noFlag.control.execute({ command: 'pack.stop', packId: 'a', args: { noElevated: true } })
-    expect(noFlag.stopped[0].allowElevation).toBe(false)
-    await noFlag.control.shutdown()
-
-    const promptOff = await fixture({ external: { a: externalFor('a') }, settings: { elevatedStopPrompt: false } })
-    await promptOff.control.execute({ command: 'pack.stop', packId: 'a' })
-    expect(promptOff.stopped[0].allowElevation).toBe(false)
-    await promptOff.control.shutdown()
+  it.each([false, true])('refuses to stop an unverified legacy external (force=%s)', async force => {
+    const { control, stopped } = await fixture({ external: { a: externalFor('a') } })
+    try {
+      await expect(control.execute({ command: 'pack.stop', packId: 'a', args: { force } }))
+        .rejects.toThrow('its pack or process identity is unverified')
+      expect(stopped).toHaveLength(0)
+    } finally { await control.shutdown() }
   })
 
   it('still reports running:false when genuinely nothing runs, without claiming an external stop', async () => {

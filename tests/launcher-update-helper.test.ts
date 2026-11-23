@@ -131,10 +131,13 @@ describe('buildApplyCommand', () => {
     const command = buildApplyCommand(BASE)
     expect(command).toContain('set "CODE=%ERRORLEVEL%"')
     expect(command).toContain('if not "%CODE%"=="0" goto setup_failed')
-    const failed = branch(command, ':setup_failed', ':done')
+    const failed = branch(command, ':setup_failed', ':restart_failed')
     expect(failed).not.toContain('start ""')
     expect(failed).toContain('setup failed with exit code %CODE%')
     expect(failed).toContain('the installer is kept for a manual retry')
+    expect(failed).toContain('goto done')
+    expect(failed).not.toContain('apply done')
+    expect(command).toContain('if not "%CODE%"=="0" goto restart_failed')
   })
 
   it('全程把日志追加到同一个 apply 日志文件里', () => {
@@ -147,7 +150,7 @@ describe('buildApplyCommand', () => {
   it('脚本跑完自删，不留一次性文件', () => {
     const command = buildApplyCommand(BASE)
     expect(branch(command, ':done', ':log')).toContain('del "%~f0"')
-    expect(command).toContain('exit /b 0')
+    expect(command).toContain('del "%~f0" & exit /b %CODE%')
   })
 
   it('是 CRLF 换行、且只有 ASCII（cmd 按控制台代码页解析批处理）', () => {

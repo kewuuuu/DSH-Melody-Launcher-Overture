@@ -151,6 +151,24 @@ it('改一个字段、不点任何按钮就自动写盘，状态变成「已自�
   expect(statusLine(container)?.textContent).toContain('刚刚')
 })
 
+it('退出整合包策略默认询问，选择停止或切回询问后自动保存', async () => {
+  const { container, saved } = await mount({ echoSettings: true })
+  const policy = Array.from(container.querySelectorAll('select')).find(
+    select => select.closest('label')?.textContent?.includes('退出启动器时如何处理运行中的整合包'),
+  )!
+  expect(policy.value).toBe('ask')
+  for (const value of ['stop', 'ask']) {
+    await act(async () => {
+      policy.value = value
+      policy.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await settle()
+    expect(saved.at(-1)?.packExitPolicy).toBe(value)
+    expect(policy.value).toBe(value)
+  }
+  expect(saved).toHaveLength(2)
+})
+
 it('连续改两个字段只写一次盘：防抖把同一批改动合并成一次 onSave', async () => {
   const { container, saved } = await mount()
   await act(async () => { stopPacksBox(container).click() })

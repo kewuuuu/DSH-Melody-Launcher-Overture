@@ -1,9 +1,10 @@
 import type { AppSettings, LauncherUpdateStatus } from '../src/types'
+import { LauncherRelaunchExitError, type LauncherApplyOptions } from './launcher-update'
 import type { UpdateResumeFile, UpdateResumePack } from './update-resume'
 import { UPDATE_RESUME_VERSION } from './update-resume'
 
 /**
- * 「CLI 触发更新」的状态机：检查 → 下载 → 等所有整合包的会话跑完 → 记录谁在跑 → 交给升级助手。
+ * 「CLI 触发更新」的状态机：检查 → 下载 → 交给升级助手。旧模式会先等整合包会话结束并记录恢复清单。
  * 主进程只注入能力（包查询、会话探针、updater、resume 文件），判定逻辑留在这里好测。
  *
  * 等待语义复用空闲自动关机：有会话算忙、探针失败也算忙（宁可多等，也不在用户正干活时重启）；
@@ -44,8 +45,10 @@ export interface UpdateFlowDeps {
   updater: {
     check(): Promise<LauncherUpdateStatus>
     download(): Promise<LauncherUpdateStatus>
-    apply(): Promise<void>
+    apply(options?: LauncherApplyOptions): Promise<void>
   }
+  /** 调用方须同时启用 updater 的整合包保留模式。--wait 和 --force 仍可传入，但不影响此模式。 */
+  preserveRunningPacks?: boolean
   listRunningPacks: () => Promise<UpdateFlowPack[]>
   countRunningSessions: (url: string, signal: AbortSignal) => Promise<number>
   saveResume: (file: UpdateResumeFile) => Promise<void>
@@ -102,7 +105,10 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
   }
 
   let running: Promise<void> | null = null
-  let cancelled = false
+  let checking: Promise<LauncherUpdateStatus> | null = null
+  let controller: AbortController | null = null
+  let committed = false
+  const preserveRunningPacks = deps.preserveRunningPacks === true
 
   const snapshot = (): UpdateFlowState => ({
     ...state,
@@ -166,11 +172,12 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
     return busy
   }
 
-  const waitUntilIdle = async (waitMinutes: number): Promise<void> => {
+  const waitUntilIdle = async (waitMinutes: number, signal: AbortSignal): Promise<void> => {
     const deadline = now() + waitMinutes * 60_000
     for (;;) {
-      if (cancelled) return
+      if (signal.aborted) return
       const busy = await collectBusy()
+      if (signal.aborted) return
       state.busy = busy
       if (busy.length === 0) {
         state.message = '整合包都已没有运行中的会话，准备安装更新…'
@@ -184,12 +191,21 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
     }
   }
 
-  const run = async (waitMinutes: number, force: boolean): Promise<void> => {
+  const run = async (options: Parameters<UpdateFlowService['start']>[0], signal: AbortSignal): Promise<void> => {
+    let writingResume = false
     try {
-      state.phase = 'checking'
-      state.message = '正在检查更新…'
+      if (!preserveRunningPacks) {
+        const settings = await deps.settings.read()
+        if (signal.aborted) return
+        state.waitMinutes = waitMinutesOf(options?.waitMinutes ?? settings.updateWaitMinutes)
+      }
+      if (signal.aborted) return
       const checked = await deps.updater.check()
+      if (signal.aborted) return
       adopt(checked)
+      if (checked.state === 'applying' || checked.state === 'downloading') {
+        throw new Error('已有一个启动器更新在进行中。')
+      }
       if (checked.state === 'error') throw new Error(checked.message || '检查更新失败。')
       if (checked.state !== 'update-available' && checked.state !== 'downloaded') {
         state.phase = 'idle'
@@ -199,27 +215,42 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
       state.phase = 'downloading'
       state.message = '正在下载更新…'
       const downloaded = await deps.updater.download()
+      if (signal.aborted) return
       adopt(downloaded)
       if (downloaded.state !== 'downloaded') throw new Error(downloaded.message || '更新下载失败。')
-      // 下载期间被取消：别再改回 waiting 把状态又点亮一次。
-      if (cancelled) return
-      if (!force) {
+      if (preserveRunningPacks) {
+        state.phase = 'applying'
+        state.message = '正在保留运行中的整合包并准备安装更新…'
+        emit('[update] ' + state.message)
+        if (signal.aborted) return
+        await deps.updater.apply({ signal, onCommit: () => { committed = true } })
+        committed = true
+        return
+      }
+      if (options?.force !== true) {
         state.phase = 'waiting'
         state.busy = []
-        await waitUntilIdle(waitMinutes)
-        if (cancelled) return
+        await waitUntilIdle(state.waitMinutes, signal)
+        if (signal.aborted) return
       }
       // 记录「此刻还在跑」的包：停包之后就没有现场了，恢复只能靠这一份。
       const packs = await deps.listRunningPacks()
+      if (signal.aborted) return
       state.resumePacks = packs
         .filter(pack => pack.unmanaged !== true)
         .map(pack => ({ id: pack.id, ...(pack.name ? { name: pack.name } : {}) }))
+      writingResume = true
       await deps.saveResume({
         version: UPDATE_RESUME_VERSION,
         toVersion: state.remoteVersion,
         packs: state.resumePacks,
         at: new Date(now()).toISOString(),
       })
+      if (signal.aborted) {
+        await deps.clearResume()
+        return
+      }
+      committed = true
       state.phase = 'applying'
       state.message = state.resumePacks.length > 0
         ? '正在停止 ' + state.resumePacks.length + ' 个整合包并安装更新，装完会自动恢复它们…'
@@ -227,10 +258,16 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
       emit('[update] ' + state.message)
       await deps.updater.apply()
     } catch (error) {
+      if (error instanceof LauncherRelaunchExitError) {
+        state.message = error.message
+        emit('[update] ' + state.message)
+        return
+      }
+      if (signal.aborted && error === signal.reason) return
+      if (signal.aborted && !preserveRunningPacks && !writingResume) return
       state.phase = 'failed'
       state.message = messageOf(error)
-      // 没装成就别在下次启动时恢复：那时机器上的包本来就没人动过。
-      await deps.clearResume().catch(() => undefined)
+      if (!preserveRunningPacks) await deps.clearResume().catch(() => undefined)
       emit('[update] 更新失败：' + state.message)
     }
   }
@@ -238,39 +275,53 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
   return {
     status: () => snapshot(),
     check: async () => {
-      state.phase = 'checking'
-      state.message = '正在检查更新…'
-      const status = await deps.updater.check()
-      adopt(status)
-      state.phase = status.state === 'error' ? 'failed' : 'idle'
-      state.message = status.state === 'error'
-        ? status.message || '检查更新失败。'
-        : status.message || (status.state === 'update-available' ? '发现新版本 ' + (status.remoteVersion ?? '') : '已经是最新版本。')
-      return status
+      if (running || committed) throw new Error('已有一个更新流程在进行中。')
+      if (!checking) {
+        state.phase = 'checking'
+        state.message = '正在检查更新…'
+        checking = Promise.resolve().then(() => deps.updater.check()).then(status => {
+          adopt(status)
+          state.phase = status.state === 'error' ? 'failed'
+            : status.state === 'applying' || status.state === 'downloading' ? status.state : 'idle'
+          state.message = status.message || (status.state === 'update-available'
+            ? '发现新版本 ' + (status.remoteVersion ?? '')
+            : status.state === 'error' ? '检查更新失败。' : '已经是最新版本。')
+          return status
+        }).catch(error => {
+          state.phase = 'failed'
+          state.message = messageOf(error)
+          throw error
+        }).finally(() => { checking = null })
+      }
+      return checking
     },
     start: async options => {
-      if (running) throw new Error('已有一个更新流程在进行中。')
-      const settings = await deps.settings.read()
-      const waitMinutes = waitMinutesOf(options?.waitMinutes ?? settings.updateWaitMinutes)
-      cancelled = false
+      if (running || checking || committed) throw new Error('已有一个更新流程在进行中。')
+      const next = new AbortController()
+      controller = next
       state.phase = 'checking'
-      state.waitMinutes = waitMinutes
+      state.waitMinutes = UPDATE_FLOW_DEFAULT_WAIT_MINUTES
       state.busy = []
       state.resumePacks = []
       state.startedAt = new Date(now()).toISOString()
       state.message = '正在检查更新…'
-      running = run(waitMinutes, options?.force === true).finally(() => { running = null })
+      running = Promise.resolve().then(() => run(options, next.signal)).finally(() => {
+        controller = null
+        running = null
+        if (state.phase !== 'applying') committed = false
+      })
       return snapshot()
     },
     cancel: async () => {
-      if (state.phase === 'applying') throw new Error('安装已经开始，无法取消本次更新。')
-      if (!running) return snapshot()
-      cancelled = true
+      if (committed) throw new Error('安装已经开始，无法取消本次更新。')
+      if (!controller) return snapshot()
+      controller.abort(new Error('已取消本次更新。'))
       state.phase = 'idle'
       state.busy = []
+      state.resumePacks = []
       state.message = '已取消本次更新。'
       return snapshot()
     },
-    settled: () => running ?? Promise.resolve(),
+    settled: () => running ?? checking?.then(() => undefined, () => undefined) ?? Promise.resolve(),
   }
 }

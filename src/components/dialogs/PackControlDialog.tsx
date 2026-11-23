@@ -1,7 +1,7 @@
 import { ArrowLeft, Download, FolderOpen, LoaderCircle, Pencil, RefreshCw, Settings2, Store, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLauncherApi } from '../../api/client'
-import { launcherControl, type ControlledPack, type PackControlConfig } from '../../lib/pack-control'
+import { hasUnverifiedRuntime, launcherControl, type ControlledPack, type PackControlConfig } from '../../lib/pack-control'
 import type { InstalledSkill, InstalledPreset, ManagedPlugin, PackApiGrantState } from '../../types'
 import { DshMarketView } from '../../views/DshMarketView'
 import { SkillMarketPanel } from '../../views/SettingsView'
@@ -25,6 +25,10 @@ interface Props {
 }
 export function PackControlDialog(props: Props) {
   const { pack } = props
+  const unverified = hasUnverifiedRuntime(pack)
+  const observer = pack.runtime.ownership === 'observer'
+  const blockedObserver = observer && pack.runtime.pid == null
+  const active = pack.runtime.running || unverified
   const api = useLauncherApi()
   const [tab, setTab] = useState<'overview' | 'settings' | 'api' | Kind | 'export'>('overview')
   const [market, setMarket] = useState(false)
@@ -69,7 +73,7 @@ export function PackControlDialog(props: Props) {
   const [versionBusy, setVersionBusy] = useState(false)
   const [versionSaved, setVersionSaved] = useState(false)
   const switchVersion = async () => {
-    if (!targetVersion || targetVersion === currentVersion || versionBusy || pack.runtime.running) return
+    if (!targetVersion || targetVersion === currentVersion || versionBusy || active) return
     setVersionBusy(true); setVersionSaved(false)
     try {
       if (await props.onUpgradeVersion(targetVersion)) { setVersionSaved(true); await props.onRefresh() }
@@ -140,14 +144,14 @@ export function PackControlDialog(props: Props) {
     <nav className="pack-config-tabs" aria-label="整合包配置">{([['overview', '概览'], ['settings', '启动设置'], ['api', 'API'], ['plugins', '插件'], ['skills', '技能'], ['presets', '预设'], ['export', '导出与迁移']] as const).map(([key, label]) => <button key={key} disabled={working} aria-current={tab === key ? 'page' : undefined} className={tab === key ? 'active' : ''} onClick={() => { setTab(key); setMarket(false); setError(null) }}>{label}</button>)}</nav>
     {error && <div className="pack-error" role="alert">{error}</div>}
     {(tab === 'plugins' || tab === 'skills') && pack.runtime.running && <div className="pack-runtime-notice" role="status">整合包正在运行：这里的开关与安装会在下次启动时生效。</div>}
-    {tab === 'overview' && <div className="pack-overview"><div><span>运行状态</span><strong>{pack.runtime.running ? '运行中' : '未运行'}</strong><small>{pack.runtime.url ?? '启动后可以打开工作台'}</small></div><div><span>DSH 版本</span><strong>{pack.dshVersion ?? '未指定'}</strong><small>{pack.native ? '共用家目录，请留意资源影响范围' : '独立的整合包环境'}</small></div><div><span>创建时间</span><strong>{new Date(pack.installedAt).toLocaleDateString('zh-CN')}</strong><small>{pack.description || '为每一种工作保留合适的环境。'}</small></div></div>}
+    {tab === 'overview' && <div className="pack-overview"><div><span>运行状态</span><strong>{unverified ? '外部实例待核实' : blockedObserver ? '检测到运行实例（身份待核实）' : observer ? '运行中（仅观察）' : pack.runtime.running ? '运行中（本启动器管理）' : '未运行'}</strong><small>{unverified ? '请在原启动环境中退出该实例' : blockedObserver ? pack.runtime.lastError ?? '启动器无法确认进程身份' : pack.runtime.url ?? (observer ? '网页地址尚未验证' : '启动后可以打开工作台')}</small></div><div><span>DSH 版本</span><strong>{pack.dshVersion ?? '未指定'}</strong><small>{pack.native ? '共用家目录，请留意资源影响范围' : '独立的整合包环境'}</small></div><div><span>创建时间</span><strong>{new Date(pack.installedAt).toLocaleDateString('zh-CN')}</strong><small>{pack.description || '为每一种工作保留合适的环境。'}</small></div></div>}
     {tab === 'settings' && <form className="pack-config-form" onSubmit={event => { event.preventDefault(); setSaved(false); setError(null); void props.onSave({ workspace, launchArgs: launchArgs.split('\n').filter(Boolean) }).then(ok => { setSaved(ok); if (!ok) setError('保存设置失败，请检查参数后重试。') }) }}><label>工作区<input value={workspace} onChange={event => { setWorkspace(event.target.value); setSaved(false) }} placeholder="使用默认工作区" /></label><label>附加启动参数 <small>每行一个参数</small><textarea rows={5} value={launchArgs} onChange={event => { setLaunchArgs(event.target.value); setSaved(false) }} /></label><p>端口、管理员权限和自动启动可在首页直接调整。运行中的整合包将在下次启动时应用设置。</p><button className="primary-button" disabled={props.busy} type="submit">{props.busy ? '正在保存…' : '保存设置'}</button>{saved && <span role="status">设置已保存</span>}</form>}
     {tab === 'settings' && <div className="pack-config-form pack-version-form">
       <h3>DSH 版本</h3>
       <p>当前版本：<strong>{currentVersion || '未指定'}</strong></p>
       <label>切换到<select aria-label="目标 DSH 版本" value={targetVersion} disabled={props.busy || versionBusy} onChange={event => { setTargetVersion(event.target.value); setVersionSaved(false) }}>{props.installedDshVersions.length === 0 ? <option value="" disabled>暂无已安装版本</option> : props.installedDshVersions.map(version => <option key={version} value={version}>DSH {version}</option>)}</select></label>
-      <button type="button" className="primary-button" disabled={props.busy || versionBusy || pack.runtime.running || targetVersion === '' || targetVersion === currentVersion} onClick={() => void switchVersion()}>{versionBusy ? '正在切换…' : '切换版本'}</button>
-      {pack.runtime.running && <p role="status">整合包正在运行，停止后才能切换版本。</p>}
+      <button type="button" className="primary-button" disabled={props.busy || versionBusy || active || targetVersion === '' || targetVersion === currentVersion} onClick={() => void switchVersion()}>{versionBusy ? '正在切换…' : '切换版本'}</button>
+      {active && <p role="status">{unverified ? '请在原启动环境中退出该实例后再切换版本。' : '整合包正在运行，停止后才能切换版本。'}</p>}
       {versionSaved && <span role="status">已切换到 DSH {targetVersion}，下次启动生效。</span>}
       <p className="settings-hint">只能升级不能降级；切换后插件可能需要重新安装。</p>
     </div>}

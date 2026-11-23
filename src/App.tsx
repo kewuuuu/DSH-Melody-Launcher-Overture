@@ -248,7 +248,7 @@ function LauncherShell() {
         <div className="surface-stage surface-launcher">
           <div className="surface-host launcher-surface-host">
             {HOME_TAB_ORDER.filter(tab => visitedTabs.current.has(tab)).map(tab => (
-              <div key={tab} className={`home-tab-pane ${navigation.homeTab === tab ? '' : 'view-hidden'}`}>
+              <div key={tab} className={`home-tab-pane${tab === 'start' ? ' home-tab-pane-start' : ''}${navigation.homeTab === tab ? '' : ' view-hidden'}`}>
                 {tab === 'start' ? (
                   <StartView
                     logoSrc={logoSrc}

@@ -9,7 +9,17 @@ export interface PackControlConfig {
   workspace?: string
   launchArgs?: string[]
 }
-export type ControlledPack = PackStatus & { config: PackControlConfig; runtime: RuntimeState }
+export type ControlledPack = PackStatus & {
+  config: PackControlConfig
+  runtime: RuntimeState & {
+    ownership?: 'owned' | 'observer'
+    activeSessionCount?: number | null
+  }
+}
+
+export function hasUnverifiedRuntime(pack: ControlledPack): boolean {
+  return !pack.runtime.ownership && Boolean(pack.externalRuntime)
+}
 export type PackSort = 'name' | 'created' | 'port'
 export function sortPacks(packs: ControlledPack[], sort: PackSort, descending: boolean): ControlledPack[] {
   return [...packs].sort((a, b) => {

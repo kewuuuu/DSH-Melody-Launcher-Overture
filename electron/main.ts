@@ -17,10 +17,11 @@ import { registerAppearanceProtocol, registerAppearanceScheme } from './appearan
 import { registerBackupsIpc } from './backups-ipc'
 import { registerPathMigrationIpc } from './path-migration-ipc'
 import { registerPendingResumesIpc } from './pending-resume-ipc'
-import { readRunningSessions } from './pending-resume'
-import { createIdleShutdownService, type IdleShutdownService } from './idle-shutdown'
+import { createPendingResumeQueue, PENDING_RESUMES_FILENAME, readRunningSessions } from './pending-resume'
+import { createIdleShutdownService, type IdleShutdownPack, type IdleShutdownService } from './idle-shutdown'
 import { createUpdateFlow, type UpdateFlowService } from './update-flow'
-import { clearUpdateResume, readUpdateResume, saveUpdateResume } from './update-resume'
+import { clearUpdateResume, saveUpdateResume } from './update-resume'
+import { assertLegacyRuntimePreservable, prepareUserQuit } from './main-lifecycle'
 import { registerIdleShutdownIpc } from './idle-shutdown-ipc'
 import { registerLauncherPluginsIpc } from './launcher-plugins-ipc'
 import { createWorkspaceSkillsService } from './workspace-skills'
@@ -131,9 +132,12 @@ function applyStorageLocation(dataDir: string): void {
   app.setPath('sessionData', path.join(dataDir, STORAGE_BROWSER_DATA_DIRNAME))
 }
 
+let explicitDataDir = false
+
 function installStorageLocation(): StorageResolution {
   try {
     const resolution = resolveStorage({ ...storageBootstrap, argv: process.argv })
+    explicitDataDir = resolution.source === 'argument'
     try {
       applyStorageLocation(resolution.dataDir)
       return resolution
@@ -156,16 +160,22 @@ const storageController = createStorageController({ resolution: storageResolutio
 
 /** 重启启动器：丢掉会把新目录覆盖回去的 --data-dir / --user-data-dir；portable 版要重开 EXE 而不是解包出来的进程。 */
 function relaunchLauncher(): void {
-  app.relaunch({
-    execPath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
-    args: process.argv.slice(1).filter(argument => !argument.startsWith('--data-dir') && !argument.startsWith('--user-data-dir')),
+  void requestLauncherQuit('storage relaunch', async () => {
+    await stopLauncherRuntimes()
+    return () => app.relaunch({
+      execPath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
+      args: process.argv.slice(1).filter((argument, index, argv) => {
+        const isDataDirFlag = (value: string | undefined) => value === '--data-dir' || value === '--user-data-dir'
+        return !isDataDirFlag(argument) && !argument.startsWith('--data-dir=') && !argument.startsWith('--user-data-dir=')
+          && !(isDataDirFlag(argv[index - 1]) && !argument.startsWith('--')) && argument !== '--adopt-running-packs'
+      }),
+    })
   })
-  app.exit(0)
 }
 
 let mainWindow: BrowserWindow | null = null
 let processSupervisor: ProcessSupervisor | null = null
-let quitCleanupStarted = false
+let lifecycleOperation: string | null = null
 let allowFinalQuit = false
 // 关闭按钮只隐藏到托盘；before-quit 置位后放行真正的关闭。
 let isQuitting = false
@@ -176,11 +186,14 @@ const getWindow = (): BrowserWindow | null => mainWindow
 const events = createRendererEvents(createRendererChannel(getWindow))
 
 interface Services {
+  stopLegacyRuntime: () => Promise<void>
+  legacyRuntimeBusy: () => boolean
+  packsReconciled: Promise<boolean>
   packControl: ReturnType<typeof createLauncherControl>
   launcherControl: ReturnType<typeof createLauncherControl>['execute']
   /** 所有整合包都空闲后自动关机的状态机；IPC、CLI、设置保存都指向这一份。 */
   idleShutdown: IdleShutdownService
-  /** CLI 触发的更新流程（等会话跑完 → 记录运行中的包 → 交给升级助手）。 */
+  /** CLI 更新与 GUI 共用保留整合包流程。 */
   updateFlow: UpdateFlowService
   settings: SettingsStore
   /** 启动器级 API 库（跨整合包共享）。 */
@@ -368,7 +381,7 @@ function createServices(bootSettings?: SettingsStore): Services {
   let applicationAddons: ApplicationAddonManager
   let installer: Installer
   let packControl: ReturnType<typeof createLauncherControl> | null = null
-  const runtime = createRuntimeController({
+  const legacyRuntime = createRuntimeController({
     readSettings: async () => { const value = await settings.read(); if (packControl?.hasRunningHome(value.dshHome)) throw new Error('This pack is already running through multi-pack controls'); return value },
     prepareNodeRuntime: () => prepareNodeRuntime('runtime'),
     fallbackWorkspace: () => app.getPath('documents'),
@@ -383,6 +396,30 @@ function createServices(bootSettings?: SettingsStore): Services {
     packageStoreRoot: path.join(userData, 'plugin-store'),
     prepareOfficeCliTool,
   })
+  let legacyOperation: Promise<unknown> | null = null
+  const legacyRuntimeBusy = () => legacyOperation !== null || legacyRuntime.isRunning()
+  const runLegacyOperation = <T>(operation: () => Promise<T>): Promise<T> => {
+    if (lifecycleOperation) return Promise.reject(new Error('启动器正在退出或更新，无法操作旧版运行实例。'))
+    const pending = (legacyOperation ?? Promise.resolve()).catch(() => undefined).then(operation)
+    legacyOperation = pending
+    return pending.finally(() => {
+      if (legacyOperation === pending) legacyOperation = null
+    })
+  }
+  const runtime: RuntimeController = {
+    ...legacyRuntime,
+    start: () => runLegacyOperation(async () => {
+      const wasRunning = legacyRuntime.isRunning()
+      const result = await legacyRuntime.start()
+      if (!wasRunning && legacyRuntime.isRunning()) events.output('runtime', 'info', '旧版运行实例需要先停止，才能更新启动器或保留整合包后退出。')
+      return result
+    }),
+    stop: options => runLegacyOperation(() => legacyRuntime.stop(options)),
+  }
+  const stopLegacyRuntime = async () => {
+    await legacyOperation?.catch(() => undefined)
+    if (legacyRuntime.isRunning()) await legacyRuntime.stop()
+  }
   const profileService = createProfileService({
     dshHome: () => settings.read().then(value => value.dshHome),
     readSettings: () => settings.read(),
@@ -807,7 +844,7 @@ function createServices(bootSettings?: SettingsStore): Services {
 
   packManager = createPackManager({
     isPackRunning: id => packControl?.isPackRunning(id) ?? false,
-    beforeRemovePack: async id => { await packControl?.assertPackRemovable(id) },
+    beforeRemovePack: async id => packControl!.acquirePackRemoval(id),
     afterRemovePack: async id => { await packControl?.forgetPack(id) },
     readSettings: () => settings.read(),
     saveSettings: next => settings.save(next),
@@ -1065,8 +1102,28 @@ function createServices(bootSettings?: SettingsStore): Services {
     userDataPath: userData,
     githubFetch: githubAuth.fetch,
     emitProgress: progress => events.launcherUpdateProgress(progress),
-    // 覆盖安装前先停掉托管中的整合包：apply 走 process.exit(0)，不会经过 before-quit 的 shutdown。
-    stopPacks: () => packControl?.shutdown() ?? Promise.resolve(),
+    preserveRunningPacks: true,
+    relaunchDataDir: explicitDataDir ? userData : undefined,
+    prepareForRelaunch: async signal => {
+      if (lifecycleOperation) throw new Error('启动器正在执行其他退出或重启操作。')
+      lifecycleOperation = 'update'
+      try {
+        assertLegacyRuntimePreservable(legacyRuntimeBusy())
+        const rollback = await packControl!.prepareForRelaunch(signal)
+        return async () => {
+          try {
+            await rollback()
+          } finally {
+            lifecycleOperation = null
+          }
+        }
+      } catch (error) {
+        lifecycleOperation = null
+        events.output('runtime', 'error', '无法保留整合包并更新：' + errorMessage(error))
+        throw error
+      }
+    },
+    exitProcess: () => finishLauncherQuit(),
   })
 
   // 启动自愈：上次 AI 会话若在凭据锁期间崩溃（进程被杀、finally 未跑），
@@ -1076,7 +1133,16 @@ function createServices(bootSettings?: SettingsStore): Services {
     .then(current => healCredentialsLock(current.dshHome, path.join(userData, CREDENTIALS_LOCK_DIRNAME)))
     .catch(() => { /* 设置未就绪可忽略，锁会在下次 AI 会话前置处理 */ })
 
-  const profilePoolReady = migrateLegacyPacks({
+  const packsReconciled = Promise.resolve().then(async () => {
+    try {
+      await packControl!.reconcileRunningPacks()
+      return true
+    } catch (error) {
+      console.error('[startup] 整合包接管检查失败，本次跳过自动启动和迁移。', error)
+      return false
+    }
+  })
+  const migratePackProfiles = () => migrateLegacyPacks({
     dshHome: () => settings.read().then(value => value.dshHome),
     readSettings: () => settings.read(),
     saveSettings: next => settings.save(next),
@@ -1098,6 +1164,9 @@ function createServices(bootSettings?: SettingsStore): Services {
   }).catch(error => events.output('plugin', 'error', `旧整合包/插件池迁移失败：${error instanceof Error ? error.message : String(error)}`))
 
   // 登录自启的注册动作：路径优先便携版 EXE（便携版进程路径在解包后的临时目录）。
+  const profilePoolReady = packsReconciled.then(async reconciled => {
+    if (reconciled) await migratePackProfiles()
+  })
   const loginRegistration = (enabled: boolean): void => {
     if (process.platform !== 'win32' || !app.isPackaged) return
     app.setLoginItemSettings(loginItemSettings(enabled, { executablePath: process.execPath, portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE }))
@@ -1113,30 +1182,69 @@ function createServices(bootSettings?: SettingsStore): Services {
     dshHome: '',
     tempDir: os.tmpdir(),
   }
-  const uninstall = createUninstallService({ plan: uninstallPlan, stopAllPacks: () => packControl!.shutdown() })
-  // 空闲自动关机：判定要读「谁在跑」和「包里的会话列」，两者都只能经 packControl 拿到；
-  // packControl 在下一行才赋值，所以这里的依赖全部走闭包、在真正 tick 时才解引用。
-  // 「谁在跑、是否托管」只写一份：空闲关机与 CLI 更新流程共用，口径不一致会互相打脸。
+  let uninstallStop: Promise<void> | undefined
+  const uninstallService = createUninstallService({
+    plan: uninstallPlan,
+    stopAllPacks: () => uninstallStop = (async () => {
+      await stopLegacyRuntime()
+      await packControl!.shutdown('stop')
+    })(),
+  })
+  const uninstall: Services['uninstall'] = {
+    ...uninstallService,
+    async run(options) {
+      if (lifecycleOperation) throw new Error('启动器正在退出或更新，无法开始卸载。')
+      lifecycleOperation = 'uninstall'
+      uninstallStop = undefined
+      const resume = () => {
+        const clear = () => { lifecycleOperation = null }
+        if (!uninstallStop) return clear()
+        void uninstallStop.then(() => {
+          try { packControl!.resumeAfterStop() }
+          finally { clear() }
+        }, clear).catch(error => console.error('[uninstall] 恢复整合包控制失败。', error))
+      }
+      try {
+        if (options.deleteData && (await listLivePacks()).some(pack => pack.unmanaged && pack.id !== 'legacy-runtime')) {
+          throw new Error('其他启动器或未托管的整合包仍在运行，无法安全删除数据。')
+        }
+        const result = await uninstallService.run(options)
+        if (!result.started) resume()
+        return result
+      } catch (error) {
+        resume()
+        throw error
+      }
+    },
+  }
   const listLivePacks = async () => {
-    // 走 pack.list：一次扫描就同时带回托管运行状态与「未托管实例」。
-    // 未托管实例里可能正有会话在跑，而启动器停不掉它，只能算忙并把原因给用户看。
     const listed = await packControl!.execute({ command: 'pack.list' }) as {
-      packs?: { id: string; name: string; runtime?: { running?: boolean; url?: string | null }; externalRuntime?: { pid: number } | null }[]
+      packs: { id: string; name: string; runtime?: { running?: boolean; url?: string | null; ownership?: 'owned' | 'observer'; lastError?: string | null }; externalRuntime?: { pid: number } | null }[]
     }
-    return (listed.packs ?? []).flatMap(pack => {
-      if (pack.runtime?.running === true) return [{ id: pack.id, name: pack.name, url: pack.runtime.url ?? null }]
+    const packs = listed.packs.flatMap<IdleShutdownPack>(pack => {
+      if (pack.runtime?.running === true) {
+        if (pack.runtime.ownership === 'observer') {
+          return [{ id: pack.id, name: pack.name, url: null, unmanaged: true, note: pack.runtime.lastError ?? '整合包由另一个启动器管理。' }]
+        }
+        return [{ id: pack.id, name: pack.name, url: packControl!.runtimeUrl(pack.id) }]
+      }
       if (pack.externalRuntime) {
-        return [{ id: pack.id, name: pack.name, url: null, unmanaged: true, note: '有一份启动器没在托管的实例在运行（PID ' + pack.externalRuntime.pid + '），先在控制面板里停止它' }]
+        return [{ id: pack.id, name: pack.name, url: null, unmanaged: true, note: '发现未托管的整合包实例（PID ' + pack.externalRuntime.pid + '）。' }]
       }
       return []
     })
+    if (legacyRuntimeBusy()) packs.push({ id: 'legacy-runtime', name: '旧版运行实例', url: null, unmanaged: true, note: '旧版运行实例尚未停止。' })
+    return packs
   }
   const idleShutdown = createIdleShutdownService({
     settings,
     listRunningPacks: listLivePacks,
-    countRunningSessions: async (url, signal) => (await readRunningSessions({ baseUrl: url, fetch: githubAuth.fetch, signal })).length,
+    countRunningSessions: async (url, signal) => (await readRunningSessions({ baseUrl: url, signal })).length,
     // 关机前停包不弹 UAC：此刻界面可能已经关了，没人能点确认。
-    stopPack: async packId => { await packControl?.execute({ command: 'pack.stop', packId, args: { noElevated: true } }) },
+    stopPack: async packId => {
+      if ((await listLivePacks()).some(pack => pack.unmanaged) || lifecycleOperation) throw new Error('存在无法由空闲关机停止的运行实例。')
+      await packControl!.execute({ command: 'pack.stop', packId, args: { noElevated: true } })
+    },
     notify: (title, body) => {
       try {
         if (Notification.isSupported()) new Notification({ title, body }).show()
@@ -1146,17 +1254,20 @@ function createServices(bootSettings?: SettingsStore): Services {
     },
     shutdown: async comment => {
       if (process.platform !== 'win32') return false
+      if ((await listLivePacks()).some(pack => pack.unmanaged) || lifecycleOperation) {
+        console.warn('[idle-shutdown] 退出操作或未托管实例阻止了自动关机。')
+        return false
+      }
       await runCommand('shutdown.exe', ['/s', '/t', '0', '/c', comment], { cwd: os.tmpdir(), env: process.env, timeoutMs: 5_000 })
       return true
     },
   })
-  // CLI 触发的更新：等会话跑完 → 记录正在运行的包 → 交升级助手覆盖安装；
-  // 新版本启动时只恢复这份名单（autoStart 的包不启动）。
   const updateFlow: UpdateFlowService = createUpdateFlow({
     settings,
     updater: launcherUpdater,
+    preserveRunningPacks: true,
     listRunningPacks: listLivePacks,
-    countRunningSessions: async (url, signal) => (await readRunningSessions({ baseUrl: url, fetch: githubAuth.fetch, signal })).length,
+    countRunningSessions: async (url, signal) => (await readRunningSessions({ baseUrl: url, signal })).length,
     saveResume: resume => saveUpdateResume(userData, resume),
     clearResume: () => clearUpdateResume(userData),
     emitOutput: text => events.output('runtime', 'info', text),
@@ -1166,17 +1277,25 @@ function createServices(bootSettings?: SettingsStore): Services {
     prepareNodeRuntime: () => prepareNodeRuntime('runtime'),
     preparePnpmRuntime: node => preparePnpmRuntime('plugin', node),
     openExternal: url => shell.openExternal(url), fallbackWorkspace: () => app.getPath('documents'),
+    probePackActiveSessions: async url => {
+      try {
+        return (await readRunningSessions({ baseUrl: url, signal: AbortSignal.timeout(3_000) })).length
+      } catch {
+        return null
+      }
+    },
+    pendingResumeQueue: createPendingResumeQueue({ file: path.join(userData, PENDING_RESUMES_FILENAME) }),
     fetchImpl: githubAuth.fetch, emitOutput: text => events.output('runtime', 'info', text),
-    legacyRuntimeRunning: () => runtime.isRunning(), prepareOfficeCliTool,
+    legacyRuntimeRunning: legacyRuntimeBusy, prepareOfficeCliTool,
     loginRegistration, uninstall, onUninstallStarted: quitAfterUninstallStarted, idleShutdown, updateFlow,
   })
-  return { packControl, uninstall, uninstallPlan, idleShutdown, updateFlow, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
+  return { packControl, packsReconciled, legacyRuntimeBusy, stopLegacyRuntime, uninstall, uninstallPlan, idleShutdown, updateFlow, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
 }
 
 // helper 已在 %TEMP% 里跑起来，主进程必须让位：EXE 被自己占着就永远删不掉。
 // 延后一拍是为了先把 IPC/HTTP 的回复写完，别让响应跟着进程一起消失。
 function quitAfterUninstallStarted(): void {
-  setTimeout(() => app.quit(), 300)
+  setTimeout(() => { void finishLauncherQuit() }, 300)
 }
 
 function openMainWindow(): void {
@@ -1308,6 +1427,7 @@ app.whenReady().then(async () => {
     console.error('[process-supervisor] 启动失败，退出时只能执行普通清理。', error)
   }
   services = createServices(bootSettingsStore)
+  const reconciled = await services.packsReconciled
   // 备份区必须早于任何「会删用户数据的启动路径」：三条删除链路在没装配引擎时会拒绝删除，
   // 而装配本身同步且零成本（tar.exe / PowerShell 探测推迟到第一次备份）。
   try {
@@ -1396,25 +1516,10 @@ app.whenReady().then(async () => {
     },
   })
   await services.profilePoolReady
-  // 更新后首次启动：只恢复更新前正在运行的包，autoStart 的包一律不启动（用户明确要求）。
-  // 名单读完就删：恢复失败也只记日志，不能让下几次启动反复重试。
-  const booted = services
-  void readUpdateResume(app.getPath('userData'))
-    .then(async resume => {
-      if (!resume) {
-        void booted.packControl.autoStart()
-        return
-      }
-      for (const pack of resume.packs) {
-        try {
-          await booted.packControl.execute({ command: 'pack.start', packId: pack.id })
-        } catch (error) {
-          console.warn('[update] 恢复整合包 ' + pack.id + ' 失败。', error)
-        }
-      }
-      await clearUpdateResume(app.getPath('userData')).catch(error => console.warn('[update] 清理恢复名单失败。', error))
-    })
-    .catch(error => console.warn('[update] 读取更新恢复名单失败。', error))
+  void clearUpdateResume(app.getPath('userData')).catch(error => console.warn('[update] 清理旧版恢复名单失败。', error))
+  if (reconciled && !process.argv.includes('--adopt-running-packs') && !lifecycleOperation) {
+    void services.packControl.autoStart().catch(error => console.error('[startup] 整合包自动启动失败。', error))
+  }
   openMainWindow()
   if (process.argv.includes('--background')) mainWindow?.hide()
   // 开发者自查界面用：传了 --ui-shots=<目录> 才逐栏目截图，正常启动什么都不做。
@@ -1468,9 +1573,7 @@ async function shutdownLauncherProcesses(): Promise<void> {
   }) ?? Promise.resolve()
   const gracefulTasks: Promise<unknown>[] = []
   if (controlServer) gracefulTasks.push(controlServer.close())
-  if (current) gracefulTasks.push(current.packControl.shutdown())
   if (current) gracefulTasks.push(current.idleShutdown.dispose())
-  if (current?.runtime.isRunning()) gracefulTasks.push(current.runtime.stop())
   if (current?.pluginTrial.isBusy()) gracefulTasks.push(current.pluginTrial.cancel())
   if (current?.aiInstaller.isBusy()) gracefulTasks.push(current.aiInstaller.cancel())
   if (current?.copilot.isBusy()) gracefulTasks.push(current.copilot.shutdown())
@@ -1501,17 +1604,60 @@ async function shutdownLauncherProcesses(): Promise<void> {
   }
 }
 
-// 无论是正常关闭还是安装过程中退出，所有由启动器登记的进程树都必须一起结束。
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+async function stopLauncherRuntimes(): Promise<void> {
+  await services?.stopLegacyRuntime()
+  await services?.packControl.shutdown('stop')
+}
+
+async function finishLauncherQuit(afterCleanup?: () => void): Promise<void> {
+  isQuitting = true
+  try {
+    await shutdownLauncherProcesses()
+  } catch (error) {
+    console.error('[shutdown] 辅助进程清理失败。', error)
+  }
+  afterCleanup?.()
+  allowFinalQuit = true
+  app.quit()
+}
+
+async function requestLauncherQuit(operation: string, prepare: () => Promise<false | void | (() => void)>): Promise<void> {
+  if (lifecycleOperation) return
+  lifecycleOperation = operation
+  try {
+    const result = await prepare()
+    if (result === false) return
+    await finishLauncherQuit(typeof result === 'function' ? result : undefined)
+  } catch (error) {
+    console.error('[shutdown] ' + operation, error)
+    dialog.showErrorBox('无法退出或重启启动器', errorMessage(error))
+  } finally {
+    if (!allowFinalQuit) {
+      lifecycleOperation = null
+      isQuitting = false
+    }
+  }
+}
+
 app.on('before-quit', event => {
   if (allowFinalQuit) return
   event.preventDefault()
-  if (quitCleanupStarted) return
-  quitCleanupStarted = true
-  // 放行窗口 close：清理完成后窗口随退出流程正常关闭。
-  isQuitting = true
-  void shutdownLauncherProcesses().finally(() => {
-    allowFinalQuit = true
-    app.quit()
+  void requestLauncherQuit('quit', async () => {
+    const current = services
+    if (!current) return
+    const settings = await current.settings.read()
+    return prepareUserQuit({
+      policy: settings.packExitPolicy,
+      isPackRunning: current.packControl.isRunning,
+      isLegacyRuntimeBusy: current.legacyRuntimeBusy,
+      showMessageBox: options => mainWindow && !mainWindow.isDestroyed() ? dialog.showMessageBox(mainWindow, options) : dialog.showMessageBox(options),
+      stopLegacyRuntime: current.stopLegacyRuntime,
+      shutdownPacks: current.packControl.shutdown,
+    })
   })
 })
 

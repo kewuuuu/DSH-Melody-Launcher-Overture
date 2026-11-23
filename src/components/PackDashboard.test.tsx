@@ -153,42 +153,89 @@ async function mountDashboard(packs: unknown[], stopError?: string) {
   return { container, requests }
 }
 
-it('reports an unmanaged instance with its pid and port, outside the managed running total', async () => {
-  const { container } = await mountDashboard([
+it('reports unverified external instances and blocks local lifecycle actions', async () => {
+  const { container, requests } = await mountDashboard([
     demoPack({ externalRuntime: unmanagedRuntime }),
-    demoPack({ id: 'beta', name: 'Beta', externalRuntime: { ...unmanagedRuntime, pid: 99, port: null, profileName: 'beta' } }),
+    demoPack({ id: 'beta', name: 'Beta' }),
   ])
-  expect(Array.from(container.querySelectorAll('.pack-external-state')).map(node => node.textContent))
-    .toEqual(['外部运行中 · PID 3420 · :3080', '外部运行中 · PID 99'])
-  const footer = container.querySelector('.pack-dashboard-footer')!.textContent!
-  expect(footer).toContain('0 个正在运行')
-  expect(footer).toContain('另有 2 个未托管实例在运行')
-  expect(container.querySelector('[aria-label="停止未托管实例 Alpha"]')!.getAttribute('title')).toContain('停止会中断它上面正在进行的对话')
+  const row = container.querySelector('tbody tr')!
+  expect(row.querySelector('.pack-external-state')?.textContent).toBe('外部实例待核实 · PID 3420 · :3080')
+  expect(row.textContent).toContain('请在原启动环境中退出该实例')
+  expect(row.querySelector<HTMLButtonElement>('.primary-button')?.disabled).toBe(true)
+  expect(row.querySelector<HTMLButtonElement>('[aria-label="删除 Alpha"]')?.disabled).toBe(true)
+  expect(row.querySelector('[aria-label^="强制停止"], [aria-label^="停止未托管实例"], [aria-label^="打开网页"]')).toBeNull()
+  expect(container.querySelector('.pack-dashboard-footer')?.textContent).toContain('另有 1 个外部实例待核实')
+  await act(async () => row.querySelector<HTMLButtonElement>('.primary-button')!.click())
+  expect(requests.map(request => request.command)).toEqual(['pack.list'])
+  expect(container.querySelector<HTMLButtonElement>('tbody tr:nth-child(2) .primary-button')?.disabled).toBe(false)
 })
 
-it('stops the unmanaged instance through pack.stop with that pack id', async () => {
-  const { container, requests } = await mountDashboard([demoPack({ externalRuntime: unmanagedRuntime })])
-  const stop = container.querySelector<HTMLButtonElement>('[aria-label="停止未托管实例 Alpha"]')
-  expect(stop).not.toBeNull()
-  await act(async () => stop!.click())
-  expect(requests).toContainEqual({ command: 'pack.stop', packId: 'alpha', args: undefined })
+const observedRuntime = { running: true, ownership: 'observer', pid: 3420, startedAt: '2025-01-02T03:04:05.000Z', port: 3080, url: 'http://127.0.0.1:3080' }
+
+it('lets an observer open Web and requires confirmation before force-stopping', async () => {
+  const { container, requests } = await mountDashboard([demoPack({ runtime: observedRuntime })])
+  const get = (label: string) => container.querySelector<HTMLButtonElement>('[aria-label="' + label + '"]')!
+  const click = async (label: string) => act(async () => get(label).click())
+  const stopRequests = () => requests.filter(request => request.command === 'pack.stop')
+  expect(container.textContent).toContain('运行中（仅观察）')
+  expect(container.querySelector('tbody .primary-button, tbody button[title="停止"], [aria-label="重启 Alpha"]')).toBeNull()
+  expect(get('删除 Alpha').disabled).toBe(true)
+  await click('打开网页 Alpha')
+  expect(requests).toContainEqual({ command: 'pack.openWeb', packId: 'alpha', args: undefined })
+  await click('强制停止 Alpha')
+  expect(stopRequests()).toHaveLength(0)
+  await click('取消强制停止 Alpha')
+  expect(stopRequests()).toHaveLength(0)
+  await click('强制停止 Alpha')
+  await click('确认强制停止 Alpha')
+  expect(stopRequests()).toEqual([{ command: 'pack.stop', packId: 'alpha', args: { force: true } }])
 })
 
-it('disables start while an unmanaged instance holds the pack', async () => {
-  const { container } = await mountDashboard([demoPack({ externalRuntime: unmanagedRuntime }), demoPack({ id: 'beta', name: 'Beta' })])
-  const start = (name: string) => Array.from(container.querySelectorAll('tbody tr')).find(row => row.textContent?.includes(name))!.querySelector<HTMLButtonElement>('.primary-button')!
-  expect(start('Alpha').disabled).toBe(true)
-  expect(start('Alpha').getAttribute('title')).toBe('先停止未托管的实例')
-  expect(start('Beta').disabled).toBe(false)
-})
-
-it('reports a failed unmanaged stop inline instead of the page-level alert', async () => {
-  const message = '结束 PID 3420 失败：需要管理员权限'
-  const { container, requests } = await mountDashboard([demoPack({ externalRuntime: unmanagedRuntime })], message)
-  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="停止未托管实例 Alpha"]')!.click())
+it('reports a failed observer force-stop inline and disables Web without a verified endpoint', async () => {
+  const message = '无法确认当前实例的身份'
+  const { container } = await mountDashboard([demoPack({ runtime: { ...observedRuntime, url: null } })], message)
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="打开网页 Alpha"]')?.disabled).toBe(true)
+  for (const label of ['强制停止 Alpha', '确认强制停止 Alpha']) {
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="' + label + '"]')!.click())
+  }
   expect(container.querySelector('[role="alert"]')?.textContent).toBe(message)
   expect(container.querySelector('.pack-error')).toBeNull()
-  expect(requests.filter(request => request.command === 'pack.stop')).toHaveLength(1)
-  // 失败后实例还在，按钮仍可再点一次。
-  expect(container.querySelector('[aria-label="停止未托管实例 Alpha"]')).not.toBeNull()
+  expect(container.querySelector('[aria-label="强制停止 Alpha"]')).not.toBeNull()
+})
+
+it('shows the diagnostic and withholds force-stop when an observer has no PID', async () => {
+  const lastError = '发现多个候选实例，无法核实进程身份'
+  const runtime = { ...observedRuntime, pid: null, port: null, url: null, lastError }
+  const { container, requests } = await mountDashboard([demoPack({ runtime })])
+  expect(container.textContent).toContain('检测到运行实例（身份待核实）')
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(lastError)
+  expect(container.querySelector('tbody .primary-button, [aria-label^="强制停止"], [aria-label^="打开网页"]')).toBeNull()
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="删除 Alpha"]')?.disabled).toBe(true)
+  expect(requests.map(request => request.command)).toEqual(['pack.list'])
+})
+
+it.each([[0, '0 个活跃会话'], [2, '2 个活跃会话'], [null, '活跃会话数未知'], [undefined, '活跃会话数未知']])(
+  'shows the active session count %s on running pack rows',
+  async (activeSessionCount, label) => {
+    const { container } = await mountDashboard([
+      demoPack({ runtime: { ...observedRuntime, activeSessionCount } }),
+      demoPack({ id: 'beta', name: 'Beta', runtime: { ...observedRuntime, ownership: 'owned', activeSessionCount } }),
+      demoPack({ id: 'gamma', name: 'Gamma' }),
+    ])
+    const rows = container.querySelectorAll('tbody tr')
+    expect(rows[0].textContent).toContain(label)
+    expect(rows[1].textContent).toContain(label)
+    expect(rows[2].textContent).not.toContain('活跃会话')
+  },
+)
+
+it('keeps normal stop and restart controls for owned runtimes', async () => {
+  const { container, requests } = await mountDashboard([demoPack({ runtime: { ...observedRuntime, ownership: 'owned' } })])
+  expect(container.textContent).toContain('运行中（本启动器管理）')
+  expect(container.querySelector('[aria-label="强制停止 Alpha"]')).toBeNull()
+  for (const selector of ['button[title="停止"]', '[aria-label="重启 Alpha"]']) {
+    await act(async () => container.querySelector<HTMLButtonElement>(selector)!.click())
+  }
+  expect(requests).toContainEqual({ command: 'pack.stop', packId: 'alpha', args: undefined })
+  expect(requests).toContainEqual({ command: 'pack.restart', packId: 'alpha', args: undefined })
 })

@@ -12,7 +12,8 @@ import { matchSkillsShTarget } from './skills-sh'
 import { isSafeRepositoryName } from './profile'
 import type { StorageController } from './storage-root'
 import { createApiLibrary, type ApiLibrary } from './api-library'
-import { createPackApis } from './pack-apis'
+import { createPackApis, type PackApis } from './pack-apis'
+import { readPackApiGrants } from './pack-api-grants'
 import { createPendingResumeQueue, enqueueBeforeRestart, type PendingResumeQueue } from './pending-resume'
 import { migratePath } from './path-migration'
 import type { IdleShutdownService } from './idle-shutdown'
@@ -26,6 +27,7 @@ export function createLauncherControl(options: {
   prepareNodeRuntime: () => Promise<NodeRuntime>
   preparePnpmRuntime: (node: NodeRuntime) => Promise<PnpmRuntime>
   openExternal: (url: string) => Promise<unknown>
+  probePackActiveSessions?: (url: string) => Promise<number | null>
   fallbackWorkspace: () => string
   fetchImpl: typeof fetch
   emitOutput: (text: string) => void
@@ -50,6 +52,7 @@ export function createLauncherControl(options: {
     userData,
     registryPath: path.join(userData, 'packs.json'),
     readSettings: () => settings.readStored(),
+    resolveIdentitySettings: async record => ({ dshHome: record.homePath ?? (await settings.readStored()).dshHome, profileName: record.id }),
     resolveSettings: async (record, config) => {
       const base = await settings.readStored()
       const home = record.homePath ?? base.dshHome
@@ -79,6 +82,7 @@ export function createLauncherControl(options: {
       await ensureLauncherControlSkill({ packHome: target.dshHome, cliPath: options.cliPath, userData, packId: record.id, nodePath: node.node })
     },
     openExternal: options.openExternal,
+    probePackActiveSessions: options.probePackActiveSessions,
     lifecycle: async (command, id, args) => {
       if (command === 'pack.create') {
         if (typeof args.name !== 'string' || (args.dshVersion !== undefined && args.dshVersion !== null && typeof args.dshVersion !== 'string')) throw new Error('Invalid pack creation arguments')
@@ -186,7 +190,9 @@ export function createLauncherControl(options: {
   }
   // 目录迁移：设置里的 dshHome / dshInstallPath 是唯一来源；旧目录先备份，有包在跑就留着不删。
   const paths = {
-    migrate: (kind: MigratablePath, target: string) => migratePath({
+    migrate: async (kind: MigratablePath, target: string) => {
+      await control.reconcileRunningPacks()
+      return migratePath({
       kind,
       target,
       current: async () => {
@@ -199,24 +205,39 @@ export function createLauncherControl(options: {
       },
       isBusy: () => control.isRunning(),
       launcherDataDir: userData,
-    }),
+      })
+    },
   }
   // 启动器级 API 库与「每包勾选」都只认 userData，与具体整合包无关。
   const apiLibraryStore = createApiLibrary(userData)
-  const packApis = createPackApis({ userData, registryPath: path.join(userData, 'packs.json'), readSettings: () => settings.readStored(), isPackRunning: packId => control.isPackRunning(packId) })
+  const packApiStore = createPackApis({ userData, registryPath: path.join(userData, 'packs.json'), readSettings: () => settings.readStored(), isPackRunning: control.isPackRunning })
+  const packApis: PackApis = {
+    ...packApiStore,
+    setGrant: (id, route, enabled) => control.withPackMutation(id, () => packApiStore.setGrant(id, route, enabled)),
+  }
+  async function withGrantedPacks<T>(routes: string[], action: () => Promise<T>): Promise<T> {
+    const { grants } = await readPackApiGrants(userData)
+    const ids = Object.keys(grants).filter(id => grants[id].some(route => routes.includes(route))).sort()
+    const guarded = (index: number): Promise<T> => index === ids.length ? action() : control.withPackMutation(ids[index], () => guarded(index + 1))
+    return guarded(0)
+  }
   // 库是唯一来源：库条目改动后把新值重新同步进已授予该 API 的包，删除条目则级联撤销。
   const apiLibrary: ApiLibrary = {
     list: () => apiLibraryStore.list(),
     async save(input) {
       const previousRoute = typeof input?.originalRoute === 'string' ? input.originalRoute.trim() : ''
-      const entries = await apiLibraryStore.save(input)
       const route = typeof input?.route === 'string' ? input.route.trim() : ''
-      if (route) await packApis.resyncGranted(route, previousRoute || undefined)
-      return entries
+      return withGrantedPacks([previousRoute || route], async () => {
+        const entries = await apiLibraryStore.save(input)
+        if (route) await packApis.resyncGranted(route, previousRoute || undefined)
+        return entries
+      })
     },
     async remove(route) {
-      await packApis.revokeGranted(route)
-      return apiLibraryStore.remove(route)
+      return withGrantedPacks([route.trim()], async () => {
+        await packApis.revokeGranted(route)
+        return apiLibraryStore.remove(route)
+      })
     },
   }
   // 启动器自身随登录启动：设置里的 launchAtLogin 是唯一开关（包 autoStart 只管启动器起来后拉包）。
@@ -292,7 +313,8 @@ export function createLauncherControl(options: {
         if (!request.packId) throw new Error('缺少整合包 ID：pack upgrade <pack-id> --dsh-version <version>')
         const version = request.args?.dshVersion
         if (typeof version !== 'string' || !version.trim()) throw new Error('缺少 DSH 版本：pack upgrade <pack-id> --dsh-version <version>')
-        return options.packManager.upgradePackDshVersion(request.packId, version)
+        const packId = request.packId
+        return control.withPackMutation(packId, () => options.packManager.upgradePackDshVersion(packId, version), true)
       }
       if (typeof request?.command === 'string' && request.command.startsWith('update.')) {
         const flow = options.updateFlow

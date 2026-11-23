@@ -1,6 +1,12 @@
 import { elevatedRuntimeReady, spawnElevatedRuntime, stopElevatedRuntime } from './elevated-runtime'
 import { isProcessElevated } from './process-elevation'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { setTimeout as delay } from 'node:timers/promises'
+import {
+  acceptIndependentRuntime, liveIndependentRuntime, observeIndependentRuntime,
+  spawnIndependentRuntime, stopIndependentRuntime,
+  type IndependentRuntimeOptions, type IndependentRuntimeSession,
+} from './independent-runtime'
 import { createServer } from 'node:net'
 import path from 'node:path'
 import { DSH_PACKAGE_NAME } from '../src/constants'
@@ -131,6 +137,7 @@ const ELEVATED_READY_TIMEOUT_MS = 120_000
 
 export interface RuntimeControllerOptions {
   runAsAdmin?: boolean
+  preserveOnLauncherExit?: IndependentRuntimeOptions
   portMode?: 'auto' | 'fixed'
   portFallbackAttempts?: number
   reservePort?: (preferred: number, fixed: boolean) => Promise<number | null>
@@ -173,6 +180,7 @@ export interface RuntimeController {
   state(): RuntimeState
   failure(): RuntimeFailure | null
   isRunning(): boolean
+  independentSession?(): Promise<IndependentRuntimeSession | null>
   start(): Promise<RuntimeState>
   /** force 时跳过优雅停止（stop 文件），直接收掉外层与已知子进程。 */
   stop(options?: { force?: boolean }): Promise<RuntimeState>
@@ -187,7 +195,8 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
       storeRoot: options.packageStoreRoot || undefined,
       registry: options.npmRegistry ?? buildNetworkEnvironment(settings).npmRegistry,
     })
-  let child: ChildProcessWithoutNullStreams | null = null
+  let child: ChildProcess | null = null
+  let independent: { handle: ChildProcess; session: IndependentRuntimeSession | null } | null = null
   const companions = new Map<string, ChildProcessWithoutNullStreams>()
   let companionTimer: NodeJS.Timeout | null = null
   let startedAt: string | null = null
@@ -204,7 +213,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
 
   const state = (): RuntimeState => ({
     running: child !== null,
-    pid: child?.pid ?? null,
+    pid: independent && child === independent.handle ? (independent.session?.runtimePid ?? null) : child?.pid ?? null,
     startedAt,
     url,
     port,
@@ -231,10 +240,12 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
     }
   }
 
-  const killProcessTree = async (processToStop: ChildProcessWithoutNullStreams, force = false): Promise<void> => {
-    if (await stopElevatedRuntime(processToStop, { force })) return
+  const killProcessTree = async (processToStop: ChildProcess, force = false): Promise<void> => {
+    if (await stopIndependentRuntime(processToStop)) return
+    const legacy = processToStop as ChildProcessWithoutNullStreams
+    if (await stopElevatedRuntime(legacy, { force })) return
     if (options.stopProcess) {
-      await options.stopProcess(processToStop)
+      await options.stopProcess(legacy)
       return
     }
     if (process.platform === 'win32' && processToStop.pid) {
@@ -262,7 +273,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
    * 启动失败的就地收尾：清 child、放端口、杀树、广播，最后抛中文错误。
    * 就绪超时和多条失败分支共用它，状态一定落定成「没在跑 + 有原因」。
    */
-  const abortLaunch = async (failed: ChildProcessWithoutNullStreams, message: string): Promise<never> => {
+  const abortLaunch = async (failed: ChildProcess, message: string): Promise<never> => {
     if (child === failed) child = null
     awaitingAuthorization = false
     lastError = message
@@ -389,8 +400,10 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
     let executable = replacement?.executable ?? settings.launchExecutable
     let environment = runtimeEnv(settings, process.env)
     let launchArgs = replacement?.args ?? settings.launchArgs
+    let launchNode: Promise<NodeRuntime> | undefined
+    const getLaunchNode = () => launchNode ??= options.prepareNodeRuntime()
     if (requiresNodeRuntime(executable, launchArgs)) {
-      const nodeRuntime = await options.prepareNodeRuntime()
+      const nodeRuntime = await getLaunchNode()
       executable = resolveNodeExecutable(executable, nodeRuntime)
       environment = withExecutableDirectoryOnPath(nodeRuntime.node, environment)
     }
@@ -472,7 +485,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
       legacyFallbackEligible = format === 'unknown'
     }
 
-    const handleData = (level: RuntimeOutput['level']) => (chunk: Buffer) => {
+    const handleData = (level: RuntimeOutput['level']) => (chunk: Buffer | string) => {
       const text = chunk.toString('utf8')
       diagnosticOutput = `${diagnosticOutput}${text}`.slice(-STDERR_CAPTURE_LIMIT)
       if (level === 'error') stderrOutput = `${stderrOutput}${text}`.slice(-STDERR_CAPTURE_LIMIT)
@@ -500,6 +513,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
       // stop() 会先把 child 置空，据此区分主动停止与意外退出。
       const expected = child === null
       child = null
+      awaitingAuthorization = false
       if (port !== null) options.releasePort?.(port)
       port = null
       void stopCompanions()
@@ -567,9 +581,23 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
         if (legacyCredentialsSession) options.emitOutput('info', '正在使用旧版 DSH 凭据格式重试，停止后自动恢复。')
       }
 
-      let started: ChildProcessWithoutNullStreams
+      let started: ChildProcess
+      let readyTimeoutMs = 5_000
       try {
-        started = options.runAsAdmin ? await startAdministratorProcess() : startProcess(executable, launchArgs, { cwd, env: environment })
+        // Startup recovery may restore a temporary legacy view while an independent process still uses it.
+        const preservation = legacyCredentialsSession ? undefined : options.preserveOnLauncherExit
+        if (preservation) {
+          const node = (await getLaunchNode()).node
+          elevatedLaunch = Boolean(options.runAsAdmin && !await probeElevation().catch(() => false))
+          if (elevatedLaunch) readyTimeoutMs = options.elevatedReadyTimeoutMs ?? ELEVATED_READY_TIMEOUT_MS
+          started = await spawnIndependentRuntime(executable, launchArgs, {
+            cwd, env: environment, root: preservation.root, nodeExecutable: node,
+            readyTimeoutMs, elevated: Boolean(options.runAsAdmin), runAs: elevatedLaunch,
+          })
+          independent = { handle: started, session: null }
+        } else {
+          started = options.runAsAdmin ? await startAdministratorProcess() : startProcess(executable, launchArgs, { cwd, env: environment })
+        }
       } catch (error) {
         // 同步抛错＝进程根本没起来（可执行文件不存在、路径非法、EPERM）。
         // 不记就只剩一条 toast，用户和 agent 都不知道死在哪。
@@ -591,10 +619,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
       url = null
       lastError = null
       broadcast()
-      started.stdout.on('data', handleData('info'))
-      started.stderr.on('data', handleData('error'))
-
-      started.once('error', error => {
+      const onSpawnError = (error: Error) => {
         recordLaunchFailure('spawn', [
           `原因：${error.message}`,
           `启动命令：${commandLine}`,
@@ -609,10 +634,49 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
         void stopCompanions()
         void restoreLegacyCredentials()
         broadcast()
-      })
-      started.once('exit', code => { if (child && child !== started) return; void handleExit(code) })
-      // 提权启动：外层只是 UAC 看护进程，真正的就绪证据是监督进程写下的 child.json。
-      if (elevatedLaunch) void awaitElevatedRuntime(started)
+      }
+      const onExit = (code: number | null, error?: Error) => {
+        if (child && child !== started) return
+        if (independent?.handle === started) independent = null
+        if (error) onSpawnError(error)
+        else void handleExit(code)
+      }
+      if (observeIndependentRuntime(started, (level, text) => handleData(level)(text), onExit)) {
+        const awaitReady = async () => {
+          const deadline = Date.now() + readyTimeoutMs
+          try {
+            while (child === started && Date.now() < deadline) {
+              const session = await acceptIndependentRuntime(started)
+              if (session && independent?.handle === started && child === started) {
+                independent.session = session
+                awaitingAuthorization = false
+                broadcast()
+                scheduleCompanions()
+                return
+              }
+              await delay(100, undefined, { ref: !elevatedLaunch })
+            }
+            if (child !== started) return
+          } catch (error) {
+            if (child !== started) return
+            await abortLaunch(started, error instanceof Error ? error.message : String(error))
+          }
+          await abortLaunch(started, elevatedLaunch ? '以管理员模式启动失败：没有等到管理员授权或独立进程确认。' : '独立整合包启动失败：工作进程未确认启动。')
+        }
+        if (elevatedLaunch) {
+          awaitingAuthorization = true
+          broadcast()
+          void awaitReady().catch(() => undefined)
+        } else {
+          await awaitReady()
+        }
+        return
+      }
+      started.stdout?.on('data', handleData('info'))
+      started.stderr?.on('data', handleData('error'))
+      started.once('error', onSpawnError)
+      started.once('exit', onExit)
+      if (elevatedLaunch) void awaitElevatedRuntime(started as ChildProcessWithoutNullStreams)
       scheduleCompanions()
     }
 
@@ -677,6 +741,7 @@ export function createRuntimeController(options: RuntimeControllerOptions): Runt
     state,
     failure: () => lastFailure,
     isRunning: () => child !== null,
+    independentSession: async () => child ? liveIndependentRuntime(child) : null,
     start,
     stop,
   }

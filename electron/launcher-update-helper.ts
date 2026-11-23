@@ -24,7 +24,8 @@ function pad2(value: number): string {
 }
 
 function cmdQuoted(value: string): string {
-  return '"' + value.split('"').join('') + '"'
+  if (/["\r\n]/.test(value)) throw new Error('路径含有无法安全传给更新助手的字符。')
+  return '"' + value.replaceAll('%', '%%') + '"'
 }
 
 /** apply-20261115-231019.log：Windows 文件名不能带冒号，时间戳压成日期-时分秒。 */
@@ -55,8 +56,12 @@ export function installDirFromExecPath(execPath: string): string {
 }
 
 /** 安装成功后重新拉起启动器的那一行。 */
-export function buildRestartCommand(exePath: string): string {
-  return `start "" ${cmdQuoted(exePath)}`
+export const ADOPT_RUNNING_PACKS_FLAG = '--adopt-running-packs'
+
+export function buildRestartCommand(exePath: string, adoptRunningPacks = false, dataDir?: string): string {
+  const adopt = adoptRunningPacks ? ' ' + ADOPT_RUNNING_PACKS_FLAG : ''
+  const override = dataDir ? ' --data-dir ' + cmdQuoted(dataDir.replace(/\\+$/, tail => tail + tail)) : ''
+  return `start "" ${cmdQuoted(exePath)}${adopt}${override}`
 }
 
 /** 安装目录里会让批处理命令行跑偏的字符：它们没有可靠的转义写法，只能拒绝。 */
@@ -88,6 +93,8 @@ export interface ApplyCommandInput {
   exePath: string
   /** 全程日志文件；脚本只往里追加 ASCII 行。 */
   logPath: string
+  adoptRunningPacks?: boolean
+  relaunchDataDir?: string
   /** 等待上限（秒），缺省 APPLY_WAIT_TIMEOUT_SECONDS。 */
   waitTimeoutSeconds?: number
   /** 轮询间隔（秒），缺省 APPLY_WAIT_POLL_SECONDS。 */
@@ -117,11 +124,11 @@ export function buildApplyCommand(input: ApplyCommandInput): string {
     '@echo off',
     'rem DSH Launcher apply helper. Generated per run and deleted when finished.',
     'rem ASCII only: cmd decodes batch files with the console code page.',
-    'setlocal EnableExtensions',
-    `set "LOG=${input.logPath}"`,
+    'setlocal EnableExtensions DisableDelayedExpansion',
+    'set "ERRORLEVEL="',
+    `set ${cmdQuoted('LOG=' + input.logPath)}`,
     'call :log "=== apply start: %DATE% %TIME% ==="',
-    `call :log "setup: ${input.setupPath}"`,
-    `call :log "install dir: ${input.installDir}"`,
+    'set "CODE=1"',
     `call :log "waiting for launcher pid ${pid} to exit (up to ${waitTimeoutSeconds}s)"`,
     'set "TRIES=0"',
     ':wait',
@@ -141,17 +148,20 @@ export function buildApplyCommand(input: ApplyCommandInput): string {
     'set "CODE=%ERRORLEVEL%"',
     'if not "%CODE%"=="0" goto setup_failed',
     'call :log "setup finished with exit code 0; starting the new version"',
-    buildRestartCommand(input.exePath),
+    buildRestartCommand(input.exePath, input.adoptRunningPacks, input.relaunchDataDir),
+    'set "CODE=%ERRORLEVEL%"',
+    'if not "%CODE%"=="0" goto restart_failed',
     'call :log "=== apply done: %DATE% %TIME% ==="',
     'goto done',
     ':setup_failed',
     'call :log "setup failed with exit code %CODE%; the new version was not started"',
-    `call :log "the installer is kept for a manual retry: ${input.setupPath}"`,
+    'call :log "the installer is kept for a manual retry"',
     'call :log "=== apply failed: %DATE% %TIME% ==="',
     'goto done',
+    ':restart_failed',
+    'call :log "setup succeeded but launcher restart failed with exit code %CODE%"',
     ':done',
-    'del "%~f0"',
-    'exit /b 0',
+    'del "%~f0" & exit /b %CODE%',
     ':log',
     '>>"%LOG%" echo [apply] %~1',
     'goto :eof',
