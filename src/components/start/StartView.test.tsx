@@ -13,7 +13,11 @@ import { StartView } from './StartView'
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 const roots: ReturnType<typeof createRoot>[] = []
-afterEach(async () => { for (const root of roots.splice(0)) await act(async () => root.unmount()); document.body.innerHTML = '' })
+afterEach(async () => {
+  for (const root of roots.splice(0)) await act(async () => root.unmount())
+  vi.useRealTimers()
+  document.body.innerHTML = ''
+})
 
 /** 关机状态是一份完整快照：每个用例只改自己关心的字段。 */
 function idleState(overrides: Partial<IdleShutdownState> = {}): IdleShutdownState {
@@ -160,6 +164,40 @@ it('打开自动关机开关就调用 arm，并显示等待空闲与占用的整
   expect(container.textContent).toContain('等待所有整合包空闲')
   expect(container.textContent).toContain('空闲判定 15 分钟')
   expect(container.textContent).toContain('pack-a：正在生成回复')
+})
+
+it('逐秒展示空闲判定剩余时间，并在整合包恢复活动后重新计时', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-11-25T00:00:00Z'))
+  const waiting = { enabled: true, phase: 'waiting' as const, idleMinutes: 1 }
+  let state = idleState({ ...waiting, idleSince: new Date().toISOString() })
+  const get = vi.fn(async () => state)
+  const container = await render(startView(fakeApi({ idleShutdown: idleApi({ get }) })))
+  const timer = () => container.querySelector('[role="timer"]')
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+
+  expect(timer()?.textContent).toBe('剩余 01:00')
+  await advance(1000)
+  expect(timer()?.textContent).toBe('剩余 00:59')
+  expect(get).toHaveBeenCalledTimes(1)
+
+  state = idleState({ ...waiting, busy: [{ packId: 'pack-a', reason: '正在生成回复' }] })
+  await advance(4000)
+  expect(timer()).toBeNull()
+  expect(container.textContent).toContain('pack-a：正在生成回复')
+
+  await advance(3000)
+  state = idleState({ ...waiting, idleSince: new Date().toISOString() })
+  await advance(2000)
+  expect(timer()?.textContent).toBe('剩余 00:58')
+  await advance(58_000)
+  expect(timer()).toBeNull()
+  expect(container.textContent).toContain('等待确认空闲')
+
+  state = idleState({ ...waiting, phase: 'armed', shutdownAt: new Date(Date.now() + 10 * 60_000).toISOString() })
+  await advance(2000)
+  expect(container.textContent).toMatch(/将于 \d\d:\d\d 关机/)
+  expect(container.textContent).not.toContain('等待确认空闲')
 })
 
 it('已排定关机时显示本地时间与取消按钮，点击调用 cancel', async () => {

@@ -68,6 +68,21 @@ function shutdownClock(value: string | null): string {
   return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
 }
 
+function IdleCountdown({ deadline }: { deadline: number }) {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  const seconds = Math.max(0, Math.ceil((deadline - now) / 1000))
+  if (seconds === 0) return <span>等待确认空闲</span>
+
+  const minutesText = String(Math.floor(seconds / 60)).padStart(2, '0')
+  const secondsText = String(seconds % 60).padStart(2, '0')
+  return <span role="timer">剩余 {minutesText}:{secondsText}</span>
+}
+
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
@@ -155,6 +170,9 @@ export function StartView({ logoSrc, update, busy, onUpdateChecked, onOpenSettin
     }
   }
 
+  const idleDeadline = shutdown?.phase === 'waiting' && shutdown.busy.length === 0 && shutdown.idleSince
+    ? Date.parse(shutdown.idleSince) + shutdown.idleMinutes * 60_000
+    : NaN
   const period = pricingPeriod(new Date())
   const updateNote = describeUpdate(update)
 
@@ -242,7 +260,10 @@ export function StartView({ logoSrc, update, busy, onUpdateChecked, onOpenSettin
             {shutdown?.phase === 'waiting' && (
               <div className="start-shutdown-state">
                 <strong>等待所有整合包空闲</strong>
-                <p>空闲判定 {shutdown.idleMinutes} 分钟</p>
+                <p>
+                  空闲判定 {shutdown.idleMinutes} 分钟
+                  {Number.isFinite(idleDeadline) && <> · <IdleCountdown key={idleDeadline} deadline={idleDeadline} /></>}
+                </p>
                 {shutdown.busy.length > 0 && (
                   <ul className="start-shutdown-busy">
                     {shutdown.busy.map(item => <li key={item.packId}><code>{item.packId}</code>：{item.reason}</li>)}
