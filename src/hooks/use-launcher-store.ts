@@ -273,7 +273,11 @@ export function useLauncherStore() {
         setLauncherUpdate(next)
         if (next.state === 'update-available') {
           void api.downloadLauncherUpdate()
-            .then(downloaded => { if (!disposed) setLauncherUpdate(downloaded) })
+            .then(downloaded => {
+              if (disposed) return
+              setLauncherUpdate(downloaded)
+              setLauncherUpdateProgress(null)
+            })
             .catch(() => { /* 下载失败由主进程收敛为 error 状态，这里静默 */ })
         }
       })
@@ -1324,6 +1328,16 @@ export function useLauncherStore() {
     cancelRuntimeDownload,
     selectNodeVersion,
     removeNodeVersion,
+    adoptLauncherUpdateCheck: (next: LauncherUpdateStatus) => {
+      setLauncherUpdate(current => {
+        if (current?.state === 'applying') return current
+        if (current && current.remoteVersion === next.remoteVersion) {
+          if (next.state === 'update-available' && (current.state === 'downloading' || current.state === 'downloaded')) return current
+          if (next.state === 'downloading' && (current.state === 'downloaded' || current.state === 'error')) return current
+        }
+        return next
+      })
+    },
     downloadLauncherUpdate,
     applyLauncherUpdate,
     saveSettings,

@@ -16,11 +16,15 @@ interface UpdateDialogProps {
 
 export function UpdateDialog({ status, progress, busy, onDownload, onApply, onClose }: UpdateDialogProps) {
   const api = useLauncherApi()
-  const percent = progress?.phase === 'downloading' ? progress.percent : null
+  const transfer = progress?.phase === 'downloading' ? progress : null
+  const total = transfer?.totalBytes || status.assetSize
+  const saving = transfer?.downloadedBytes != null && total != null && total > 0 && transfer.downloadedBytes === total
+  const percent = saving ? 100 : transfer && total != null && total > 0 ? Math.min(99, transfer.percent) : null
+  const downloadLabel = saving ? '正在确认并保存安装包…' : transfer ? '正在下载新版本' : '正在准备下载…'
 
   const openRelease = () => { if (status.releaseUrl) void api.openExternal(status.releaseUrl) }
 
-  const downloading = status.state === 'downloading' || (status.state === 'update-available' && percent !== null)
+  const downloading = status.state === 'downloading' || (status.state === 'update-available' && transfer !== null)
   const ready = status.state === 'downloaded'
   const failed = status.state === 'error'
   // 版本号相同（或本地更新）也是 up-to-date：这时候不能给「下载更新」，否则点了只会报「没有可下载的更新」。
@@ -55,7 +59,7 @@ export function UpdateDialog({ status, progress, busy, onDownload, onApply, onCl
             <p className="update-message">{status.message}</p>
           ) : downloading ? (
             <div className="install-progress update-download-progress">
-              <div><LoaderCircle className="spin" size={14} /><span>{percent !== null ? '正在下载新版本' : '正在准备下载…'}</span><strong>{percent !== null ? `${percent}%` : '—'}</strong></div>
+              <div><LoaderCircle className="spin" size={14} /><span>{downloadLabel}</span><strong>{percent !== null ? `${percent}%` : '—'}</strong></div>
               {progress?.downloadedBytes != null && (
                 <small className="install-progress-size">
                   已下载 {formatBytes(progress.downloadedBytes)}
@@ -87,7 +91,7 @@ export function UpdateDialog({ status, progress, busy, onDownload, onApply, onCl
             </button>
           ) : downloading ? (
             <button type="button" className="primary-command" disabled>
-              <LoaderCircle className="spin" size={16} />正在下载…
+              <LoaderCircle className="spin" size={16} />{saving ? '正在保存…' : '正在下载…'}
             </button>
           ) : failed ? (
             <button type="button" className="primary-command" onClick={openRelease} disabled={!status.releaseUrl}>

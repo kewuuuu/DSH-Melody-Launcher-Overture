@@ -17,7 +17,7 @@ import { isInstallProgressActive } from './lib/install-progress'
 import { HOME_TAB_ORDER } from './lib/nav'
 import { isDshVersionOlderThan } from './lib/dsh-version'
 import { APPEARANCE_VARIABLE_KEYS, appearanceImageUrl, appearanceVariables } from './lib/appearance'
-import type { AppearanceSettings, DshInstallationStatus, DshUpdateStatus, HomeTab, InstallProgress, LauncherUpdateStatus, RuntimeState } from './types'
+import type { AppearanceSettings, DshInstallationStatus, DshUpdateStatus, HomeTab, InstallProgress, RuntimeState } from './types'
 
 // 启动页只用到 StartView 与顶栏；整合包/插件/技能/预设/版本这一整块面板（以及导入对话框）
 // 拆成按需加载的 chunk，首屏要解析的 JS 就少一截。
@@ -71,7 +71,6 @@ function LauncherShell() {
   // 对话框开关是纯展示状态，不进 store。
   const [updateOpen, setUpdateOpen] = useState(false)
   // 启动页手动「检查更新」的结果：比后台检查更新，用户当场看到的应是这一次。
-  const [manualUpdate, setManualUpdate] = useState<LauncherUpdateStatus | null>(null)
   // 设置面板拖动时先预览、后保存：null 表示不预览，回到已保存的 appearance。
   const [previewAppearance, setPreviewAppearance] = useState<AppearanceSettings | null>(null)
   // 「导入会话」的目标包 id（入口长在那个包的卡片上）。
@@ -150,9 +149,7 @@ function LauncherShell() {
   // 版本号让同一路径换图后 URL 也变化：背景层与头像 <img> 才会重新取图。
   const backgroundUrl = appearanceImageUrl(effectiveAppearance?.backgroundPath, effectiveAppearance?.backgroundVersion)
   const logoSrc = appearanceImageUrl(effectiveAppearance?.logoPath, effectiveAppearance?.logoVersion)
-  // 启动页手动检查的结果优先：用户刚点过，就该看到这一次的结论。
-  // 但下载/应用必须交回 store 的结果，否则对话框会一直停在那次手动检查的快照上。
-  const launcherUpdate = manualUpdate ?? store.launcherUpdate
+  const launcherUpdate = store.launcherUpdate
   visitedTabs.current.add(navigation.homeTab)
 
   // 一级面板（整合包/版本/插件/技能/预设）只建一次元素：整合包页把它接在控制面板下面，
@@ -255,7 +252,7 @@ function LauncherShell() {
                     update={launcherUpdate}
                     busy={launcherUpdateBusy}
                     onUpdateChecked={next => {
-                      setManualUpdate(next)
+                      store.adoptLauncherUpdateCheck(next)
                       if (updateNeedsDialog(next)) setUpdateOpen(true)
                     }}
                     onOpenSettings={() => navigation.goHome('settings')}
@@ -402,8 +399,8 @@ function LauncherShell() {
           status={launcherUpdate}
           progress={store.launcherUpdateProgress}
           busy={launcherUpdateBusy}
-          onDownload={() => { setManualUpdate(null); void store.downloadLauncherUpdate() }}
-          onApply={() => { setManualUpdate(null); void store.applyLauncherUpdate() }}
+          onDownload={() => { void store.downloadLauncherUpdate() }}
+          onApply={() => { void store.applyLauncherUpdate() }}
           onClose={() => setUpdateOpen(false)}
         />
       )}

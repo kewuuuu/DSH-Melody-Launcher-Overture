@@ -6,6 +6,9 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { LauncherApiProvider } from '../../api/client'
 import { HOME_TABS, HOME_TAB_ORDER } from '../../lib/nav'
 import type { IdleShutdownState, LauncherApi, LauncherUpdateStatus } from '../../types'
+import App from '../../App'
+import { demoApi } from '../../demo-api'
+import type { LauncherUpdateProgress } from '../../types'
 import { StartView } from './StartView'
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
@@ -162,4 +165,39 @@ it('keeps the tab order and Chinese labels the top bar renders', () => {
   expect(HOME_TABS.map(tab => tab.id)).toEqual(['start', 'packs', 'versions', 'plugins', 'skills', 'presets', 'settings'])
   expect(HOME_TABS.map(tab => tab.label)).toEqual(['启动', '整合包', 'DSH版本', '插件', '技能', '预设', '设置'])
   expect(HOME_TAB_ORDER).toEqual(HOME_TABS.map(tab => tab.id))
+})
+
+it('updates the open manual check dialog when the background installer is saved', async () => {
+  const available: LauncherUpdateStatus = {
+    state: 'update-available', localVersion: '1.3.2', remoteVersion: '1.3.3', releaseUrl: null,
+    assetName: 'setup.exe', assetSize: 1000, checkedAt: null, message: '',
+  }
+  let completeDownload!: (status: LauncherUpdateStatus) => void
+  const download = new Promise<LauncherUpdateStatus>(resolve => { completeDownload = resolve })
+  let emitProgress!: (progress: LauncherUpdateProgress) => void
+  const api: LauncherApi = {
+    ...demoApi,
+    checkLauncherUpdate: vi.fn().mockResolvedValueOnce(available).mockResolvedValue({ ...available, state: 'downloading' }),
+    downloadLauncherUpdate: vi.fn(() => download),
+    onLauncherUpdateProgress: listener => { emitProgress = listener; return () => {} },
+  }
+  vi.stubGlobal('launcher', api)
+  try {
+    const container = await render(<App />)
+    expect(api.downloadLauncherUpdate).toHaveBeenCalledTimes(1)
+    await act(async () => container.querySelector<HTMLButtonElement>('.start-check-update')!.click())
+    const dialog = container.querySelector('.update-dialog')!
+    expect(dialog.querySelector('button.primary-command')?.textContent).toContain('正在下载')
+    await act(async () => emitProgress({ phase: 'downloading', percent: 100, downloadedBytes: 999, totalBytes: 1000 }))
+    expect(dialog.querySelector('[role=progressbar]')?.getAttribute('aria-valuenow')).toBe('99')
+    await act(async () => emitProgress({ phase: 'downloading', percent: 100, downloadedBytes: 1000, totalBytes: 1000 }))
+    expect(dialog.textContent).toContain('正在确认并保存安装包')
+    expect(dialog.querySelector<HTMLButtonElement>('button.primary-command')?.disabled).toBe(true)
+    await act(async () => completeDownload({ ...available, state: 'downloaded' }))
+    const install = dialog.querySelector<HTMLButtonElement>('button.primary-command')
+    expect(install?.textContent).toContain('立即更新并重启')
+    expect(install?.disabled).toBe(false)
+  } finally {
+    vi.unstubAllGlobals()
+  }
 })
