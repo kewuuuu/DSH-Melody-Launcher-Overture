@@ -5,11 +5,11 @@ import {
   History,
   LoaderCircle,
   Package,
-  X,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { PackInstallLogEntry, PackInstallPhase, PackItemProgress } from '../../hooks/use-pack-install'
 import type { PackAnalysis, PackAnalysisItem, PackInstallResult } from '../../types'
+import { ModalShell } from './ModalShell'
 
 /**
  * 整合包安装/导入对话框（创建与导入复用）。
@@ -95,7 +95,7 @@ export function PackInstallDialog({
 
   const active = phase === 'installing'
   const settled = phase === 'done' || phase === 'error'
-  const closeable = !active && !busy && !dshDownloading
+  const closeable = !active && !busy && !(phase === 'preview' && dshDownloading)
   const canRollback = hasSnapshot || packSnapshotsAvailable
 
   const toggleItem = (packageName: string) => {
@@ -143,108 +143,104 @@ export function PackInstallDialog({
         : '正在处理整合包'
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.currentTarget === event.target && closeable) onClose() }}>
-      <section className="modal pack-install-dialog" role="dialog" aria-modal="true" aria-labelledby="pack-install-title">
-        <header>
-          <div><Package size={19} /><h2 id="pack-install-title">{title}</h2></div>
-          <div className="pack-header-actions">
-            <span className={`ai-phase-badge ${phase}`}>{PHASE_LABEL[phase]}</span>
-            <button type="button" className="icon-button" onClick={onClose} disabled={!closeable} aria-label="关闭">
-              <X size={18} />
+    <ModalShell
+      className="pack-install-dialog"
+      titleId="pack-install-title"
+      title={title}
+      icon={<Package size={19} />}
+      headerActions={<span className={`ai-phase-badge ${phase}`}>{PHASE_LABEL[phase]}</span>}
+      contentClassName="pack-install-content"
+      onClose={onClose}
+      closeDisabled={!closeable}
+      footer={<>
+        {phase === 'preview' && pendingDshVersion && (
+          <>
+            <span className="pack-footer-note dsh-version-note">
+              <CircleAlert size={14} />
+              {dshDownloading
+                ? <>正在下载 DSH&nbsp;<strong>{pendingDshVersion}</strong>，完成后自动继续导入，请勿关闭窗口…</>
+                : <>此整合包要求 DSH&nbsp;<strong>{pendingDshVersion}</strong>，本机未安装，需要先下载才能启动。</>}
+            </span>
+            <button type="button" className="secondary-button" disabled={dshDownloading} onClick={() => setPendingDshVersion(null)}>取消</button>
+            <button
+              type="button"
+              className="primary-command"
+              disabled={dshDownloading}
+              onClick={confirmDshDownload}
+            >
+              <Download size={16} />{dshDownloading ? '正在下载…' : `下载 DSH ${pendingDshVersion} 并导入`}
             </button>
+          </>
+        )}
+        {phase === 'preview' && !pendingDshVersion && (
+          <>
+            <span className="pack-footer-note">
+              {analysis?.source === 'snapshot' ? '快照包整包导入（含依赖本体，无需联网）' : `共 ${selected.size} 个组件将安装`}
+            </span>
+            <button type="button" className="secondary-button" onClick={onClose} disabled={!closeable}>取消</button>
+            <button
+              type="button"
+              className="primary-command"
+              disabled={(analysis?.source !== 'snapshot' && selected.size === 0) || !rawNameValid}
+              onClick={confirmImport}
+              title={rawNameValid ? undefined : '整合包名称需包含字母或数字'}
+            >
+              <Download size={16} />{analysis?.source === 'snapshot' ? '导入整合包' : '开始安装'}
+            </button>
+          </>
+        )}
+        {active && (
+          <div className="pack-installing-note"><LoaderCircle className="spin" size={15} />正在处理，请勿关闭窗口…</div>
+        )}
+        {settled && (
+          <>
+            <button type="button" className="danger-button" disabled={!canRollback || busy} onClick={onRollback}>
+              {busy ? <LoaderCircle className="spin" size={16} /> : <History size={16} />}还原快照
+            </button>
+            {result?.id && (
+              <button type="button" className="secondary-button accent" disabled={busy} onClick={() => onActivate(result!.id)}>
+                <CircleCheck size={16} />启用整合包
+              </button>
+            )}
+            <button type="button" className="primary-command" onClick={onClose} disabled={!closeable}><CircleCheck size={16} />关闭</button>
+          </>
+        )}
+      </>}
+    >
+      {phase === 'preview' && analysis && (
+        <PreviewPanel
+          analysis={analysis}
+          selected={selected}
+          nameInput={nameInput}
+          onNameChange={setNameInput}
+          onToggle={toggleItem}
+        />
+      )}
+      {(phase === 'installing' || (settled && events.length > 0)) && (
+        <>
+          <ProgressPanel phase={phase} itemProgress={itemProgress} />
+          <div className="ai-install-logs pack-install-logs" role="log" aria-live="polite">
+            {events.length === 0 ? (
+              <div className="ai-log-empty"><LoaderCircle className="spin" size={17} />正在处理，请稍候…</div>
+            ) : (
+              events.map(entry => (
+                <div key={entry.id} className={`ai-log-entry ${entry.kind}`}>
+                  {entry.kind === 'error' && <CircleAlert size={13} />}
+                  {entry.kind === 'success' && <CircleCheck size={13} />}
+                  <span>{entry.text}</span>
+                </div>
+              ))
+            )}
+            <div ref={logEndRef} />
           </div>
-        </header>
-        <div className="modal-content pack-install-content">
-          {phase === 'preview' && analysis && (
-            <PreviewPanel
-              analysis={analysis}
-              selected={selected}
-              nameInput={nameInput}
-              onNameChange={setNameInput}
-              onToggle={toggleItem}
-            />
-          )}
-          {(phase === 'installing' || (settled && events.length > 0)) && (
-            <>
-              <ProgressPanel phase={phase} itemProgress={itemProgress} />
-              <div className="ai-install-logs pack-install-logs" role="log" aria-live="polite">
-                {events.length === 0 ? (
-                  <div className="ai-log-empty"><LoaderCircle className="spin" size={17} />正在处理，请稍候…</div>
-                ) : (
-                  events.map(entry => (
-                    <div key={entry.id} className={`ai-log-entry ${entry.kind}`}>
-                      {entry.kind === 'error' && <CircleAlert size={13} />}
-                      {entry.kind === 'success' && <CircleCheck size={13} />}
-                      <span>{entry.text}</span>
-                    </div>
-                  ))
-                )}
-                <div ref={logEndRef} />
-              </div>
-            </>
-          )}
-          {phase === 'done' && result && <ResultPanel result={result} />}
-          {phase === 'error' && error && (
-            <div className="pack-error-banner"><CircleAlert size={16} /><span>{error}</span></div>
-          )}
-        </div>
-        <footer>
-          {phase === 'preview' && pendingDshVersion && (
-            <>
-              <span className="pack-footer-note dsh-version-note">
-                <CircleAlert size={14} />
-                {dshDownloading
-                  ? <>正在下载 DSH&nbsp;<strong>{pendingDshVersion}</strong>，完成后自动继续导入，请勿关闭窗口…</>
-                  : <>此整合包要求 DSH&nbsp;<strong>{pendingDshVersion}</strong>，本机未安装，需要先下载才能启动。</>}
-              </span>
-              <button type="button" className="secondary-button" disabled={dshDownloading} onClick={() => setPendingDshVersion(null)}>取消</button>
-              <button
-                type="button"
-                className="primary-command"
-                disabled={dshDownloading}
-                onClick={confirmDshDownload}
-              >
-                <Download size={16} />{dshDownloading ? '正在下载…' : `下载 DSH ${pendingDshVersion} 并导入`}
-              </button>
-            </>
-          )}
-          {phase === 'preview' && !pendingDshVersion && (
-            <>
-              <span className="pack-footer-note">
-                {analysis?.source === 'snapshot' ? '快照包整包导入（含依赖本体，无需联网）' : `共 ${selected.size} 个组件将安装`}
-              </span>
-              <button type="button" className="secondary-button" onClick={onClose}>取消</button>
-              <button
-                type="button"
-                className="primary-command"
-                disabled={(analysis?.source !== 'snapshot' && selected.size === 0) || !rawNameValid}
-                onClick={confirmImport}
-                title={rawNameValid ? undefined : '整合包名称需包含字母或数字'}
-              >
-                <Download size={16} />{analysis?.source === 'snapshot' ? '导入整合包' : '开始安装'}
-              </button>
-            </>
-          )}
-          {active && (
-            <div className="pack-installing-note"><LoaderCircle className="spin" size={15} />正在处理，请勿关闭窗口…</div>
-          )}
-          {settled && (
-            <>
-              <button type="button" className="danger-button" disabled={!canRollback || busy} onClick={onRollback}>
-                {busy ? <LoaderCircle className="spin" size={16} /> : <History size={16} />}还原快照
-              </button>
-              {result?.id && (
-                <button type="button" className="secondary-button accent" disabled={busy} onClick={() => onActivate(result!.id)}>
-                  <CircleCheck size={16} />启用整合包
-                </button>
-              )}
-              <button type="button" className="primary-command" onClick={onClose}><CircleCheck size={16} />关闭</button>
-            </>
-          )}
-        </footer>
-      </section>
+        </>
+      )}
+      {phase === 'done' && result && <ResultPanel result={result} />}
+      {phase === 'error' && error && (
+        <div className="pack-error-banner"><CircleAlert size={16} /><span>{error}</span></div>
+      )}
       <style>{packDialogStyle}</style>
-    </div>
+    </ModalShell>
   )
 }
 
@@ -274,7 +270,7 @@ function PreviewPanel({ analysis, selected, nameInput, onNameChange, onToggle }:
             value={nameInput}
             onChange={event => onNameChange(event.target.value)}
             placeholder="给整合包起个名字（需包含字母或数字）"
-            autoFocus
+            data-modal-autofocus
           />
           <small>{/[a-zA-Z0-9]/.test(nameInput) ? '名称将作为整合包标识。' : '名称需包含字母或数字，否则无法生成包标识。'}</small>
         </label>
@@ -417,7 +413,6 @@ const packDialogStyle = `
 .pack-footer-note.dsh-version-note { display: inline-flex; align-items: center; gap: 5px; color: var(--amber); font-weight: 600; }
 .dsh-version-note strong { color: var(--accent); font-weight: 800; }
 /* 标题栏由全局 .modal > header 统一给，这里不再重复一份。 */
-.pack-header-actions { display: flex; align-items: center; gap: 8px; }
 .pack-install-content { display: flex; flex-direction: column; gap: 13px; }
 .pack-install-logs { flex: 0 0 auto; min-height: 120px; max-height: 260px; }
 .pack-progress-panel { display: flex; flex-direction: column; gap: 6px; }

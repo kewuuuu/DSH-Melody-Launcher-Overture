@@ -438,3 +438,31 @@ it('非 Windows 时该开关禁用，并说明仅 Windows 支持', async () => {
     restore()
   }
 })
+
+
+it('preserves quoted launch arguments and Windows paths across editing and saving', async () => {
+  const launchArgs = ['--workspace', 'C:\\Program Files\\DSH\\', '--data=C:\\DSH\\data', '\\\\host\\share\\folder name', 'say "hi"', '', ' spaced ']
+  const { container, saved } = await mount({ overrides: { launchArgs }, echoSettings: true })
+  const input = fieldInput(container, '参数')
+  const formatted = input.value
+  expect(formatted).toContain('"C:\\Program Files\\DSH\\\\"')
+  expect(formatted).toContain('--data=C:\\DSH\\data')
+  await act(async () => setInputValue(fieldInput(container, '可执行文件'), 'dsh.cmd'))
+  await settle()
+  expect(saved.at(-1)?.launchArgs).toEqual(launchArgs)
+
+  await act(async () => setInputValue(input, formatted + ' --label="two words"'))
+  await settle()
+  expect(saved.at(-1)?.launchArgs).toEqual([...launchArgs, '--label=two words'])
+  expect(input.value).toBe(formatted + ' --label="two words"')
+})
+
+it('round-trips arguments containing line breaks through the single-line editor', async () => {
+  const launchArgs = ['--label', 'line one\r\nline two', 'C:\\DSH']
+  const { container, saved, unmount } = await mount({ overrides: { launchArgs } })
+  const input = fieldInput(container, '参数')
+  expect(JSON.parse(input.value)).toEqual(launchArgs)
+  await act(async () => setInputValue(input, JSON.stringify([...launchArgs, '--new'])))
+  await unmount()
+  expect(saved.at(-1)?.launchArgs).toEqual([...launchArgs, '--new'])
+})

@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppSettings } from '../src/types'
 import { defaultSettings } from '../electron/settings'
-import { createIdleShutdownService, IDLE_SHUTDOWN_COMMENT, type IdleShutdownPack } from '../electron/idle-shutdown'
+import { createIdleShutdownService, IDLE_SHUTDOWN_COMMENT, IDLE_SHUTDOWN_POLL_INTERVAL_MS, IDLE_SHUTDOWN_PROBE_TIMEOUT_MS, type IdleShutdownPack } from '../electron/idle-shutdown'
 
 const BASE_TIME = Date.parse('2026-01-01T08:00:00.000Z')
 const MINUTE = 60_000
+const STOP_BUDGET = 10_000
 
 function createHarness(overrides: Partial<AppSettings> = {}) {
   let clock = BASE_TIME
@@ -29,22 +30,21 @@ function createHarness(overrides: Partial<AppSettings> = {}) {
   let sessionCount = 0
   let probeFailure: Error | null = null
   let notifyFailure: Error | null = null
-  let stopFailure: Error | null = null
   const calls: string[] = []
   const notifications: { title: string; body: string }[] = []
-  const timers = new Map<number, number>()
-  let nextTimerId = 0
+  const listRunningPacks = vi.fn(async () => packs)
+  const stopPack = vi.fn(async (packId: string) => {
+    calls.push('stop:' + packId)
+  })
   const service = createIdleShutdownService({
     settings,
-    listRunningPacks: async () => packs,
+    listRunningPacks,
     countRunningSessions: async () => {
       if (probeFailure) throw probeFailure
       return sessionCount
     },
-    stopPack: async packId => {
-      calls.push('stop:' + packId)
-      if (stopFailure) throw stopFailure
-    },
+    stopPack,
+    stopBudgetMs: STOP_BUDGET,
     notify: (title, body) => {
       if (notifyFailure) throw notifyFailure
       notifications.push({ title, body })
@@ -54,22 +54,14 @@ function createHarness(overrides: Partial<AppSettings> = {}) {
       return true
     },
     now: () => clock,
-    // 定时器只登记、永不自动触发：测试直接调 poll() 推进状态机。
-    setTimer: (_handler, milliseconds) => {
-      nextTimerId += 1
-      timers.set(nextTimerId, milliseconds)
-      return nextTimerId
-    },
-    clearTimer: handle => {
-      timers.delete(handle as number)
-    },
   })
   return {
     service,
     saves,
     calls,
     notifications,
-    timers,
+    listRunningPacks,
+    stopPack,
     now: () => clock,
     advance: (milliseconds: number) => {
       clock += milliseconds
@@ -86,9 +78,6 @@ function createHarness(overrides: Partial<AppSettings> = {}) {
     failNotify: (error: Error | null) => {
       notifyFailure = error
     },
-    failStop: (error: Error | null) => {
-      stopFailure = error
-    },
   }
 }
 
@@ -101,6 +90,9 @@ async function reachArmed(harness: ReturnType<typeof createHarness>): Promise<vo
 }
 
 describe('idle shutdown', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
   it('有会话在跑时保持 waiting，不停包也不关机', async () => {
     const h = createHarness()
     h.setSessionCount(1)
@@ -207,6 +199,7 @@ describe('idle shutdown', () => {
     expect(h.calls).toEqual(['stop:pack-a', 'stop:pack-b', 'shutdown:' + IDLE_SHUTDOWN_COMMENT])
     expect(state.phase).toBe('off')
     expect(state.message).toContain('已执行自动关机')
+    expect(state.message).toContain('已停止 2 个整合包')
   })
 
   it('到点复查变忙就不关机', async () => {
@@ -261,15 +254,145 @@ describe('idle shutdown', () => {
     }
   })
 
-  it('停包失败也要继续关机，并把失败原因写进 message', async () => {
+  it.each([true, false])('最后一次枚举失败时不执行关机（需要停包：%s）', async shutdownStopPacks => {
+    const h = createHarness({ shutdownStopPacks })
+    await reachArmed(h)
+    h.listRunningPacks
+      .mockResolvedValueOnce([{ id: 'pack-a', url: 'http://127.0.0.1:3080/web' }])
+      .mockRejectedValueOnce(new Error('枚举整合包失败'))
+    h.advance(10 * MINUTE)
+    const state = await h.service.poll()
+    expect(h.calls).toEqual([])
+    expect(state.phase).toBe('waiting')
+    expect(state.shutdownAt).toBeNull()
+    expect(state.idleSince).toBeNull()
+    expect(state.message).toContain('未执行自动关机')
+    expect(state.message).toContain('枚举整合包失败')
+  })
+
+  describe.each([true, false])('最终枚举与空闲检查不一致（需要停包：%s）', shutdownStopPacks => {
+    it.each<IdleShutdownPack>([
+      { id: 'pack-b', url: 'http://127.0.0.1:3081/web' },
+      { id: 'pack-a', url: null, unmanaged: true },
+      { id: 'pack-a', url: 'http://127.0.0.1:3082/web' },
+    ])('发现未经确认的 $id（$url）时推迟关机', async changedPack => {
+      const verifiedPack = { id: 'pack-a', url: 'http://127.0.0.1:3080/web' }
+      const h = createHarness({ shutdownStopPacks })
+      h.setPacks([verifiedPack])
+      await reachArmed(h)
+      h.listRunningPacks
+        .mockResolvedValueOnce([verifiedPack])
+        .mockResolvedValueOnce(changedPack.id === verifiedPack.id ? [changedPack] : [verifiedPack, changedPack])
+      h.advance(10 * MINUTE)
+      const state = await h.service.poll()
+      expect(h.calls).toEqual([])
+      expect(state.phase).toBe('waiting')
+      expect(state.shutdownAt).toBeNull()
+      expect(state.message).toContain('发现未经确认的整合包，未执行自动关机')
+      expect(state.busy).toEqual([{ packId: changedPack.id, reason: '未通过本轮空闲检查' }])
+    })
+  })
+
+  it('最终枚举确认整合包已退出时可以关机', async () => {
     const h = createHarness()
-    h.failStop(new Error('整合包已失去响应'))
+    await reachArmed(h)
+    h.listRunningPacks
+      .mockResolvedValueOnce([{ id: 'pack-a', url: 'http://127.0.0.1:3080/web' }])
+      .mockResolvedValueOnce([])
+    h.advance(10 * MINUTE)
+    const state = await h.service.poll()
+    expect(h.calls).toEqual(['shutdown:' + IDLE_SHUTDOWN_COMMENT])
+    expect(state.phase).toBe('off')
+    expect(state.message).not.toContain('已停止')
+  })
+
+  it('没成功枚举过运行中的包时，枚举失败后仍不开始空闲倒计时', async () => {
+    const h = createHarness()
+    h.setPacks([])
+    h.listRunningPacks.mockRejectedValueOnce(new Error('枚举失败'))
+    await h.service.arm()
+    expect((await h.service.poll()).message).toContain('枚举失败')
+    h.advance(30 * MINUTE)
+    const state = await h.service.poll()
+    expect(state.phase).toBe('waiting')
+    expect(state.idleSince).toBeNull()
+    expect(h.calls).toEqual([])
+  })
+
+  it('最后一次枚举超时时不执行关机，定时轮询不会并发复查', async () => {
+    const h = createHarness()
+    await reachArmed(h)
+    await vi.advanceTimersByTimeAsync(IDLE_SHUTDOWN_POLL_INTERVAL_MS - 1)
+    h.listRunningPacks.mockClear()
+    h.listRunningPacks
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(() => new Promise(() => {}))
+    h.advance(10 * MINUTE)
+    const poll = h.service.poll()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(h.listRunningPacks).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(IDLE_SHUTDOWN_PROBE_TIMEOUT_MS - 1)
+    const state = await poll
+    expect(h.calls).toEqual([])
+    expect(state.phase).toBe('waiting')
+    expect(state.message).toContain('无法确认整合包状态')
+    expect(state.message).toContain('等待超时')
+  })
+
+  it('部分停包失败时不执行关机，显示成功停包数和失败原因', async () => {
+    const h = createHarness()
+    h.setPacks([
+      { id: 'pack-a', url: 'http://127.0.0.1:3080/web' },
+      { id: 'pack-b', url: 'http://127.0.0.1:3081/web' },
+    ])
+    h.stopPack.mockImplementationOnce(async packId => {
+      h.calls.push('stop:' + packId)
+      throw new Error('整合包已失去响应')
+    })
     await reachArmed(h)
     h.advance(10 * MINUTE)
     const state = await h.service.poll()
-    expect(h.calls).toEqual(['stop:pack-a', 'shutdown:' + IDLE_SHUTDOWN_COMMENT])
+    expect(h.calls).toEqual(['stop:pack-a', 'stop:pack-b'])
+    expect(state.phase).toBe('waiting')
+    expect(state.shutdownAt).toBeNull()
+    expect(state.message).toContain('未执行自动关机')
+    expect(state.message).toContain('已停止 1 个整合包')
+    expect(state.message).toContain('pack-a：整合包已失去响应')
+  })
+
+  it('停包超时或耗尽总预算时不执行关机', async () => {
+    const h = createHarness()
+    h.setPacks([
+      { id: 'pack-a', url: 'http://127.0.0.1:3080/web' },
+      { id: 'pack-b', url: 'http://127.0.0.1:3081/web' },
+    ])
+    h.stopPack.mockImplementationOnce(async packId => {
+      h.calls.push('stop:' + packId)
+      h.advance(STOP_BUDGET)
+      return new Promise(() => {})
+    })
+    await reachArmed(h)
+    h.advance(10 * MINUTE)
+    const poll = h.service.poll()
+    await vi.advanceTimersByTimeAsync(STOP_BUDGET)
+    const state = await poll
+    expect(h.calls).toEqual(['stop:pack-a'])
+    expect(state.phase).toBe('waiting')
+    expect(state.message).toContain('未执行自动关机')
+    expect(state.message).toContain('pack-a：等待超时')
+    expect(state.message).toContain('pack-b：停止预算已用尽')
+    expect(state.message).not.toContain('已停止')
+  })
+
+  it('明确关闭关机前停包时直接发出关机命令', async () => {
+    const h = createHarness({ shutdownStopPacks: false })
+    await reachArmed(h)
+    h.advance(10 * MINUTE)
+    const state = await h.service.poll()
+    expect(h.calls).toEqual(['shutdown:' + IDLE_SHUTDOWN_COMMENT])
     expect(state.phase).toBe('off')
-    expect(state.message).toContain('未能停止')
+    expect(state.message).toContain('已执行自动关机')
+    expect(state.message).not.toContain('已停止')
   })
 
   it('宽限期为 0 时同一轮里停包并关机', async () => {

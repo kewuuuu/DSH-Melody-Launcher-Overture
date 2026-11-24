@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from 'react'
+import { act, useState } from 'react'
 import type { ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -109,13 +109,32 @@ it('explains a missing API key instead of showing an empty balance', async () =>
 it('asks the main process for updates when the check button is pressed', async () => {
   const api = fakeApi()
   const onUpdateChecked = vi.fn()
-  const container = await render(startView(api, { onUpdateChecked }))
+  function Harness() {
+    const [update, setUpdate] = useState<LauncherUpdateStatus | null>(null)
+    return startView(api, { update, onUpdateChecked: next => { onUpdateChecked(next); setUpdate(next) } })
+  }
+  const container = await render(<Harness />)
   const button = container.querySelector<HTMLButtonElement>('.start-check-update')
   expect(button).not.toBeNull()
   await act(async () => button!.click())
   expect(api.checkLauncherUpdate).toHaveBeenCalledTimes(1)
   expect(onUpdateChecked).toHaveBeenCalledTimes(1)
   expect(container.textContent).toContain('已是最新版本 v1.2.3')
+})
+
+it('keeps a transport error visible alongside the shared update status until a retry', async () => {
+  const update = await fakeApi().checkLauncherUpdate()
+  const checkLauncherUpdate = vi.fn().mockRejectedValueOnce(new Error('IPC disconnected')).mockResolvedValue(update)
+  const onUpdateChecked = vi.fn()
+  const container = await render(startView(fakeApi({ checkLauncherUpdate }), { update, onUpdateChecked }))
+  const button = container.querySelector<HTMLButtonElement>('.start-check-update')!
+  await act(async () => button.click())
+  expect(container.querySelector('.start-brand-note[role="alert"]')?.textContent).toContain('IPC disconnected')
+  expect(container.querySelector('.start-brand-note[role="status"]')?.textContent).toContain('已是最新版本 v1.2.3')
+  expect(onUpdateChecked).not.toHaveBeenCalled()
+  await act(async () => button.click())
+  expect(container.querySelector('.start-brand-note[role="alert"]')).toBeNull()
+  expect(onUpdateChecked).toHaveBeenCalledWith(update)
 })
 
 it('打开自动关机开关就调用 arm，并显示等待空闲与占用的整合包', async () => {
@@ -187,6 +206,8 @@ it('updates the open manual check dialog when the background installer is saved'
     expect(api.downloadLauncherUpdate).toHaveBeenCalledTimes(1)
     await act(async () => container.querySelector<HTMLButtonElement>('.start-check-update')!.click())
     const dialog = container.querySelector('.update-dialog')!
+    const updateNote = () => container.querySelector('.start-brand-note[role="status"]')?.textContent
+    expect(updateNote()).toBe('正在下载更新…')
     expect(dialog.querySelector('button.primary-command')?.textContent).toContain('正在下载')
     await act(async () => emitProgress({ phase: 'downloading', percent: 100, downloadedBytes: 999, totalBytes: 1000 }))
     expect(dialog.querySelector('[role=progressbar]')?.getAttribute('aria-valuenow')).toBe('99')
@@ -194,6 +215,7 @@ it('updates the open manual check dialog when the background installer is saved'
     expect(dialog.textContent).toContain('正在确认并保存安装包')
     expect(dialog.querySelector<HTMLButtonElement>('button.primary-command')?.disabled).toBe(true)
     await act(async () => completeDownload({ ...available, state: 'downloaded' }))
+    expect(updateNote()).toBe('更新已下载，重启启动器即可安装')
     const install = dialog.querySelector<HTMLButtonElement>('button.primary-command')
     expect(install?.textContent).toContain('立即更新并重启')
     expect(install?.disabled).toBe(false)

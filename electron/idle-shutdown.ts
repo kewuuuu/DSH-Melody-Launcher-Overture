@@ -65,10 +65,10 @@ export const DEFAULT_GRACE_MINUTES = 10
 type BusyReason = { packId: string; reason: string }
 
 type Verdict =
-  | { kind: 'no-packs' }
-  | { kind: 'idle' }
+  | { kind: 'no-packs'; verifiedPacks: ReadonlyMap<string, string> }
+  | { kind: 'idle'; verifiedPacks: ReadonlyMap<string, string> }
   | { kind: 'activity'; busy: BusyReason[] }
-  | { kind: 'unknown'; busy: BusyReason[] }
+  | { kind: 'unknown'; busy: BusyReason[]; message?: string }
 
 function messageOf(error: unknown): string {
   if (error instanceof Error && error.message) return error.message
@@ -129,7 +129,7 @@ export function createIdleShutdownService(deps: IdleShutdownDeps): IdleShutdownS
     stopTimer()
     timer = setTimer(() => {
       timer = null
-      void poll().catch(error => console.error('[idle-shutdown] 空闲判定失败。', error))
+      void serial(poll).catch(error => console.error('[idle-shutdown] 空闲判定失败。', error))
     }, pollIntervalMs)
   }
 
@@ -199,9 +199,21 @@ export function createIdleShutdownService(deps: IdleShutdownDeps): IdleShutdownS
     return settings
   }
 
+  const readRunningPacks = async (): Promise<IdleShutdownPack[]> => {
+    const packs = await runWithTimeout(() => deps.listRunningPacks(), probeTimeoutMs)
+    if (!Array.isArray(packs)) throw new Error('整合包列表无效')
+    return packs
+  }
+
   const evaluate = async (): Promise<Verdict> => {
-    const packs = await deps.listRunningPacks()
-    if (!Array.isArray(packs) || packs.length === 0) return { kind: 'no-packs' }
+    let packs: IdleShutdownPack[]
+    try {
+      packs = await readRunningPacks()
+    } catch (error) {
+      return { kind: 'unknown', busy: [], message: '无法确认整合包状态，暂不关机。枚举整合包失败（' + messageOf(error) + '）' }
+    }
+    const verifiedPacks = new Map<string, string>()
+    if (packs.length === 0) return { kind: 'no-packs', verifiedPacks }
     const sessionBusy: BusyReason[] = []
     const failed: BusyReason[] = []
     const unmanaged: BusyReason[] = []
@@ -211,20 +223,22 @@ export function createIdleShutdownService(deps: IdleShutdownDeps): IdleShutdownS
         unmanaged.push({ packId: pack.id, reason: pack.note ?? '有一份启动器没在托管的实例在运行' })
         continue
       }
-      if (!pack.url) {
+      const url = pack.url
+      if (!url) {
         failed.push({ packId: pack.id, reason: pack.note ?? '拿不到 Web 服务地址，无法确认有没有会话在跑' })
         continue
       }
       try {
-        const count = await runWithTimeout(signal => deps.countRunningSessions(pack.url as string, signal), probeTimeoutMs)
+        const count = await runWithTimeout(signal => deps.countRunningSessions(url, signal), probeTimeoutMs)
         if (count > 0) sessionBusy.push({ packId: pack.id, reason: count === 1 ? '有 1 个会话正在运行' : '有 ' + count + ' 个会话正在运行' })
+        else verifiedPacks.set(pack.id, url)
       } catch (error) {
         failed.push({ packId: pack.id, reason: '无法确认有没有会话在跑（' + messageOf(error) + '）' })
       }
     }
     if (unmanaged.length > 0 || sessionBusy.length > 0) return { kind: 'activity', busy: [...unmanaged, ...sessionBusy, ...failed] }
     if (failed.length > 0) return { kind: 'unknown', busy: failed }
-    return { kind: 'idle' }
+    return { kind: 'idle', verifiedPacks }
   }
 
   const notifyPending = (idleMinutes: number, graceMinutes: number): void => {
@@ -262,15 +276,37 @@ export function createIdleShutdownService(deps: IdleShutdownDeps): IdleShutdownS
     enterArmed(settings, idleMinutes, minutesOf(settings.shutdownGraceMinutes, DEFAULT_GRACE_MINUTES))
   }
 
-  const performShutdown = async (settings: AppSettings): Promise<void> => {
+  const postponeShutdown = (message: string, busy: BusyReason[] = []): void => {
+    status.phase = 'waiting'
+    status.idleSince = null
+    status.shutdownAt = null
+    status.notifiedAt = null
+    status.busy = busy
+    status.message = message
+  }
+
+  const performShutdown = async (settings: AppSettings, verifiedPacks: ReadonlyMap<string, string>): Promise<void> => {
     if (shuttingDown) return
     shuttingDown = true
     try {
-      const packs = await deps.listRunningPacks().catch(() => [] as IdleShutdownPack[])
+      let packs: IdleShutdownPack[]
+      try {
+        packs = await readRunningPacks()
+      } catch (error) {
+        postponeShutdown('无法确认整合包状态，未执行自动关机。最终枚举整合包失败（' + messageOf(error) + '）')
+        return
+      }
+      const unverified = packs.filter(pack => pack.unmanaged === true || verifiedPacks.get(pack.id) !== pack.url)
+      if (unverified.length > 0) {
+        postponeShutdown('最终枚举发现未经确认的整合包，未执行自动关机。', unverified.map(pack => ({
+          packId: pack.id,
+          reason: pack.note ?? '未通过本轮空闲检查',
+        })))
+        return
+      }
       const failures: string[] = []
-      const shouldStop = settings.shutdownStopPacks !== false
-      if (shouldStop && packs.length > 0) {
-        // 总预算固定 20 秒：停不掉也要继续关机，只把失败原因写进 message。
+      let stoppedCount = 0
+      if (settings.shutdownStopPacks !== false && packs.length > 0) {
         const deadline = now() + stopBudgetMs
         for (const pack of packs) {
           const remaining = deadline - now()
@@ -280,17 +316,21 @@ export function createIdleShutdownService(deps: IdleShutdownDeps): IdleShutdownS
           }
           try {
             await runWithTimeout(() => deps.stopPack(pack.id), remaining)
+            stoppedCount += 1
           } catch (error) {
             failures.push(pack.id + '：' + messageOf(error))
           }
         }
       }
+      const stopped = stoppedCount > 0 ? '已停止 ' + stoppedCount + ' 个整合包。' : ''
+      if (failures.length > 0) {
+        postponeShutdown('未执行自动关机。' + stopped + '未能停止：' + failures.join('；'))
+        return
+      }
       const issued = await deps.shutdown(IDLE_SHUTDOWN_COMMENT).catch(() => false)
-      const stopped = shouldStop && packs.length > 0 ? '已停止 ' + packs.length + ' 个整合包。' : ''
-      const failed = failures.length > 0 ? '（未能停止：' + failures.join('；') + '）' : ''
       resetToOff(issued
-        ? '所有整合包空闲，已执行自动关机。' + stopped + failed
-        : '当前系统不是 Windows，未执行关机命令。' + stopped + failed)
+        ? '所有整合包空闲，已执行自动关机。' + stopped
+        : '当前系统不是 Windows，未执行关机命令。' + stopped)
     } finally {
       shuttingDown = false
     }
@@ -315,24 +355,24 @@ export function createIdleShutdownService(deps: IdleShutdownDeps): IdleShutdownS
         status.busy = []
         enterIdle(settings)
       } else {
-        status.seenRunning = true
+        if (verdict.busy.length > 0) status.seenRunning = true
         status.idleSince = null
         status.busy = verdict.busy
-        status.message = verdict.kind === 'activity' ? '还有整合包在运行，暂不关机' : '无法确认整合包状态，暂不关机'
+        status.message = verdict.kind === 'activity' ? '还有整合包在运行，暂不关机' : (verdict.message ?? '无法确认整合包状态，暂不关机')
       }
-      if (phaseOf() === 'armed' && status.shutdownAt !== null && now() >= status.shutdownAt) await performShutdown(settings)
+      if ('verifiedPacks' in verdict && phaseOf() === 'armed' && status.shutdownAt !== null && now() >= status.shutdownAt) {
+        await performShutdown(settings, verdict.verifiedPacks)
+      }
     } else if (status.phase === 'armed') {
       if (verdict.kind === 'activity' || verdict.kind === 'unknown') {
         // 到点前的复查在这里：一旦有新活动就退回 waiting 并重新计时。
-        status.phase = 'waiting'
-        status.idleSince = null
-        status.shutdownAt = null
-        status.notifiedAt = null
-        status.busy = verdict.busy
-        status.message = verdict.kind === 'activity' ? '检测到新的活动，已推迟关机' : '无法确认整合包状态，已推迟关机'
+        postponeShutdown(
+          verdict.kind === 'activity' ? '检测到新的活动，已推迟关机' : (verdict.message ?? '无法确认整合包状态，已推迟关机'),
+          verdict.busy,
+        )
       } else if (now() >= (status.shutdownAt ?? Number.POSITIVE_INFINITY)) {
         status.busy = []
-        await performShutdown(settings)
+        await performShutdown(settings, verdict.verifiedPacks)
       }
     }
     if (phaseOf() !== 'off') scheduleNext()

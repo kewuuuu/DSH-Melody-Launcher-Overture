@@ -38,7 +38,7 @@ import { writePackRegistry, type PackRecord } from '../electron/pack-registry'
 import type { AppSettings, RuntimeState } from '../src/types'
 
 const roots: string[] = []
-afterEach(async () => { await Promise.all(roots.splice(0).map(r => rm(r, { recursive: true, force: true }))) })
+afterEach(async () => { await Promise.all(roots.splice(0).map(r => rm(r, { recursive: true, force: true, maxRetries: 3 }))) })
 type FixtureRuntimeHooks = {
   isElevated?: () => Promise<boolean>
   spawnElevatedProcess?: typeof import('../electron/elevated-runtime').spawnElevatedRuntime
@@ -147,6 +147,9 @@ describe('explicit pack control', () => {
     await control.execute({ command: 'pack.resources.link', packId: 'b', args: { kind: 'plugins', name: 'fixture-plugin', sourcePackId: 'a' } })
     const list = await control.execute({ command: 'pack.resources.list', packId: 'b', args: { kind: 'plugins' } }) as { items: Array<{ packageName: string; shared: boolean; sourcePackId: string }> }
     expect(list.items.find(i => i.packageName === 'fixture-plugin')).toMatchObject({ shared: true, sourcePackId: 'a' })
+    const update = (packId: string) => control.execute({ command: 'pack.market.update', packId, args: { packageName: 'fixture-plugin' } })
+    await expect(update('a')).rejects.toThrow('Unlink shared references')
+    await expect(update('b')).rejects.toThrow('请先解除共享引用')
     await expect(control.execute({ command: 'pack.delete', packId: 'a' })).rejects.toThrow('Unlink shared references')
     await control.execute({ command: 'pack.resources.remove', packId: 'b', args: { kind: 'plugins', name: 'fixture-plugin' } })
     expect(JSON.parse(await readFile(path.join(source, 'package.json'), 'utf8')).name).toBe('fixture-plugin')
@@ -172,10 +175,19 @@ describe('explicit pack control', () => {
     const home = path.join(root, 'b')
     await mkdir(path.join(home, 'profiles', 'b'), { recursive: true })
     await writeFile(path.join(home, 'profiles', 'b', 'package.json'), JSON.stringify({ dependencies: { 'fixture-plugin': '1.0.0' }, dsh: { profile: { bundles: ['fixture-plugin'] } } }))
+    const installed = path.join(home, 'profiles', 'b', 'node_modules', 'fixture-plugin')
+    await mkdir(installed, { recursive: true })
+    await writeFile(path.join(installed, 'package.json'), JSON.stringify({ name: 'fixture-plugin', version: '1.0.0' }))
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith('/latest')
+      ? Response.json({ name: 'fixture-plugin', version: '1.2.0' })
+      : Response.json({ plugins: [{ name: 'fixture', owner: 'owner', npm: 'fixture-plugin', url: 'https://github.com/owner/fixture', category: 'tools' }] }))
     const save = vi.fn()
-    const control = createLauncherControl({ userData: root, cliPath: path.join(root, 'cli.cjs'), settings: { readStored: async () => settings, read: async () => settings, save }, packManager: {} as never, prepareNodeRuntime: vi.fn(), preparePnpmRuntime: vi.fn(), openExternal: vi.fn(), fallbackWorkspace: () => root, fetchImpl: fetch, emitOutput: () => undefined, loginRegistration: vi.fn(), storage: { get: () => ({ dataDir: root, source: 'install' as const, portableDir: root, pointerFile: null, legacy: { dataDir: root, hasData: false }, restartRequired: false, warning: null }), set: vi.fn(), reset: vi.fn() }, legacyRuntimeRunning: () => false })
+    const control = createLauncherControl({ userData: root, cliPath: path.join(root, 'cli.cjs'), settings: { readStored: async () => settings, read: async () => settings, save }, packManager: {} as never, prepareNodeRuntime: vi.fn(), preparePnpmRuntime: vi.fn(), openExternal: vi.fn(), fallbackWorkspace: () => root, fetchImpl, emitOutput: () => undefined, loginRegistration: vi.fn(), storage: { get: () => ({ dataDir: root, source: 'install' as const, portableDir: root, pointerFile: null, legacy: { dataDir: root, hasData: false }, restartRequired: false, warning: null }), set: vi.fn(), reset: vi.fn() }, legacyRuntimeRunning: () => false })
     const list = await control.execute({ command: 'pack.resources.list', packId: 'b', args: { kind: 'plugins' } }) as { items: Array<{ packageName: string }> }
     expect(list.items.some(i => i.packageName === 'fixture-plugin')).toBe(true)
+    const catalog = (packId: string) => control.execute({ command: 'pack.market.catalog', packId, args: { checkUpdates: true } })
+    await expect(catalog('b')).resolves.toMatchObject({ plugins: [{ packageName: 'fixture-plugin', installed: true, version: '1.0.0', updateAvailable: true, updateVersion: '1.2.0' }] })
+    await expect(catalog('a')).resolves.toMatchObject({ plugins: [{ installed: false, updateAvailable: false }] })
     expect(save).not.toHaveBeenCalled(); expect(settings.activePackId).toBe('a')
   })
   it('shares flat skills as file references and removes only the target link', async () => {

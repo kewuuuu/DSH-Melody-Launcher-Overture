@@ -616,6 +616,7 @@ export function createPackControl(options: PackControlOptions) {
       return next
     }))
     if (command === 'pack.resources.list') return resources(r, args.kind)
+    if (command === 'pack.market.catalog') return options.market?.(command, await options.resolveSettings(r, await config(r.id)), args)
     if (command === 'pack.stop' && args.force === true && controllers.get(r.id)?.isRunning()) {
       if (closing) throw new Error('Launcher is shutting down')
       const action = stopPack(r, args)
@@ -649,6 +650,16 @@ export function createPackControl(options: PackControlOptions) {
       // 运行中的整合包也允许改插件/资源：改动照常写进家目录，下次启动生效（前端自己提示「下次启动生效」）。
       // 真的写不进去时（Windows 文件被占用）不静默：serial 会把这类错误翻成中文再抛。
       const s = await options.resolveSettings(r, await config(r.id))
+      if (command === 'pack.market.update') {
+        if (typeof args.packageName !== 'string' || !isSafePackageName(args.packageName)) throw new Error('Invalid package name')
+        const provenance = path.join(s.dshHome, '.launcher-shared-plugins-' + encodeURIComponent(args.packageName) + '.json')
+        const linked = await lstat(provenance).then(() => true).catch(error => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+          throw error
+        })
+        if (linked) throw new Error('请先解除共享引用，再更新此插件。')
+        await assertNotSharedSource(r.id, 'plugins', args.packageName)
+      }
       if (command.startsWith('pack.market.') || command.startsWith('pack.skillMarket.')) return options.market?.(command, s, args)
       if (command === 'pack.resources.enabled' || command === 'pack.resources.remove') {
         if (command.endsWith('.remove') || args.kind === 'skills' || args.kind === 'presets') await assertNotSharedSource(r.id, args.kind, args.name)

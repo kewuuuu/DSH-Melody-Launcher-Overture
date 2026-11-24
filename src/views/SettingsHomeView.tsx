@@ -60,8 +60,48 @@ const SAVE_DEBOUNCE_MS = 600
 /** 自动保存失败的统一文案：草稿还在，改内容或点「重试保存」再来一次。 */
 const SAVE_ERROR_TEXT = '自动保存失败，改动还留在这一页没有写盘；可以点「重试保存」再存一次。'
 
-/** 参数那一行文本与整份设置之间的唯一口径：空白切分、丢掉空串。 */
-const argsToArray = (text: string): string[] => text.trim().split(/\s+/).filter(Boolean)
+/** 双引号包住空白；只有紧贴双引号的反斜杠参与转义。 */
+function parseLaunchArgs(text: string): string[] {
+  if (text.trimStart().startsWith('[')) {
+    try {
+      const values: unknown = JSON.parse(text)
+      if (Array.isArray(values) && values.every(value => typeof value === 'string')) return values
+    } catch { /* 不是 JSON 数组，按普通参数解析。 */ }
+  }
+  const args: string[] = []
+  let arg = ''
+  let started = false
+  let quoted = false
+  for (const part of text.match(/\\*"|\s+|[^"\\\s]+|\\+/g) ?? []) {
+    if (part.endsWith('"')) {
+      const slashes = part.length - 1
+      arg += '\\'.repeat(Math.floor(slashes / 2))
+      if (slashes % 2) arg += '"'
+      else quoted = !quoted
+      started = true
+    } else if (!quoted && /^\s/.test(part)) {
+      if (started) args.push(arg)
+      arg = ''
+      started = false
+    } else {
+      arg += part
+      started = true
+    }
+  }
+  if (started) args.push(arg)
+  return args
+}
+
+function formatLaunchArgs(args: string[]): string {
+  // 单行输入框会剔除换行，含换行的参数用 JSON 数组回填。
+  if (args.some(arg => /[\r\n]/.test(arg))) return JSON.stringify(args)
+  return args.map((arg, index) => {
+    if (arg && !/[\s"]/.test(arg) && !(index === 0 && arg.startsWith('['))) return arg
+    const escaped = arg.replace(/(\\*)"|(\\+)$/g, (_, beforeQuote: string | undefined, trailing: string | undefined) =>
+      beforeQuote !== undefined ? beforeQuote.repeat(2) + '\\"' : (trailing ?? '').repeat(2))
+    return '"' + escaped + '"'
+  }).join(' ')
+}
 
 /** 设置的稳定指纹（字段顺序无关）：用来分辨 prop 变化是「刚写盘那份的回声」还是别处真的改了设置。 */
 function settingsSignature(value: AppSettings): string {
@@ -116,7 +156,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   const api = useLauncherApi()
   const [draft, setDraft] = useState(settings)
   // 参数在界面上是一整行文本，保存时才切成数组。
-  const [argsText, setArgsText] = useState(settings.launchArgs.join(' '))
+  const [argsText, setArgsText] = useState(formatLaunchArgs(settings.launchArgs))
   // 两个分钟数也是文本态：空串/非数字/越界留在输入框里报错，不写进 draft。
   const [idleText, setIdleText] = useState(String(settings.shutdownIdleMinutes ?? SHUTDOWN_IDLE_DEFAULT))
   const [graceText, setGraceText] = useState(String(settings.shutdownGraceMinutes ?? SHUTDOWN_GRACE_DEFAULT))
@@ -206,7 +246,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   useEffect(() => {
     if (submittedRef.current.includes(settingsSignature(settings))) return
     setDraft(settings)
-    setArgsText(settings.launchArgs.join(' '))
+    setArgsText(formatLaunchArgs(settings.launchArgs))
     setIdleText(String(settings.shutdownIdleMinutes ?? SHUTDOWN_IDLE_DEFAULT))
     setGraceText(String(settings.shutdownGraceMinutes ?? SHUTDOWN_GRACE_DEFAULT))
     setIdleError(null)
@@ -241,20 +281,17 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   const matchedPreset = GITHUB_MIRROR_PRESETS.find(prefix => normalizeMirror(prefix) === normalizeMirror(mirrorValue) && mirrorValue.trim() !== '')
   const mirrorPreset = mirrorValue.trim() === '' ? '' : (matchedPreset ?? CUSTOM_MIRROR)
 
-  /** 写盘写的是整份设置：草稿 + 参数文本切成的数组，入口不同口径也不分叉。 */
-  const composePayload = (base: AppSettings = draft): AppSettings => ({ ...base, launchArgs: argsToArray(argsText) })
-
   /** 改一个字段：先更新草稿，再把整份设置排进自动保存队列。 */
   const patch = (next: Partial<AppSettings>) => {
     const merged = { ...draft, ...next }
     setDraft(merged)
-    scheduleSave(composePayload(merged))
+    scheduleSave(merged)
   }
 
   /** 参数是一整行文本：边打边改草稿，停手 SAVE_DEBOUNCE_MS 才写盘（不做 blur 提交）。 */
   const updateArgsText = (raw: string) => {
     setArgsText(raw)
-    scheduleSave({ ...draft, launchArgs: argsToArray(raw) })
+    patch({ launchArgs: parseLaunchArgs(raw) })
   }
 
   const chooseDirectory = async (kind: 'dshInstallPath' | 'dshHome' | 'workspace') => {
@@ -267,7 +304,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
   const previewAppearance = (next: AppSettings) => {
     setDraft(next)
     onPreview(next.appearance ?? null)
-    scheduleSave(composePayload(next))
+    scheduleSave(next)
   }
   const updateAppearance = (next: Partial<AppearanceSettings>) => {
     const merged = { ...appearance, ...next }
@@ -332,7 +369,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
     setDraft(current => ({ ...current, launchAtLogin: next }))
     let ok = false
     try {
-      ok = await onSave(composePayload({ ...draft, launchAtLogin: next }))
+      ok = await onSave({ ...draft, launchAtLogin: next })
     } catch {
       ok = false
     }
@@ -680,7 +717,7 @@ export function SettingsHomeView({ settings, busy, onSave, onPreview, onCheckUpd
           <details className="settings-panel settings-home-panel settings-advanced">
             <summary><span className="settings-group-icon"><Wrench size={16} /></span>高级设置<small>启动命令、端口、Copilot 提示词——一般不需要改动</small></summary>
             <label className="form-field"><span>可执行文件</span><input value={draft.launchExecutable} onChange={event => patch({ launchExecutable: event.target.value })} /></label>
-            <label className="form-field"><span>参数</span><input value={argsText} onChange={event => updateArgsText(event.target.value)} /></label>
+            <label className="form-field"><span>参数</span><input value={argsText} onChange={event => updateArgsText(event.target.value)} title="含空格的参数请用双引号括起，也可输入 JSON 字符串数组" /></label>
             <label className="form-field"><span>首选 Web 端口</span><input type="number" min={1} max={65535} step={1} value={draft.webPort} onChange={event => patch({ webPort: Number(event.target.value) })} /></label>
             <p className="settings-advanced-note">DSH Copilot：默认模式会把自定义内容追加到内置提示词；开发者模式可替换基础提示词，但凭据保护、工作区边界和操作审批始终有效。</p>
             <label className="check-field"><input type="checkbox" checked={Boolean(draft.aiDeveloperMode)} onChange={event => patch({ aiDeveloperMode: event.target.checked })} /><span><strong>开发者模式</strong><small>允许使用下面的内容替换 Copilot 基础 persona。</small></span></label>

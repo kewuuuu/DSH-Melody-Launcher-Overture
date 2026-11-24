@@ -15,6 +15,7 @@ it('routes row and resource actions to the selected pack while retaining the mar
   const bridge = vi.fn(async (request: typeof requests[number]) => {
     requests.push(request)
     if (request.command === 'pack.list') return { packs }
+    if (request.command === 'pack.market.catalog') return { plugins: [], categories: {}, count: 0, updated: '' }
     if (request.command === 'pack.resources.list') return { items: [{ packageName: 'demo-plugin', displayName: 'Demo Plugin', description: 'test', enabled: true, locked: false, sourcePackId: 'alpha', sourcePackName: 'Alpha' }] }
     return {}
   })
@@ -98,15 +99,15 @@ it('warns that the per-pack admin switch costs one UAC per start', async () => {
 it('does not overwrite the neutral market cache with a target pack installation state', async () => {
   const { DshMarketView } = await import('../views/DshMarketView')
   const catalog = { updated: '', count: 1, categories: {}, plugins: [{ name: 'example', owner: 'owner', url: 'https://example.com', category: 'tools', description: { zh: 'Example' }, npm: '@owner/example', stars: 0, added: '', install: '', installed: false, enabled: false, version: null, updateAvailable: false, updateVersion: null }] }
-  const api = { loadDshMarket: async () => catalog, launcherControl: async () => ({ items: [{ packageName: '@owner/example', enabled: true }] }), onDshMarketProgress: () => () => {} } as unknown as LauncherApi
+  const api = { loadDshMarket: async () => catalog, launcherControl: async () => ({ ...catalog, plugins: [{ ...catalog.plugins[0], packageName: '@owner/example', installed: true, enabled: true }] }), onDshMarketProgress: () => () => {} } as unknown as LauncherApi
   const container = document.createElement('div'); document.body.append(container)
   const root = createRoot(container); roots.push(root)
   await act(async () => root.render(<LauncherApiProvider value={api}><DshMarketView activeProfileName={null} targetPackId="beta" /></LauncherApiProvider>))
   expect(container.textContent).toContain('已启用')
   expect(catalog.plugins[0].installed).toBe(false)
   expect(catalog.plugins[0].enabled).toBe(false)
-  const neverLoadingApi = { ...api, loadDshMarket: () => new Promise(() => {}) } as unknown as LauncherApi
-  await act(async () => root.render(<LauncherApiProvider value={neverLoadingApi}><DshMarketView key="global" activeProfileName="alpha" /></LauncherApiProvider>))
+  api.loadDshMarket = () => new Promise(() => {})
+  await act(async () => root.render(<LauncherApiProvider value={api}><DshMarketView activeProfileName={null} /></LauncherApiProvider>))
   expect(container.querySelector('.market-enabled')).toBeNull()
 })
 it('deletes a pack only after an inline confirmation and stops it first', async () => {

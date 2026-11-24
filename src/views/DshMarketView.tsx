@@ -1,12 +1,12 @@
 import { launcherControl } from '../lib/pack-control'
 import { Check, ExternalLink, LoaderCircle, RefreshCw, Search, Star, Store, ToggleLeft, ToggleRight, Trash2 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useLauncherApi } from '../api/client'
 import { CatalogPagination } from '../components/CatalogPagination'
 import { PageHeading } from '../components/PageHeading'
 import { SkeletonCards } from '../components/Skeleton'
 import { formatStars } from '../lib/format'
-import type { DshMarketCatalog, DshMarketPlugin, DshMarketProgress } from '../types'
+import type { DshMarketCatalog, DshMarketPlugin, DshMarketProgress, LauncherApi } from '../types'
 
 type Sort = 'stars' | 'updated' | 'name'
 
@@ -20,7 +20,7 @@ const MARKET_PAGE_SIZE = 48
  * 目录结果的模块级缓存：切走 tab 组件被卸载后，重进时先用旧目录直接渲染、
  * 后台静默刷新（主进程另有磁盘缓存 + 30 分钟 SWR），不再每次闪一遍骨架屏。
  */
-let cachedCatalog: DshMarketCatalog | null = null
+let cachedCatalog: { api: LauncherApi; profileName: string | null; catalog: DshMarketCatalog } | null = null
 
 interface DshMarketViewProps {
   /** Market mutations write the active Profile; let the shared store refresh it. */
@@ -34,9 +34,14 @@ interface DshMarketViewProps {
   extraActions?: ReactNode
 }
 
-export function DshMarketView({ onProfileChanged, embedded = false, activeProfileName, extraActions, targetPackId }: DshMarketViewProps) {
+export function DshMarketView(props: DshMarketViewProps) {
+  return <ScopedDshMarketView key={JSON.stringify([props.activeProfileName, props.targetPackId])} {...props} />
+}
+
+function ScopedDshMarketView({ onProfileChanged, embedded = false, activeProfileName, extraActions, targetPackId }: DshMarketViewProps) {
   const api = useLauncherApi()
-  const [catalog, setCatalog] = useState<DshMarketCatalog | null>(cachedCatalog)
+  const [display, setDisplay] = useState(() => !targetPackId && cachedCatalog?.api === api && cachedCatalog.profileName === activeProfileName ? cachedCatalog : null)
+  const catalog = display?.api === api ? display.catalog : null
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('all')
   const [sort, setSort] = useState<Sort>('stars')
@@ -46,33 +51,42 @@ export function DshMarketView({ onProfileChanged, embedded = false, activeProfil
   const [busy, setBusy] = useState<string | null>(null)
   const [progress, setProgress] = useState<DshMarketProgress | null>(null)
   const [page, setPage] = useState(1)
-  const targetPackageNames = useRef(new Map<string, string>())
+  const activeApi = useRef<LauncherApi | null>(null)
+  const requestId = useRef(0)
+  const targetUpdatesChecked = useRef(false)
+  useLayoutEffect(() => {
+    activeApi.current = api
+    return () => { activeApi.current = null; requestId.current += 1 }
+  }, [api])
 
-  const load = async () => {
-    setLoading(true)
+  const load = async (checkUpdates = false) => {
+    const request = ++requestId.current
+    const isCurrent = () => activeApi.current === api && requestId.current === request
+    setLoading(!checkUpdates)
+    setCheckingUpdates(checkUpdates)
     setError(null)
     try {
-      const next = await api.loadDshMarket()
-      cachedCatalog = next
-      let displayCatalog = next
+      let next: DshMarketCatalog
       if (targetPackId) {
-        const resources = await launcherControl(api, 'pack.resources.list', targetPackId, { kind: 'plugins' }) as { items: Array<{ packageName: string; enabled: boolean }> }
-        displayCatalog = { ...next, plugins: next.plugins.map(plugin => {
-          const local = resources.items.find(item => item.packageName === plugin.npm || item.packageName === plugin.name || item.packageName.endsWith('/' + plugin.name))
-          if (local) targetPackageNames.current.set(plugin.name, local.packageName)
-          return { ...plugin, installed: Boolean(local), enabled: local?.enabled ?? false, updateAvailable: false }
-        }) }
+        if (checkUpdates) targetUpdatesChecked.current = true
+        next = await launcherControl(api, 'pack.market.catalog', targetPackId, { checkUpdates: targetUpdatesChecked.current }) as DshMarketCatalog
+      } else {
+        if (checkUpdates) await api.checkDshMarketUpdates(true)
+        if (!isCurrent()) return
+        next = await api.loadDshMarket()
       }
-      setCatalog(displayCatalog)
-    } catch (cause) { setError(cause instanceof Error ? cause.message : '无法读取 DSH Market') }
-    finally { setLoading(false) }
-  }
-
-  const checkUpdates = async () => {
-    setCheckingUpdates(true)
-    setError(null)
-    try { await api.checkDshMarketUpdates(true); await load() } catch (cause) { setError(cause instanceof Error ? cause.message : '更新检查失败') }
-    finally { setCheckingUpdates(false) }
+      if (!isCurrent()) return
+      const result = { api, profileName: activeProfileName, catalog: next }
+      if (!targetPackId) cachedCatalog = result
+      setDisplay(result)
+    } catch (cause) {
+      if (isCurrent()) setError(cause instanceof Error ? cause.message : checkUpdates ? '更新检查失败' : '无法读取 DSH Market')
+    } finally {
+      if (isCurrent()) {
+        setLoading(false)
+        setCheckingUpdates(false)
+      }
+    }
   }
 
   // 终端阶段（complete / error）短暂保留后清空进度条，避免「卡在 84%」错觉残留。
@@ -86,17 +100,20 @@ export function DshMarketView({ onProfileChanged, embedded = false, activeProfil
   }
 
   useEffect(() => {
-    void load()
+    if (targetPackId) return
     const unsubscribe = api.onDshMarketProgress(handleProgress)
     return () => {
       unsubscribe()
       if (progressClearRef.current) clearTimeout(progressClearRef.current)
     }
-  }, [])
+  }, [api, targetPackId])
 
-  // 激活整合包变化时——新建/删除/切换整合包——重新拉一次安装态，
-  // 避免出现「整合包已删但 DSH Market 还显示已启用」的错觉。
-  useEffect(() => { void load() }, [activeProfileName, targetPackId])
+  useEffect(() => {
+    let cancelled = false
+    // StrictMode cleans up and immediately repeats the mount effect in development.
+    queueMicrotask(() => { if (!cancelled) void load() })
+    return () => { cancelled = true }
+  }, [api])
 
   const visible = useMemo(() => {
     const list = (catalog?.plugins ?? []).filter(plugin => {
@@ -130,8 +147,11 @@ export function DshMarketView({ onProfileChanged, embedded = false, activeProfil
     setError(null)
     try {
       if (targetPackId) {
-        if (action === 'install' || action === 'update') await launcherControl(api, 'pack.market.install', targetPackId, { name: plugin.name })
-        else await launcherControl(api, action === 'toggle' ? 'pack.resources.enabled' : 'pack.resources.remove', targetPackId, { kind: 'plugins', name: targetPackageNames.current.get(plugin.name) ?? plugin.npm ?? plugin.name, enabled })
+        if (action === 'install' || action === 'update') {
+          await launcherControl(api, action === 'install' ? 'pack.market.install' : 'pack.market.update', targetPackId, { name: plugin.name, url: plugin.url, ...(plugin.packageName ? { packageName: plugin.packageName } : {}) })
+        } else {
+          await launcherControl(api, action === 'toggle' ? 'pack.resources.enabled' : 'pack.resources.remove', targetPackId, { kind: 'plugins', name: plugin.packageName, enabled })
+        }
       } else if (action === 'install') await api.installDshMarketPlugin(plugin.name)
       else if (action === 'update') await api.updateDshMarketPlugin(plugin.name)
       else if (action === 'uninstall') await api.uninstallDshMarketPlugin(plugin.name)
@@ -139,14 +159,19 @@ export function DshMarketView({ onProfileChanged, embedded = false, activeProfil
       // The market service and startup-item manager share the same Profile on
       // disk, but their renderer state is otherwise independent. Refresh the
       // shared Profile before redrawing the market so both switches agree.
+      if (activeApi.current !== api) return
+      if (!targetPackId && cachedCatalog?.api === api && cachedCatalog.profileName === activeProfileName) cachedCatalog = null
       await onProfileChanged?.()
-      await load()
-    } catch (cause) { setError(cause instanceof Error ? cause.message : '操作失败') }
-    finally { setBusy(null) }
+      if (activeApi.current === api) await load()
+    } catch (cause) {
+      if (activeApi.current === api) setError(cause instanceof Error ? cause.message : '操作失败')
+    } finally {
+      if (activeApi.current === api) setBusy(null)
+    }
   }
 
   const categories = Object.entries(catalog?.categories ?? {})
-  const refreshActions = <>{extraActions}<button type="button" className="secondary-button" onClick={() => void checkUpdates()} disabled={loading || checkingUpdates}><RefreshCw size={14} className={checkingUpdates ? 'spin' : undefined} />检查更新</button><button type="button" className="secondary-button" onClick={() => void load()} disabled={loading || checkingUpdates}><RefreshCw size={14} className={loading ? 'spin' : undefined} />刷新目录</button></>
+  const refreshActions = <>{extraActions}<button type="button" className="secondary-button" onClick={() => void load(true)} disabled={loading || checkingUpdates}><RefreshCw size={14} className={checkingUpdates ? 'spin' : undefined} />检查更新</button><button type="button" className="secondary-button" onClick={() => void load()} disabled={loading || checkingUpdates}><RefreshCw size={14} className={loading ? 'spin' : undefined} />刷新目录</button></>
   return (
     <div className={embedded ? 'dsh-market-page dsh-market-embedded' : 'page dsh-market-page'}>
       {embedded

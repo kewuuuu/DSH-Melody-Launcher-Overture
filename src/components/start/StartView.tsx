@@ -82,7 +82,7 @@ export function StartView({ logoSrc, update, busy, onUpdateChecked, onOpenSettin
   const [usage, setUsage] = useState<DshUsageResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [checking, setChecking] = useState(false)
-  const [checkMessage, setCheckMessage] = useState<string | null>(null)
+  const [checkError, setCheckError] = useState<string | null>(null)
 
   const loadAccount = useCallback(async (force = false) => {
     setLoading(true)
@@ -105,14 +105,13 @@ export function StartView({ logoSrc, update, busy, onUpdateChecked, onOpenSettin
   }, [loadAccount])
 
   const check = async () => {
-    if (checking) return
+    if (checking || busy) return
     setChecking(true)
+    setCheckError(null)
     try {
-      const next = await api.checkLauncherUpdate()
-      setCheckMessage(describeUpdate(next))
-      onUpdateChecked(next)
+      onUpdateChecked(await api.checkLauncherUpdate())
     } catch (cause) {
-      setCheckMessage(`检查更新失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      setCheckError(`检查更新失败：${errorText(cause)}`)
     } finally {
       setChecking(false)
     }
@@ -157,7 +156,7 @@ export function StartView({ logoSrc, update, busy, onUpdateChecked, onOpenSettin
   }
 
   const period = pricingPeriod(new Date())
-  const updateNote = checkMessage ?? describeUpdate(update)
+  const updateNote = describeUpdate(update)
 
   return (
     <div className="start-view">
@@ -187,7 +186,8 @@ export function StartView({ logoSrc, update, busy, onUpdateChecked, onOpenSettin
           </button>
           <button type="button" className="start-settings" onClick={onOpenSettings} title="启动器设置">设置</button>
         </div>
-        {updateNote && <p className="start-brand-note">{updateNote}</p>}
+        {updateNote && <p className="start-brand-note" role="status">{updateNote}</p>}
+        {checkError && <p className="start-brand-note" role="alert">{checkError}</p>}
       </aside>
 
       <section className="start-main">

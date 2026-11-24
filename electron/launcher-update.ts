@@ -1,6 +1,8 @@
 import { spawn as nodeSpawn } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdir, stat, writeFile } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { lstat, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { LAUNCHER_RELEASE_REPOSITORY } from '../src/constants'
 import type { LauncherUpdateProgress, LauncherUpdateStatus } from '../src/types'
@@ -33,6 +35,7 @@ const GITHUB_HEADERS = {
 }
 /** 新安装包体积上限（Setup 约 91MB，放宽到 512MiB 防极端情况）。 */
 const MAX_LAUNCHER_BYTES = 512 * 1024 * 1024
+const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000
 
 /** 停整合包最多等这么久：等不到就中止更新——覆盖安装不能撞上正在运行的文件。 */
 export const APPLY_STOP_PACKS_TIMEOUT_MS = 20_000
@@ -43,6 +46,7 @@ interface GitHubReleaseAsset {
   name?: unknown
   browser_download_url?: unknown
   size?: unknown
+  digest?: unknown
 }
 
 interface GitHubLatestRelease {
@@ -57,6 +61,7 @@ export interface ResolvedLauncherAsset {
   name: string
   size: number
   url: string
+  digest?: string
 }
 
 /** NSIS 安装包的文件名标记：便携版停发后，这是唯一还产的资产。 */
@@ -75,11 +80,12 @@ function collectAssets(release: GitHubLatestRelease, marker: string): ResolvedLa
     const candidate = entry as GitHubReleaseAsset | null
     if (!candidate || typeof candidate.name !== 'string' || typeof candidate.browser_download_url !== 'string') continue
     const lower = candidate.name.toLowerCase()
-    if (!lower.endsWith('.exe') || !lower.includes(marker)) continue
+    if (!lower.endsWith('.exe') || !lower.includes(marker) || /[<>:"/\\|?*]/.test(candidate.name)) continue
     collected.push({
       name: candidate.name,
       size: Number.isFinite(candidate.size) ? Number(candidate.size) : 0,
       url: candidate.browser_download_url,
+      ...(candidate.digest == null ? {} : { digest: typeof candidate.digest === 'string' ? candidate.digest.toLowerCase() : '' }),
     })
   }
   return collected
@@ -290,6 +296,7 @@ export interface LauncherUpdaterOptions {
   relaunchDataDir?: string
   /** 带 GitHub 鉴权的 fetch；缺省用全局 fetch。 */
   githubFetch?: typeof fetch
+  downloadIdleTimeoutMs?: number
   /** 进度事件（下载百分比 / 应用阶段）。 */
   emitProgress: (progress: LauncherUpdateProgress) => void
   /** 测试注入的 spawn。缺省 node:child_process spawn。 */
@@ -299,6 +306,8 @@ export interface LauncherUpdaterOptions {
 }
 
 export class LauncherRelaunchExitError extends Error {}
+
+class InstallerIntegrityError extends Error {}
 
 type RelaunchRollback = () => void | Promise<void>
 
@@ -312,6 +321,22 @@ export interface LauncherUpdater {
   check(): Promise<LauncherUpdateStatus>
   download(): Promise<LauncherUpdateStatus>
   apply(options?: LauncherApplyOptions): Promise<void>
+}
+
+async function installerMatches(filePath: string, size: number, sha256: string): Promise<boolean> {
+  try {
+    const info = await lstat(filePath)
+    if (!info.isFile() || info.size !== size) return false
+    const hash = createHash('sha256')
+    let received = 0
+    for await (const chunk of createReadStream(filePath, { end: size })) {
+      received += chunk.length
+      hash.update(chunk)
+    }
+    return received === size && hash.digest('hex') === sha256
+  } catch {
+    return false
+  }
 }
 
 export function createLauncherUpdater(options: LauncherUpdaterOptions): LauncherUpdater {
@@ -334,6 +359,7 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     message: '',
   }
   let pending: PendingUpdate | null = null
+  let verifiedSha256: string | null = null
   let downloading: Promise<LauncherUpdateStatus> | null = null
 
   let checking: Promise<LauncherUpdateStatus> | null = null
@@ -348,7 +374,7 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
         const previousSetup = pending?.setup
         const sameDownload = status.state === 'downloaded' && nextSetup && previousSetup
           && nextSetup.url === previousSetup.url && nextSetup.name === previousSetup.name
-          && nextSetup.size === previousSetup.size
+          && nextSetup.size === previousSetup.size && nextSetup.digest === previousSetup.digest
           && snapshot.status.remoteVersion === status.remoteVersion
         pending = snapshot.pending
         if (!sameDownload) status = snapshot.status
@@ -360,7 +386,7 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
 
   async function download(): Promise<LauncherUpdateStatus> {
     if (downloading) return downloading
-    if (status.state !== 'update-available' || !pending) return status
+    if ((status.state !== 'update-available' && status.state !== 'error') || !pending) return status
     downloading = performDownload()
     try {
       return await downloading
@@ -379,12 +405,20 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     }
     const targetPath = path.join(updateRoot, asset.name)
     try {
-      const existing = await stat(targetPath).catch(() => null)
-      if (existing && asset.size > 0 && existing.size === asset.size) {
+      verifiedSha256 = null
+      if (!Number.isSafeInteger(asset.size) || asset.size <= 0 || asset.size > MAX_LAUNCHER_BYTES) {
+        throw new Error('Release 安装包大小无效。')
+      }
+      const expectedSha256 = asset.digest?.match(/^sha256:([0-9a-f]{64})$/)?.[1]
+      if (asset.digest !== undefined && !expectedSha256) throw new Error('Release 安装包的 SHA-256 校验值无效。')
+      if (expectedSha256 && await installerMatches(targetPath, asset.size, expectedSha256)) {
+        verifiedSha256 = expectedSha256
         status = { ...status, state: 'downloaded', assetName: asset.name, assetSize: asset.size || null, message: '更新已就绪，可以重启应用。' }
         return status
       }
-      status = { ...status, state: 'downloading', assetName: asset.name, assetSize: asset.size || null, message: '正在下载更新…' }
+      // 旧 Release 可能没有摘要，只允许重新下载并验证大小，不能信任磁盘缓存。
+      await rm(targetPath, { force: true })
+      status = { ...status, state: 'downloading', assetName: asset.name, assetSize: asset.size, message: '正在下载更新…' }
       const buffer = await downloadReleaseAsset(
         asset.url,
         MAX_LAUNCHER_BYTES,
@@ -397,12 +431,24 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
           })
         },
         doFetch,
+        undefined,
+        options.downloadIdleTimeoutMs ?? DOWNLOAD_IDLE_TIMEOUT_MS,
       )
-      if (asset.size > 0 && buffer.length !== asset.size) {
+      if (buffer.length !== asset.size) {
         throw new Error(`下载内容不完整（${buffer.length} ≠ ${asset.size} 字节）。`)
       }
+      const sha256 = createHash('sha256').update(buffer).digest('hex')
+      if (expectedSha256 && sha256 !== expectedSha256) throw new Error('安装包 SHA-256 校验失败。')
       await mkdir(updateRoot, { recursive: true })
-      await writeFile(targetPath, buffer)
+      const tempPath = path.join(updateRoot, `.${randomUUID()}.tmp`)
+      try {
+        await writeFile(tempPath, buffer, { flag: 'wx' })
+        await rename(tempPath, targetPath)
+      } catch (error) {
+        await rm(tempPath, { force: true })
+        throw error
+      }
+      verifiedSha256 = sha256
       status = { ...status, state: 'downloaded', assetName: asset.name, assetSize: asset.size || null, message: '更新已就绪，可以重启应用。' }
       return status
     } catch (error) {
@@ -447,9 +493,8 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     const setup = target.setup
     if (!setup) throw new Error('新版本没有可下载的安装版安装包。')
     const setupPath = path.join(updateRoot, setup.name)
-    const existing = await stat(setupPath).catch(() => null)
-    if (!existing?.isFile() || (setup.size > 0 && existing.size !== setup.size)) {
-      throw new Error('安装包还没下载完，请重新下载更新后再试。')
+    if (!verifiedSha256 || !await installerMatches(setupPath, setup.size, verifiedSha256)) {
+      throw new InstallerIntegrityError('安装包校验失败，请重新下载更新后再试。')
     }
     const installDir = installDirFromExecPath(execPath)
     if (!installDir) throw new Error('找不到当前安装目录，已中止更新。')
@@ -531,7 +576,7 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
         message += '；撤销接管准备失败：' + errorMessage(rollbackError)
         throw new Error(message, { cause: error })
       } finally {
-        status = { ...downloaded, message }
+        status = { ...downloaded, state: error instanceof InstallerIntegrityError ? 'error' : downloaded.state, message }
       }
       throw error
     }

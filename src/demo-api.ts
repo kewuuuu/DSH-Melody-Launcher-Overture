@@ -853,7 +853,30 @@ export const demoApi: LauncherApi = {
       resources[kind].push({ ...item, shared: true, sourcePackId: args.sourcePackId } as never)
       return { items: resources[kind] }
     }
-    if (command.startsWith('pack.market.') || command.startsWith('pack.skillMarket.')) return { installed: true }
+    if (command === 'pack.market.catalog') {
+      const catalog = demoDshMarketCatalog()
+      return { ...catalog, plugins: catalog.plugins.map(plugin => {
+        const installed = (resources.plugins as ManagedPlugin[]).find(item => item.packageName === (plugin.npm ?? plugin.name))
+        const updateAvailable = args.checkUpdates === true && plugin.npm !== null && installed?.version === '1.0.0'
+        return { ...plugin, packageName: installed?.packageName, installed: Boolean(installed), enabled: installed?.enabled ?? false, version: installed?.version ?? null, updateAvailable, updateVersion: updateAvailable ? '1.1.0' : null }
+      }) }
+    }
+    if (command === 'pack.market.install' || command === 'pack.market.update') {
+      const plugin = demoDshMarketPlugins.find(item => item.name === args.name && item.url === args.url)
+      if (!plugin) throw new Error('Unknown market plugin')
+      const items = resources.plugins as ManagedPlugin[]
+      const packageName = plugin.npm ?? plugin.name
+      const installed = items.find(item => item.packageName === packageName)
+      if (command === 'pack.market.update') {
+        if (packageName !== args.packageName || !plugin.npm || installed?.version !== '1.0.0') throw new Error('No available update')
+        installed.version = '1.1.0'
+      } else {
+        if (installed) throw new Error('Plugin already installed')
+        items.push({ packageName, displayName: plugin.name, version: '1.0.0', description: plugin.description.zh ?? '', repository: plugin.url, enabled: true, builtin: false, locked: false, compatible: true, order: null })
+      }
+      return { installed: true }
+    }
+    if (command.startsWith('pack.skillMarket.')) return { installed: true }
     throw new Error('Unsupported demo command: ' + command)
   },
   getSettings: async () => demoSettings,

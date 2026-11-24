@@ -1322,6 +1322,7 @@ export type PackStageProgress = Omit<Extract<PackProgressEvent, { kind: 'stage' 
 
 export interface DshMarketPlugin {
   name: string
+  packageName?: string
   owner: string
   url: string
   category: string

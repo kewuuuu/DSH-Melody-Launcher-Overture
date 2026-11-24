@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdirSync, mkdtempSync } from 'node:fs'
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   APPLY_STOP_PACKS_TIMEOUT_MESSAGE,
   checkLauncherUpdate,
@@ -20,6 +21,9 @@ import { createUpdateFlow } from '../electron/update-flow'
 
 const SETUP_KEWU = 'DSH-launcher-KEWU-Setup-1.1.0.exe'
 const LEGACY_SETUP = 'DSH-Launcher-1.0.4-setup.exe'
+const setupDigest = (bytes: Uint8Array): string => 'sha256:' + createHash('sha256').update(bytes).digest('hex')
+const ZERO_SETUP_DIGEST = setupDigest(Buffer.alloc(9))
+const CHUNKED_SETUP_DIGEST = setupDigest(Buffer.alloc(9, 0x41))
 /** 安装版进程的 exe：不在 node_modules 里，名字也不带 portable。 */
 const INSTALLED_EXEC = 'C:\\Program Files\\DSH-launcher-KEWU\\DSH-launcher-KEWU.exe'
 const INSTALLED_DIR = 'C:\\Program Files\\DSH-launcher-KEWU'
@@ -35,7 +39,7 @@ function deferred() {
 type UpdaterOptions = Parameters<typeof createLauncherUpdater>[0]
 
 /** 构造带任意资产的 Release 响应（多资产场景用）。 */
-function assetsBody(remoteTag: string, assets: Array<{ name: string; size?: number }>): unknown {
+function assetsBody(remoteTag: string, assets: Array<{ name: string; size?: number; digest?: unknown }>): unknown {
   return {
     tag_name: remoteTag,
     html_url: 'https://github.com/' + LAUNCHER_RELEASE_REPOSITORY + '/releases/tag/' + remoteTag,
@@ -43,16 +47,17 @@ function assetsBody(remoteTag: string, assets: Array<{ name: string; size?: numb
       name: asset.name,
       browser_download_url: 'https://github.com/' + LAUNCHER_RELEASE_REPOSITORY + '/releases/download/' + remoteTag + '/' + asset.name,
       size: asset.size ?? 9,
+      digest: asset.digest,
     })),
   }
 }
 
 /** 构造 /releases/latest 的响应；默认只发 Setup（这条产品线唯一的产物）。 */
-function releaseBody(remoteTag = 'v0.1.10', assetName = SETUP_KEWU, assetSize = 9): unknown {
+function releaseBody(remoteTag = 'v0.1.10', assetName = SETUP_KEWU, assetSize = 9, digest?: unknown): unknown {
   if (!assetName) {
     return { tag_name: remoteTag, html_url: 'https://github.com/' + LAUNCHER_RELEASE_REPOSITORY + '/releases/tag/' + remoteTag, assets: [] }
   }
-  return assetsBody(remoteTag, [{ name: assetName, size: assetSize }])
+  return assetsBody(remoteTag, [{ name: assetName, size: assetSize, digest }])
 }
 
 function latestFetch(body: unknown, status = 200): typeof fetch {
@@ -104,7 +109,7 @@ interface Harness {
 
 /**
  * 造一个「已下载好 Setup、可以 apply」的安装版启动器：
- * 下载目录里先放一份与资产同大小的文件，download() 会走「已存在同大小」分支，不碰网络。
+ * 下载目录里先放一份与资产摘要匹配的文件，download() 校验后直接复用。
  */
 async function readyUpdater(overrides: Partial<UpdaterOptions> = {}): Promise<Harness> {
   const userDataPath = overrides.userDataPath ?? tempUserData()
@@ -129,7 +134,7 @@ async function readyUpdater(overrides: Partial<UpdaterOptions> = {}): Promise<Ha
     getVersion: () => '1.0.4',
     userDataPath,
     getExecPath: () => INSTALLED_EXEC,
-    githubFetch: latestFetch(assetsBody('v1.1.0', [{ name: SETUP_KEWU }])),
+    githubFetch: latestFetch(releaseBody('v1.1.0', SETUP_KEWU, 9, ZERO_SETUP_DIGEST)),
     emitProgress: () => undefined,
     spawnProcess: fakeSpawn,
     exitProcess: fakeExit,
@@ -306,7 +311,7 @@ describe('createLauncherUpdater download', () => {
       getVersion: () => '0.1.9',
       userDataPath,
       getExecPath: () => INSTALLED_EXEC,
-      githubFetch: chunkedAssetFetch(3, 9),
+      githubFetch: chunkedAssetFetch(3, 9, releaseBody('v1.1.0', SETUP_KEWU, 9, CHUNKED_SETUP_DIGEST)),
       emitProgress: progress => progresses.push(progress),
     })
     await updater.check()
@@ -320,10 +325,152 @@ describe('createLauncherUpdater download', () => {
     expect(saved[0]).toBe(0x41)
   })
 
-  it('已存在同大小的安装包时不重新下载（幂等）', async () => {
+  it('复用 SHA-256 匹配的缓存，且无需下载资产', async () => {
     const { updateRoot } = await readyUpdater()
-    const saved = await readFile(path.join(updateRoot, SETUP_KEWU))
-    expect(saved[0]).toBe(0x00)
+    expect(await readFile(path.join(updateRoot, SETUP_KEWU))).toEqual(Buffer.alloc(9))
+  })
+
+  it.each([CHUNKED_SETUP_DIGEST.toUpperCase(), null])('重新下载不可验证的同大小缓存（digest=%s）', async digest => {
+    const userDataPath = tempUserData()
+    const updateRoot = path.join(userDataPath, 'launcher-update')
+    const setupPath = path.join(updateRoot, SETUP_KEWU)
+    await mkdir(updateRoot)
+    await writeFile(setupPath, Buffer.alloc(9))
+    const updater = createLauncherUpdater({
+      getVersion: () => '1.0.4',
+      userDataPath,
+      githubFetch: chunkedAssetFetch(3, 9, releaseBody('v1.1.0', SETUP_KEWU, 9, digest)),
+      emitProgress: () => undefined,
+    })
+    await updater.check()
+    expect((await updater.download()).state).toBe('downloaded')
+    expect(await readFile(setupPath)).toEqual(Buffer.alloc(9, 0x41))
+    expect(await readdir(updateRoot)).toEqual([SETUP_KEWU])
+  })
+
+  it('摘要不符时拒绝安装并清除旧缓存，保留版本信息以便重试', async () => {
+    const userDataPath = tempUserData()
+    const updateRoot = path.join(userDataPath, 'launcher-update')
+    await mkdir(updateRoot)
+    await writeFile(path.join(updateRoot, SETUP_KEWU), Buffer.alloc(9, 0x43))
+    const body = releaseBody('v1.1.0', SETUP_KEWU, 9, ZERO_SETUP_DIGEST)
+    const badFetch = chunkedAssetFetch(3, 9, body)
+    let useCorrectAsset = false
+    const updater = createLauncherUpdater({
+      getVersion: () => '1.0.4',
+      userDataPath,
+      githubFetch: async (input, init) => useCorrectAsset && String(input).includes('/releases/download/')
+        ? new Response(Buffer.alloc(9))
+        : badFetch(input, init),
+      emitProgress: () => undefined,
+    })
+    await updater.check()
+    expect(await updater.download()).toMatchObject({
+      state: 'error',
+      remoteVersion: '1.1.0',
+      assetName: SETUP_KEWU,
+      assetSize: 9,
+      message: expect.stringContaining('SHA-256 校验失败'),
+    })
+    await expect(updater.apply()).rejects.toThrow('没有已下载的启动器更新')
+    expect(await readdir(updateRoot)).toEqual([])
+    useCorrectAsset = true
+    expect((await updater.download()).state).toBe('downloaded')
+    expect(await readFile(path.join(updateRoot, SETUP_KEWU))).toEqual(Buffer.alloc(9))
+  })
+
+  it('存在但格式无效的摘要不会回退到只校验大小', async () => {
+    const userDataPath = tempUserData()
+    const updater = createLauncherUpdater({
+      getVersion: () => '1.0.4',
+      userDataPath,
+      githubFetch: chunkedAssetFetch(3, 9, releaseBody('v1.1.0', SETUP_KEWU, 9, 'sha256:invalid')),
+      emitProgress: () => undefined,
+    })
+    await updater.check()
+    expect(await updater.download()).toMatchObject({ state: 'error', message: expect.stringContaining('SHA-256 校验值无效') })
+    expect(await readdir(userDataPath)).toEqual([])
+  })
+
+  it.each(['headers', 'first byte', 'partial body', 'EOF'] as const)('下载卡在 %s 时超时并中止传输', async stage => {
+    const userDataPath = tempUserData()
+    let downloadSignal: AbortSignal | null | undefined
+    let bodyCancelled = false
+    const updater = createLauncherUpdater({
+      getVersion: () => '1.0.4',
+      userDataPath,
+      downloadIdleTimeoutMs: 40,
+      githubFetch: async (input, init) => {
+        if (String(input).endsWith('/releases/latest')) return new Response(JSON.stringify(releaseBody('v1.1.0')))
+        downloadSignal = init?.signal
+        if (stage === 'headers') return new Promise<Response>(() => undefined)
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            if (stage === 'partial body') controller.enqueue(Buffer.alloc(3))
+            if (stage === 'EOF') controller.enqueue(Buffer.alloc(9))
+          },
+          cancel() { bodyCancelled = true },
+        }), { headers: { 'content-length': '9' } })
+      },
+      emitProgress: () => undefined,
+    })
+    await updater.check()
+    expect(await updater.download()).toMatchObject({ state: 'error', message: expect.stringContaining('下载超时') })
+    expect(downloadSignal).toMatchObject({ aborted: true })
+    expect(bodyCancelled).toBe(stage !== 'headers')
+    expect(await readdir(userDataPath)).toEqual([])
+  })
+
+  it('持续收到数据时允许下载超过单次空闲时限', async () => {
+    const userDataPath = tempUserData()
+    const started = deferred()
+    let stream!: ReadableStreamDefaultController<Uint8Array>
+    vi.useFakeTimers()
+    try {
+      const updater = createLauncherUpdater({
+        getVersion: () => '1.0.4',
+        userDataPath,
+        downloadIdleTimeoutMs: 100,
+        githubFetch: async input => {
+          if (String(input).endsWith('/releases/latest')) return new Response(JSON.stringify(releaseBody('v1.1.0')))
+          return new Response(new ReadableStream<Uint8Array>({
+            start(controller) {
+              stream = controller
+              started.resolve()
+            },
+          }))
+        },
+        emitProgress: () => undefined,
+      })
+      await updater.check()
+      const download = updater.download()
+      await started.promise
+      for (let i = 0; i < 3; i++) {
+        await vi.advanceTimersByTimeAsync(60)
+        stream.enqueue(Buffer.alloc(3))
+      }
+      await vi.advanceTimersByTimeAsync(60)
+      stream.close()
+      expect((await download).state).toBe('downloaded')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('无法原子替换目标时清理临时文件', async () => {
+    const userDataPath = tempUserData()
+    const updateRoot = path.join(userDataPath, 'launcher-update')
+    const setupPath = path.join(updateRoot, SETUP_KEWU)
+    const updater = createLauncherUpdater({
+      getVersion: () => '1.0.4',
+      userDataPath,
+      githubFetch: chunkedAssetFetch(3, 9, releaseBody('v1.1.0')),
+      emitProgress: () => { mkdirSync(setupPath, { recursive: true }) },
+    })
+    await updater.check()
+    expect((await updater.download()).state).toBe('error')
+    expect(await readdir(updateRoot)).toEqual([SETUP_KEWU])
+    expect(await readdir(setupPath)).toEqual([])
   })
 
   it('没有待更新时原样返回当前状态', async () => {
@@ -340,6 +487,7 @@ describe('createLauncherUpdater download', () => {
   })
 
   it('下载字节数与资产大小不符时进 error 状态', async () => {
+    const userDataPath = tempUserData()
     const lying = (async input => {
       const url = String(input)
       if (url.endsWith('/releases/latest')) return new Response(JSON.stringify(releaseBody('v1.1.0')), { status: 200 })
@@ -356,7 +504,7 @@ describe('createLauncherUpdater download', () => {
     }) as typeof fetch
     const updater = createLauncherUpdater({
       getVersion: () => '1.0.4',
-      userDataPath: tempUserData(),
+      userDataPath,
       getExecPath: () => INSTALLED_EXEC,
       githubFetch: lying,
       emitProgress: () => undefined,
@@ -365,6 +513,7 @@ describe('createLauncherUpdater download', () => {
     const status = await updater.download()
     expect(status.state).toBe('error')
     expect(status.message).toContain('下载内容不完整')
+    expect(await readdir(userDataPath)).toEqual([])
   })
 })
 
@@ -572,6 +721,15 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
     await expect(updater.apply()).rejects.toThrow(APPLY_STOP_PACKS_TIMEOUT_MESSAGE)
     expect(spawned).toHaveLength(0)
     expect(exitCodes).toHaveLength(0)
+  })
+
+  it('交接前拒绝下载后被替换的同大小安装包', async () => {
+    const { updater, updateRoot, calls, spawned } = await readyUpdater()
+    await writeFile(path.join(updateRoot, SETUP_KEWU), Buffer.alloc(9, 1))
+    await expect(updater.apply()).rejects.toThrow('安装包校验失败')
+    expect(calls).toEqual([])
+    expect(spawned).toEqual([])
+    await expect(updater.apply()).rejects.toThrow('没有已下载的启动器更新')
   })
 
   it('安装包没下载完就 apply 时抛中文错误', async () => {

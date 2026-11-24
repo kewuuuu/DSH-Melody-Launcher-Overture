@@ -72,7 +72,7 @@ export function PluginAddDialog({ profileName, onClose, onInstalled, desktop = f
         <input
           type="text"
           value={value}
-          autoFocus
+          data-modal-autofocus
           disabled={busy}
           placeholder="https://github.com/owner/dsh-example 或 @scope/dsh-example@1.2.3"
           onChange={event => { setValue(event.target.value); setError(null) }}

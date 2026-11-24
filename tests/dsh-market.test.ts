@@ -128,6 +128,113 @@ function registryResponse(plugins: Array<{ name: string; owner: string; url: str
   } as unknown as Response
 }
 
+it('checks and updates the exact npm dependency using only the target profile', async () => {
+  const { root, profileDir } = await tempProfile()
+  const targetName = 'pack-b'
+  const targetDir = path.join(root, 'profiles', targetName)
+  const packageName = '@owner/demo'
+  const entry = { name: 'demo', owner: 'owner', url: 'https://github.com/owner/demo', category: 'plugin', npm: packageName }
+  const manifest = { dependencies: { [packageName]: '^1.0.0-rc.2', '@unrelated/demo': '0.0.1' }, dsh: { profile: { bundles: [] as string[] } } }
+  const pluginManifest = (dir: string, name = packageName) => path.join(dir, 'node_modules', name, 'package.json')
+  async function writePlugin(dir: string, version: string, name = packageName, declaredName = name) {
+    const file = pluginManifest(dir, name)
+    await mkdir(path.dirname(file), { recursive: true })
+    await writeFile(file, JSON.stringify({ name: declaredName, version, dsh: { bundle: 'dist/index.js' } }))
+  }
+  const requests: string[] = []
+  const calls: Array<{ args: string[]; home?: string }> = []
+  let registryName = packageName
+  let reportSuccessWithoutUpdate = false
+  const service = createDshMarketService({
+    targeted: true,
+    readSettings: async () => ({ ...marketSettings, dshHome: root, profileName: targetName }),
+    prepareNodeRuntime: async () => ({ root, node: 'node', npm: 'npm', npx: 'npx', managed: false }),
+    preparePnpmRuntime: async () => ({ root, executable: 'pnpm' }),
+    fetchImpl: async input => {
+      requests.push(String(input))
+      return String(input).endsWith('/latest')
+        ? Response.json({ name: registryName, version: '1.0.0-rc.10' })
+        : registryResponse([entry])
+    },
+    runCommand: async (_executable, args, options) => {
+      calls.push({ args, home: options.env.DSH_HOME })
+      if (!reportSuccessWithoutUpdate && args.includes('add')) {
+        await writePlugin(targetDir, '1.0.0-rc.10')
+        await writeFile(path.join(targetDir, 'package.json'), JSON.stringify({ ...manifest, dsh: { profile: { bundles: [packageName] } } }))
+      }
+      return { exitCode: 0, output: '' }
+    },
+    emitProgress: () => undefined,
+    emitOutput: () => undefined,
+  })
+  try {
+    await writePlugin(profileDir, '1.0.0-rc.10')
+    const activeManifest = await readFile(path.join(profileDir, 'package.json'), 'utf8')
+    const activePlugin = await readFile(pluginManifest(profileDir), 'utf8')
+    await writePlugin(targetDir, '0.0.1', '@unrelated/demo')
+    const targetManifest = path.join(targetDir, 'package.json')
+    await writeFile(targetManifest, JSON.stringify({ dependencies: { '@unrelated/demo': '0.0.1' } }))
+    expect((await service.load(true)).plugins[0]).toMatchObject({ installed: false, updateAvailable: false })
+    expect(requests.some(url => url.endsWith('/latest'))).toBe(false)
+    await writeFile(targetManifest, JSON.stringify(manifest))
+    await writePlugin(targetDir, '1.0.0-rc.2', packageName, '@wrong/demo')
+    expect((await service.load(true)).plugins[0]).toMatchObject({ installed: false, version: null, updateAvailable: false })
+    await writePlugin(targetDir, '1.0.0-rc.2')
+    await writeFile(targetManifest, JSON.stringify({ ...manifest, dependencies: { [packageName]: 'file:../../source' } }))
+    expect((await service.load(true)).plugins[0]).toMatchObject({ installed: true, version: '1.0.0-rc.2', updateAvailable: false })
+    await writeFile(targetManifest, JSON.stringify(manifest))
+    registryName = '@unrelated/demo'
+    expect((await service.load(true)).plugins[0]).toMatchObject({ updateAvailable: false, updateVersion: null })
+    registryName = packageName
+    expect((await service.load(true)).plugins[0]).toMatchObject({ packageName, enabled: false, version: '1.0.0-rc.2', updateAvailable: true, updateVersion: '1.0.0-rc.10' })
+    await expect(service.update(entry.name, { url: entry.url, packageName: '@unrelated/demo' })).rejects.toThrow('插件身份已变更')
+    await expect(service.update(entry.name, { url: 'https://github.com/other/demo', packageName })).rejects.toThrow('不在')
+    expect(calls).toHaveLength(0)
+    reportSuccessWithoutUpdate = true
+    await expect(service.update(entry.name, { url: entry.url, packageName })).rejects.toThrow('未在目标整合包中检测到指定的更新版本')
+    reportSuccessWithoutUpdate = false
+    await service.update(entry.name, { url: entry.url, packageName })
+    expect(calls).toEqual(Array.from({ length: 2 }, () => ({ home: root, args: ['plugin', '--profile', targetName, 'add', packageName + '@1.0.0-rc.10'] })))
+    expect((await service.load(true)).plugins[0]).toMatchObject({ enabled: false, version: '1.0.0-rc.10', updateAvailable: false })
+    expect(await readFile(path.join(profileDir, 'package.json'), 'utf8')).toBe(activeManifest)
+    expect(await readFile(pluginManifest(profileDir), 'utf8')).toBe(activePlugin)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('requires the exact monorepo directory to recognize a Git-only entry installed from npm', async () => {
+  const { root, profileDir } = await tempProfile()
+  const entry = { name: 'demo#bundle', owner: 'owner', url: 'https://github.com/owner/demo/tree/main/packages/bundle', category: 'plugin' }
+  const name = '@published/bundle'
+  const installed = path.join(profileDir, 'node_modules', name)
+  const service = createDshMarketService({
+    targeted: true,
+    readSettings: async () => ({ ...marketSettings, dshHome: root }),
+    prepareNodeRuntime: async () => { throw new Error('not used while reading') },
+    preparePnpmRuntime: async () => { throw new Error('not used while reading') },
+    fetchImpl: async input => String(input).endsWith('/latest') ? Response.json({ name, version: '2.0.0' }) : registryResponse([entry]),
+    emitProgress: () => undefined,
+    emitOutput: () => undefined,
+  })
+  const dependency = async (spec: string) => writeFile(path.join(profileDir, 'package.json'), JSON.stringify({ dependencies: { [name]: spec } }))
+  const packageFile = async (directory: string) => writeFile(path.join(installed, 'package.json'), JSON.stringify({ name, version: '1.0.0', repository: { url: 'git+https://github.com/owner/demo.git', directory } }))
+  try {
+    await mkdir(installed, { recursive: true })
+    await dependency('^1.0.0')
+    await packageFile('packages/other')
+    expect((await service.load(true)).plugins[0]).toMatchObject({ installed: false })
+    await packageFile('packages/bundle')
+    expect((await service.load(true)).plugins[0]).toMatchObject({ installed: true, npm: name, packageName: name, updateAvailable: true })
+    await dependency('github:owner/demo#path:/packages/other')
+    expect((await service.load(true)).plugins[0]).toMatchObject({ installed: false })
+    await dependency('github:owner/demo#path:/packages/bundle')
+    expect((await service.load(true)).plugins[0]).toMatchObject({ installed: true, npm: null, packageName: name, updateAvailable: false })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 describe('dsh-market network & recovery paths', () => {
   const node = async () => ({ root: 'C:/node', node: 'C:/node/node.exe', npm: 'C:/node/npm.cmd', npx: 'C:/node/npx.cmd', managed: true })
   const pnpm = async () => ({ root: 'C:/pnpm', executable: 'C:/pnpm/pnpm.cmd' })

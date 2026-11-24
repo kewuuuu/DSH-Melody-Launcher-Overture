@@ -127,9 +127,24 @@ export function createLauncherControl(options: {
         }
         throw new Error('Skill not found in source repository')
       }
+      const market = createDshMarketService({
+        readSettings: async () => target,
+        prepareNodeRuntime: options.prepareNodeRuntime,
+        preparePnpmRuntime: options.preparePnpmRuntime,
+        fetchImpl: options.fetchImpl,
+        cachePath: path.join(userData, 'dsh-market-cache.json'),
+        packageStoreRoot: path.join(userData, 'plugin-store'),
+        emitProgress: () => undefined,
+        emitOutput: (_level, text) => options.emitOutput(text),
+        targeted: true,
+      })
+      if (command === 'pack.market.catalog') return market.load(args.checkUpdates === true)
       if (typeof args.name !== 'string' || !args.name.trim()) throw new Error('Market plugin name required')
-      const market = createDshMarketService({ readSettings: async () => target, prepareNodeRuntime: options.prepareNodeRuntime, preparePnpmRuntime: options.preparePnpmRuntime, fetchImpl: options.fetchImpl, packageStoreRoot: path.join(userData, 'plugin-store'), emitProgress: () => undefined, emitOutput: (_level, text) => options.emitOutput(text) })
-      if (command === 'pack.market.install') return market.install(args.name)
+      if (command === 'pack.market.install') return market.install(args.name, typeof args.url === 'string' ? { url: args.url } : undefined)
+      if (command === 'pack.market.update') {
+        if (typeof args.url !== 'string' || typeof args.packageName !== 'string') throw new Error('Market plugin identity required')
+        return market.update(args.name, { url: args.url, packageName: args.packageName })
+      }
       if (command === 'pack.market.remove') return installer.remove(args.name, target.profileName)
       throw new Error('Unsupported targeted market command')
     },
