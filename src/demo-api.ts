@@ -17,6 +17,7 @@ import type {
   CustomApiProvider,
   DshInstallationStatus,
   DshMarketCatalog,
+  DshMarketCompatibilityEntry,
   DesktopPluginState,
   DshMarketProgress,
   DshUpdateStatus,
@@ -187,6 +188,15 @@ let demoDshMarketPlugins: DshMarketCatalog['plugins'] = [
   { name: 'dsh-message-rail', owner: 'wx-yss', url: 'https://github.com/wx-yss/dsh-message-rail', category: 'ui', description: { zh: '会话消息导航栏。', en: 'Session message navigation rail.' }, npm: 'dsh-message-rail', stars: 2, added: '2026-08-15', install: 'dsh plugin add dsh-message-rail', installed: false, enabled: false, version: null, updateAvailable: false, updateVersion: null },
   { name: 'dsh-web-mobile', owner: 'mexiaosqwq', url: 'https://github.com/mexiaosqwq/dsh-web-mobile', category: 'ui', description: { zh: '移动端 Web UI 适配。', en: 'Mobile-adaptive Web UI.' }, npm: null, stars: 15, added: '2026-08-15', install: 'dsh plugin add github:mexiaosqwq/dsh-web-mobile', installed: false, enabled: false, version: null, updateAvailable: false, updateVersion: null },
 ]
+
+function demoMarketCompatibility(plugin: DshMarketCatalog['plugins'][number], dshVersion: string | null): DshMarketCompatibilityEntry {
+  const { name, url } = plugin
+  if (!dshVersion || name === 'dsh-explorer') return { name, url, status: 'unknown', version: null, latestVersion: null }
+  if (name === 'dsh-web-mobile') return { name, url, status: 'incompatible', version: null, latestVersion: '2.0.0' }
+  const latestVersion = '1.2.0'
+  const version = dshVersion === '0.1.2-rc.1' ? '1.0.0' : dshVersion === '0.1.5-rc.1' ? '1.1.0' : latestVersion
+  return { name, url, status: 'compatible', version, latestVersion }
+}
 
 let demoRuntime: RuntimeState = { running: false, pid: null, startedAt: null, url: null, port: null }
 let demoCredential: CredentialStatus = { configured: false }
@@ -855,10 +865,18 @@ export const demoApi: LauncherApi = {
     }
     if (command === 'pack.market.catalog') {
       const catalog = demoDshMarketCatalog()
-      return { ...catalog, plugins: catalog.plugins.map(plugin => {
+      return { ...catalog, dshVersion: pack.dshVersion, plugins: catalog.plugins.map(plugin => {
         const installed = (resources.plugins as ManagedPlugin[]).find(item => item.packageName === (plugin.npm ?? plugin.name))
-        const updateAvailable = args.checkUpdates === true && plugin.npm !== null && installed?.version === '1.0.0'
-        return { ...plugin, packageName: installed?.packageName, installed: Boolean(installed), enabled: installed?.enabled ?? false, version: installed?.version ?? null, updateAvailable, updateVersion: updateAvailable ? '1.1.0' : null }
+        const compatible = demoMarketCompatibility(plugin, pack.dshVersion)
+        const updateVersion = args.checkUpdates === true && installed?.version === '1.0.0' && compatible.version !== '1.0.0' ? compatible.version : null
+        return { ...plugin, packageName: installed?.packageName, installed: Boolean(installed), enabled: installed?.enabled ?? false, version: installed?.version ?? null, updateAvailable: Boolean(updateVersion), updateVersion }
+      }) }
+    }
+    if (command === 'pack.market.compatibility') {
+      if (!Array.isArray(args.entries) || args.entries.length > 48) throw new Error('Invalid compatibility entries')
+      return { dshVersion: pack.dshVersion, entries: args.entries.map(entry => {
+        const plugin = demoDshMarketPlugins.find(item => item.name === entry.name && item.url === entry.url)
+        return plugin ? demoMarketCompatibility(plugin, pack.dshVersion) : { name: entry.name, url: entry.url, status: 'unknown', version: null, latestVersion: null }
       }) }
     }
     if (command === 'pack.market.install' || command === 'pack.market.update') {
@@ -867,12 +885,14 @@ export const demoApi: LauncherApi = {
       const items = resources.plugins as ManagedPlugin[]
       const packageName = plugin.npm ?? plugin.name
       const installed = items.find(item => item.packageName === packageName)
+      const { version } = demoMarketCompatibility(plugin, pack.dshVersion)
+      if (!version || (args.expectedVersion !== undefined && args.expectedVersion !== version)) throw new Error('No matching compatible version')
       if (command === 'pack.market.update') {
-        if (packageName !== args.packageName || !plugin.npm || installed?.version !== '1.0.0') throw new Error('No available update')
-        installed.version = '1.1.0'
+        if (packageName !== args.packageName || installed?.version !== '1.0.0' || installed.version === version) throw new Error('No available update')
+        installed.version = version
       } else {
         if (installed) throw new Error('Plugin already installed')
-        items.push({ packageName, displayName: plugin.name, version: '1.0.0', description: plugin.description.zh ?? '', repository: plugin.url, enabled: true, builtin: false, locked: false, compatible: true, order: null })
+        items.push({ packageName, displayName: plugin.name, version, description: plugin.description.zh ?? '', repository: plugin.url, enabled: true, builtin: false, locked: false, compatible: true, order: null })
       }
       return { installed: true }
     }

@@ -1345,6 +1345,20 @@ export interface DshMarketCatalog {
   count: number
   categories: Record<string, Record<string, string>>
   plugins: DshMarketPlugin[]
+  dshVersion?: string | null
+}
+
+export interface DshMarketCompatibilityEntry {
+  name: string
+  url: string
+  status: 'compatible' | 'incompatible' | 'unknown'
+  version: string | null
+  latestVersion: string | null
+}
+
+export interface DshMarketCompatibility {
+  dshVersion: string | null
+  entries: DshMarketCompatibilityEntry[]
 }
 
 export interface DshMarketUpdateStatus {

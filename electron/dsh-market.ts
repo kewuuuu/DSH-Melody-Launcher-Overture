@@ -4,6 +4,7 @@ import path from 'node:path'
 import type {
   AppSettings,
   DshMarketCatalog,
+  DshMarketCompatibility,
   DshMarketInstalledPlugin,
   DshMarketPlugin,
   DshMarketProgress,
@@ -18,7 +19,8 @@ import {
   requestNpmMetadata,
 } from './proxy'
 import { readProfile, repositoryFullNameFromSpecifier, togglePlugin } from './profile'
-import { compareDshVersions } from '../src/lib/dsh-version'
+import { gt } from 'semver'
+import { createMarketMetadataLookup, isExactPluginVersion, knownRuntimeVersion, selectCompatiblePluginVersion } from './dsh-market-compatibility'
 import { resolveNodeExecutable, type NodeRuntime, type PnpmRuntime } from './node-runtime'
 import { withExecutableDirectoryOnPath } from './process'
 
@@ -72,6 +74,27 @@ export interface DshMarketOptions {
   /** 目录磁盘缓存路径（userData/dsh-market-cache.json），缺省则只用内存缓存。 */
   cachePath?: string
   targeted?: boolean
+  metadataLookup?: ReturnType<typeof createMarketMetadataLookup>
+}
+
+type MarketEntryKey = { name: string; url: string }
+type MutationIdentity = { url?: string; packageName?: string; expectedVersion?: string }
+
+function marketEntryKey(entry: MarketEntryKey): string {
+  return JSON.stringify([entry.name, entry.url])
+}
+
+export function parseMarketCompatibilityEntries(value: unknown): MarketEntryKey[] {
+  if (!Array.isArray(value)) throw new Error('Market compatibility entries must be an array')
+  const unique = new Map<string, MarketEntryKey>()
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.name !== 'string' || !item.name.trim()
+      || typeof item.url !== 'string' || !item.url.trim()) throw new Error('Invalid market compatibility entry')
+    const entry = { name: item.name, url: item.url }
+    unique.set(marketEntryKey(entry), entry)
+    if (unique.size > 48) throw new Error('Market compatibility accepts at most 48 unique entries')
+  }
+  return [...unique.values()]
 }
 
 interface RegistryPlugin {
@@ -172,7 +195,12 @@ function findTargetInstalledAlias(entry: RegistryPlugin, records: InstalledRecor
   if (npm && NPM_NAME.test(npm)) {
     const record = records.find(item => item.manifestMatches && item.name === npm)
     if (!record || /^npm:/i.test(record.spec)) return null
-    return !/^github:/i.test(record.spec) || matchesTargetGitSource(entry, record.spec) ? npm : null
+    if (/^github:/i.test(record.spec)) return matchesTargetGitSource(entry, record.spec) ? npm : null
+    if (entry.npm == null && record.repository?.directory != null) {
+      const source = parseDshMarketSourceUrl(entry.url)
+      if (!source || record.repository.name.toLowerCase() !== source.repo.toLowerCase() || record.repository.directory !== source.subpath) return null
+    }
+    return npm
   }
   const source = parseDshMarketSourceUrl(entry.url)
   const matches = records.filter(record => record.manifestMatches && (
@@ -183,9 +211,6 @@ function findTargetInstalledAlias(entry: RegistryPlugin, records: InstalledRecor
   ))
   return matches.length === 1 ? matches[0].name : null
 }
-
-const TARGET_SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
-const isTargetVersion = (version: unknown): version is string => typeof version === 'string' && NPM_VERSION.test(version) && TARGET_SEMVER.test(version)
 
 export function compareDshMarketVersions(left: string | null, right: string | null): number | null {
   if (!left || !right) return null
@@ -249,6 +274,7 @@ function describeMarketFailure(entry: RegistryPlugin, exitCode: number, output: 
 export function createDshMarketService(options: DshMarketOptions) {
   const fetchImpl = options.fetchImpl ?? fetch
   const execute = options.runCommand ?? runCommand
+  const metadata = options.metadataLookup ?? createMarketMetadataLookup(fetchImpl)
   let catalogCache: Registry | null = null
   let catalogFetchedAt = 0
   let catalogValidator: string | null = null
@@ -363,14 +389,47 @@ export function createDshMarketService(options: DshMarketOptions) {
     ? findTargetInstalledAlias(entry, installed.records, npm ?? entry.npm)
     : findDshMarketInstalledAlias(entry, installed.map, npm)
 
-  async function targetUpdateStatus(npm: string, record: InstalledRecord): Promise<DshMarketUpdateStatus> {
-    let latest: string | null = null
-    if (record.name === npm && NPM_NAME.test(npm) && isNpmRegistrySpec(record.spec) && isTargetVersion(record.version)) {
-      const response = await requestNpmMetadata('/' + encodeURIComponent(npm) + '/latest', fetchImpl)
-      const metadata = response.ok ? await response.json() as { name?: unknown; version?: unknown } : null
-      if (metadata?.name === npm && isTargetVersion(metadata.version)) latest = metadata.version
+  async function targetNpmName(entry: RegistryPlugin, fresh: boolean): Promise<string | null> {
+    if (entry.npm != null) return typeof entry.npm === 'string' && NPM_NAME.test(entry.npm) ? entry.npm : null
+    const source = parseDshMarketSourceUrl(entry.url)
+    if (!source?.subpath || (source.branch !== null && !/^[A-Za-z0-9_.-]+$/.test(source.branch))) return null
+    const { repo, branch, subpath } = source
+    return metadata.gitName(entry.url, fresh, async () => (await fetchSubpackageManifest(repo, branch, subpath, fresh))?.name ?? null)
+  }
+
+  async function targetCatalogNpmName(entry: RegistryPlugin, records: InstalledRecord[]): Promise<string | null> {
+    if (entry.npm != null) return targetNpmName(entry, false)
+    const cached = metadata.cachedGitName(entry.url)
+    if (cached) return cached
+    const source = parseDshMarketSourceUrl(entry.url)
+    if (!source?.subpath || !records.some(record => record.manifestMatches && isNpmRegistrySpec(record.spec)
+      && record.repository?.name.toLowerCase() === source.repo.toLowerCase()
+      && (record.repository.directory === null || record.repository.directory === source.subpath))) return null
+    return targetNpmName(entry, false)
+  }
+
+  async function targetSelection(entry: RegistryPlugin | undefined, runtime: string | null, fresh = false) {
+    const npm = entry && runtime ? await targetNpmName(entry, fresh) : null
+    const packument = npm ? await metadata.get(npm, fresh) : null
+    return { npm, ...selectCompatiblePluginVersion(packument, npm ?? '', runtime) }
+  }
+
+  async function compatibility(requests: MarketEntryKey[]): Promise<DshMarketCompatibility> {
+    if (!options.targeted) throw new Error('Pack target required for compatibility checks')
+    const dshVersion = knownRuntimeVersion((await options.readSettings()).dshVersion)
+    const registry = dshVersion && requests.length > 0 ? await ensureRegistry().catch(() => null) : null
+    const entries = new Map<string, RegistryPlugin | undefined>()
+    for (const entry of registry?.plugins ?? []) {
+      const key = marketEntryKey(entry)
+      entries.set(key, entries.has(key) ? undefined : entry)
     }
-    return { kind: 'npm', current: record.version, latest, updateAvailable: latest !== null && record.version !== null && compareDshVersions(record.version, latest) < 0 }
+    return {
+      dshVersion,
+      entries: await Promise.all(requests.map(async request => {
+        const { status, version, latestVersion } = await targetSelection(entries.get(marketEntryKey(request)), dshVersion)
+        return { ...request, status, version, latestVersion }
+      })),
+    }
   }
 
   async function buildCatalog(checkTargetUpdates = false): Promise<DshMarketCatalog> {
@@ -378,8 +437,11 @@ export function createDshMarketService(options: DshMarketOptions) {
     const registry = checkTargetUpdates ? await loadRegistry() : await ensureRegistry()
     const settings = await options.readSettings()
     const installed = await readInstalled(settings)
-    const plugins = registry.plugins!.map((entry): DshMarketPlugin => {
-      const npm = npmAliasByName.get(entry.name) ?? entry.npm ?? null
+    const dshVersion = options.targeted ? knownRuntimeVersion(settings.dshVersion) : null
+    const plugins = await Promise.all(registry.plugins!.map(async (entry): Promise<DshMarketPlugin> => {
+      const npm = options.targeted
+        ? await targetCatalogNpmName(entry, installed.records)
+        : npmAliasByName.get(entry.name) ?? entry.npm ?? null
       const alias = installedAlias(entry, installed, npm)
       const record = alias ? installed.records.find(item => item.name === alias) : undefined
       return {
@@ -399,20 +461,20 @@ export function createDshMarketService(options: DshMarketOptions) {
         updateAvailable: false,
         updateVersion: null,
       }
-    })
-    if (checkTargetUpdates) {
+    }))
+    if (checkTargetUpdates && dshVersion) {
       const records = new Map(installed.records.map(record => [record.name, record]))
-      await Promise.all(plugins.map(async plugin => {
+      await Promise.all(plugins.map(async (plugin, index) => {
         const record = plugin.packageName ? records.get(plugin.packageName) : undefined
-        if (!plugin.npm || !record) return
-        try {
-          const status = await targetUpdateStatus(plugin.npm, record)
-          plugin.updateAvailable = status.updateAvailable
-          plugin.updateVersion = status.latest
-        } catch { /* Registry unavailable. */ }
+        if (!record || !isNpmRegistrySpec(record.spec) || !isExactPluginVersion(record.version)) return
+        const { npm, version } = await targetSelection(registry.plugins![index], dshVersion)
+        if (npm !== record.name || !version || !gt(version, record.version)) return
+        plugin.updateAvailable = true
+        plugin.updateVersion = version
       }))
     }
     return {
+      ...(options.targeted ? { dshVersion } : {}),
       updated: registry.updated ?? '',
       count: registry.count ?? plugins.length,
       categories: registry.categories ?? {},
@@ -426,9 +488,11 @@ export function createDshMarketService(options: DshMarketOptions) {
     const pnpm = await options.preparePnpmRuntime(node)
     const executable = resolveNodeExecutable(settings.launchExecutable, node)
     const packageIndex = settings.launchArgs.indexOf(DSH_PACKAGE_NAME)
+    const runtimeVersion = options.targeted ? knownRuntimeVersion(settings.dshVersion) : null
+    const runtimePackage = runtimeVersion ? DSH_PACKAGE_NAME + '@' + runtimeVersion.replace(/^v/, '') : DSH_PACKAGE_NAME
     const prefix = packageIndex >= 0
-      ? settings.launchArgs.slice(0, packageIndex + 1)
-      : path.basename(executable).toLowerCase().startsWith('dsh') ? [] : ['--yes', DSH_PACKAGE_NAME]
+      ? [...settings.launchArgs.slice(0, packageIndex), runtimePackage]
+      : path.basename(executable).toLowerCase().startsWith('dsh') ? [] : ['--yes', runtimePackage]
     const commandArgs = [...prefix, 'plugin', '--profile', settings.profileName, ...args]
     // git 源插件（github:/git+ 或带 #path:）的仓库在 github/codeload，换 npm 注册表解决不了，
     // 网络失败时直接失败走 npm 回退，避免白等一次。
@@ -563,10 +627,11 @@ export function createDshMarketService(options: DshMarketOptions) {
   }
 
   /** 读取仓库子包的 package.json，得到 npm 包名与版本；GitHub 不可达时返回 null。 */
-  async function fetchSubpackageManifest(repo: string, branch: string | null, subpath: string): Promise<{ name: string | null; version: string | null } | null> {
+  async function fetchSubpackageManifest(repo: string, branch: string | null, subpath: string, fresh = false): Promise<{ name: string | null; version: string | null } | null> {
     try {
       const manifestUrl = `https://raw.githubusercontent.com/${repo}/${branch ?? 'HEAD'}/${subpath}/package.json`
       const response = await fetchImpl(manifestUrl, {
+        ...(fresh ? { cache: 'no-store' as const } : {}),
         headers: { accept: 'application/json', 'user-agent': 'dsh-melody-launcher/dsh-market' },
         signal: AbortSignal.timeout(15_000),
       })
@@ -641,14 +706,55 @@ export function createDshMarketService(options: DshMarketOptions) {
     } catch { return null }
   }
 
-  async function mutate(name: string, action: 'install' | 'update' | 'uninstall', identity?: { url?: string; packageName?: string }): Promise<DshMarketInstalledPlugin[]> {
+  async function mutateTarget(
+    entry: RegistryPlugin,
+    action: 'install' | 'update',
+    identity: MutationIdentity | undefined,
+    settings: AppSettings,
+    before: Awaited<ReturnType<typeof readInstalled>>,
+  ): Promise<DshMarketInstalledPlugin[]> {
+    progress(entry.name, 'checking', '正在核对 dsh-market 来源与 DSH 兼容版本', 8)
+    const { npm, version } = await targetSelection(entry, knownRuntimeVersion(settings.dshVersion), true)
+    if (!npm || !version) throw new Error('无法确定适用于目标 DSH 的插件版本，请刷新目录。')
+    if (identity?.expectedVersion !== undefined && identity.expectedVersion !== version) {
+      throw new Error('兼容插件版本已变更，请刷新目录。')
+    }
+    const alias = installedAlias(entry, before, npm)
+    const record = before.records.find(item => item.name === alias)
+    if (action === 'install') {
+      if (alias) throw new Error('插件已安装（' + alias + '）。')
+      if (Object.hasOwn(before.map, npm) || Object.hasOwn(before.map, entry.name)) throw new Error('同名冲突：当前整合包已安装同名插件。')
+    } else {
+      if (!record || !isNpmRegistrySpec(record.spec) || record.name !== npm || identity?.packageName !== npm) throw new Error('插件身份已变更，请刷新目录。')
+      if (!isExactPluginVersion(record.version) || !gt(version, record.version)) throw new Error('目标整合包没有可用的插件更新，请刷新目录。')
+    }
+    const result = await runPlugin(entry.name, ['add', npm + '@' + version], entry.url)
+    if (result.exitCode !== 0) throw new Error(describeMarketFailure(entry, result.exitCode, result.output))
+    const after = await readInstalled(settings)
+    if (!after.records.some(item => item.name === npm && item.manifestMatches && isNpmRegistrySpec(item.spec) && item.version === version)) {
+      throw new Error('未在目标整合包中检测到指定的插件版本。')
+    }
+    const profile = await readProfile(settings.dshHome, settings.profileName)
+    const component = profile.plugins.find(item => item.packageName === npm)
+    if (action === 'update' && record && !record.enabled) {
+      if (component?.enabled) await togglePlugin(settings.dshHome, settings.profileName, npm, false)
+    }
+    if (!component?.compatible) throw new Error('插件已下载，但没有检测到可加载的 DSH Bundle。')
+    if (action === 'install' || record?.enabled) await ensureProfileBundleEnabled(npm)
+    progress(entry.name, 'verifying', '正在刷新 dsh-market 安装状态', 94)
+    const catalog = await buildCatalog()
+    progress(entry.name, 'complete', action === 'install' ? '插件安装完成' : '插件更新完成', 100)
+    return catalog.plugins.filter(item => item.installed)
+  }
+
+  async function mutate(name: string, action: 'install' | 'update' | 'uninstall', identity?: MutationIdentity): Promise<DshMarketInstalledPlugin[]> {
     if (active) throw new Error('dsh-market 正在执行另一个插件操作，请等待完成。')
     active = true
     try {
       // 装已知插件不该依赖目录此刻能被拉下来：ensureRegistry 会先吃 30 分钟的磁盘缓存，
       // 只有冷启动没缓存时才真的联网（loadRegistry 拉不到就整句「目录为空」，装不上任何插件）。
       const registry = await ensureRegistry()
-      const matches = registry.plugins!.filter(item => identity
+      const matches = registry.plugins!.filter(item => identity?.url !== undefined
         ? item.name === name && item.url === identity.url
         : item.name === name || item.npm === name)
       const entry = options.targeted && matches.length !== 1 ? undefined : matches[0]
@@ -657,18 +763,13 @@ export function createDshMarketService(options: DshMarketOptions) {
       if (!target) throw new Error('dsh-market 不支持此插件的来源地址。')
       const settings = await options.readSettings()
       const before = await readInstalled(settings)
+      if (options.targeted && action !== 'uninstall') {
+        return await mutateTarget(entry, action, identity, settings, before)
+      }
       const npmAlias = npmAliasByName.get(entry.name) ?? entry.npm
       const alias = installedAlias(entry, before, npmAlias)
-      if (action === 'install' && alias) throw new Error(`插件已安装（${alias}）。`)
+      if (action === 'install' && alias) throw new Error('插件已安装（' + alias + '）。')
       if (action === 'update' && !alias) throw new Error('插件尚未安装，不能更新。')
-      let targetVersion: string | null = null
-      if (options.targeted && action === 'update') {
-        const record = before.records.find(item => item.name === alias)
-        if (!record || identity?.packageName !== alias) throw new Error('插件身份已变更，请刷新目录。')
-        const status = await targetUpdateStatus(npmAlias ?? record.name, record)
-        if (!status.updateAvailable || !status.latest) throw new Error('目标整合包没有可用的插件更新，请刷新目录。')
-        targetVersion = status.latest
-      }
       if (action === 'install' && alias === null) {
         const names = [npmAlias ?? '', entry.name].filter((value): value is string => typeof value === 'string' && value !== '')
         const collision = names.find(value => before.map[value] !== undefined)
@@ -679,11 +780,11 @@ export function createDshMarketService(options: DshMarketOptions) {
       // 否则 git 依赖拿不到可比 semver，DSH 会永远提示「有更新」。
       const source = parseDshMarketSourceUrl(entry.url)
       const gitSubpathTarget = target.startsWith('github:') && target.includes('#path:/') && source !== null
-      const preferred = targetVersion === null && action !== 'uninstall' && gitSubpathTarget
+      const preferred = action !== 'uninstall' && gitSubpathTarget
         ? await npmPreferredTargetForGitSubpackage(entry, source)
         : null
       const npmFirstTried = preferred !== null
-      let result = await runPlugin(name, action === 'uninstall' ? ['remove', alias ?? name] : ['add', targetVersion === null ? preferred ?? target : alias + '@' + targetVersion], entry.url)
+      let result = await runPlugin(name, action === 'uninstall' ? ['remove', alias ?? name] : ['add', preferred ?? target], entry.url)
       if (result.exitCode !== 0 && npmFirstTried) {
         options.emitOutput('info', `dsh-market：npm 源安装失败，回退 git 源安装（${target}）。`)
         result = await runPlugin(name, ['add', target], entry.url)
@@ -697,17 +798,12 @@ export function createDshMarketService(options: DshMarketOptions) {
       const after = await readInstalled(settings)
       if (action !== 'uninstall') {
         const installedName = installedAlias(entry, after, npmAliasByName.get(entry.name))
-        if (targetVersion !== null && (installedName !== alias || after.records.find(item => item.name === alias)?.version !== targetVersion)) {
-          throw new Error('未在目标整合包中检测到指定的更新版本。')
-        }
         if (!installedName) throw new Error('pnpm 已完成，但 dsh-market 未检测到安装结果。')
         const profile = await readProfile(settings.dshHome, settings.profileName)
         const component = profile.plugins.find(item => item.packageName === installedName)
         if (!component || !component.compatible) throw new Error('插件已下载，但没有检测到可加载的 DSH Bundle。')
         // dsh CLI 的 reconcile 不一定每次都会把 bundle 加进层列表，这里兜底激活。
-        if (options.targeted && action === 'update' && !before.records.find(item => item.name === alias)?.enabled) {
-          if (component.enabled) await togglePlugin(settings.dshHome, settings.profileName, installedName, false)
-        } else await ensureProfileBundleEnabled(installedName)
+        await ensureProfileBundleEnabled(installedName)
       }
       updatesCache = null
       progress(name, 'verifying', '正在刷新 dsh-market 安装状态', 94)
@@ -775,8 +871,9 @@ export function createDshMarketService(options: DshMarketOptions) {
         throw error
       }
     },
-    install: (name: string, identity?: { url: string }) => mutate(name, 'install', identity),
-    update: (name: string, identity?: { url: string; packageName: string }) => mutate(name, 'update', identity),
+    compatibility,
+    install: (name: string, identity?: MutationIdentity) => mutate(name, 'install', identity),
+    update: (name: string, identity?: MutationIdentity) => mutate(name, 'update', identity),
     uninstall: (name: string) => mutate(name, 'uninstall'),
     toggle: async (name: string, enabled: boolean) => {
       const settings = await options.readSettings()

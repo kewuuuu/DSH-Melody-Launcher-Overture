@@ -154,7 +154,7 @@ export function createPackControl(options: PackControlOptions) {
     try { await assertWritable(r); return await action() }
     finally { if (!isPackRunning(r.id)) releaseClaim(r.id) }
   }
-  async function configs(): Promise<Record<string, PackControlConfig>> {
+  async function configs(repair = true): Promise<Record<string, PackControlConfig>> {
     let text: string
     try {
       text = await readFile(configPath, 'utf8')
@@ -166,6 +166,7 @@ export function createPackControl(options: PackControlOptions) {
     try {
       return JSON.parse(text.replace(/^\uFEFF/, '')) as Record<string, PackControlConfig>
     } catch (error) {
+      if (!repair) return {}
       // 手改坏的配置不该连累列表：留档一份再按默认值继续，别让用户丢文件。
       const backup = configPath + '.corrupt-' + Date.now()
       await rename(configPath, backup).catch(() => undefined)
@@ -173,9 +174,9 @@ export function createPackControl(options: PackControlOptions) {
       return {}
     }
   }
-  async function config(id: string): Promise<PackControlConfig> {
+  async function config(id: string, repair = true): Promise<PackControlConfig> {
     const base = await options.readSettings()
-    const saved: Partial<PackControlConfig> | undefined = (await configs())[id]
+    const saved: Partial<PackControlConfig> | undefined = (await configs(repair))[id]
     return Object.assign({ portMode: 'auto' as const, port: base.webPort, runAsAdmin: false, autoStart: false, pinnedAt: null }, saved)
   }
   async function record(id?: string): Promise<PackRecord> {
@@ -616,7 +617,9 @@ export function createPackControl(options: PackControlOptions) {
       return next
     }))
     if (command === 'pack.resources.list') return resources(r, args.kind)
-    if (command === 'pack.market.catalog') return options.market?.(command, await options.resolveSettings(r, await config(r.id)), args)
+    if (command === 'pack.market.catalog' || command === 'pack.market.compatibility') {
+      return options.market?.(command, await options.resolveSettings(r, await config(r.id, command !== 'pack.market.compatibility')), args)
+    }
     if (command === 'pack.stop' && args.force === true && controllers.get(r.id)?.isRunning()) {
       if (closing) throw new Error('Launcher is shutting down')
       const action = stopPack(r, args)
@@ -646,10 +649,11 @@ export function createPackControl(options: PackControlOptions) {
         await options.openExternal(url.href)
         return state
       }
-      return withWriteClaim(r, async () => {
+      const current = command === 'pack.market.install' || command === 'pack.market.update' ? await record(r.id) : r
+      return withWriteClaim(current, async () => {
       // 运行中的整合包也允许改插件/资源：改动照常写进家目录，下次启动生效（前端自己提示「下次启动生效」）。
       // 真的写不进去时（Windows 文件被占用）不静默：serial 会把这类错误翻成中文再抛。
-      const s = await options.resolveSettings(r, await config(r.id))
+      const s = await options.resolveSettings(current, await config(current.id))
       if (command === 'pack.market.update') {
         if (typeof args.packageName !== 'string' || !isSafePackageName(args.packageName)) throw new Error('Invalid package name')
         const provenance = path.join(s.dshHome, '.launcher-shared-plugins-' + encodeURIComponent(args.packageName) + '.json')

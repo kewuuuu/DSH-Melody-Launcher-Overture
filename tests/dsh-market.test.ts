@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 import { compareDshMarketVersions, createDshMarketService, dshMarketInstallTarget, findDshMarketInstalledAlias, parseDshMarketSourceUrl } from '../electron/dsh-market'
+import { selectCompatiblePluginVersion } from '../electron/dsh-market-compatibility'
 import type { AppSettings } from '../src/types'
 
 const marketSettings: AppSettings = {
@@ -128,6 +129,117 @@ function registryResponse(plugins: Array<{ name: string; owner: string; url: str
   } as unknown as Response
 }
 
+function packument(name: string, latest: string, versions: Record<string, Record<string, unknown>>) {
+  return {
+    name,
+    'dist-tags': { latest },
+    versions: Object.fromEntries(Object.entries(versions).map(([version, meta]) => [version, { name, version, ...meta }])),
+  }
+}
+
+it('uses native DSH ranges, stable preference and prerelease fallback', () => {
+  const name = 'test-plugin'
+  const data = packument(name, '2.1.0-alpha.1', {
+    '1.0.0': { engines: { dsh: '>=0.2.1-rc.1 <0.3.0' }, peerDependencies: { '@deepseek-ai/dsh-other': '^99' } },
+    '1.1.0': { peerDependencies: { '@deepseek-ai/dsh': 'workspace:^', '@deepseek-ai/dsh-base': '^99' } },
+    '2.0.0-alpha.3': { peerDependencies: { '@deepseek-ai/dsh': 'workspace:*', '@deepseek-ai/dsh-base': '~0.2.1' } },
+    '2.1.0-alpha.1': { peerDependencies: { '@deepseek-ai/dsh': 'workspace:~', '@deepseek-ai/dsh-base': '^0.3.0' } },
+  })
+  expect(selectCompatiblePluginVersion(data, name, '0.2.1-rc.3')).toEqual({ status: 'compatible', version: '1.0.0', latestVersion: '2.1.0-alpha.1' })
+  expect(selectCompatiblePluginVersion(data, name, '0.3.1')).toMatchObject({ status: 'compatible', version: '2.1.0-alpha.1' })
+  expect(selectCompatiblePluginVersion(data, name, '0.1.0')).toMatchObject({ status: 'incompatible', version: null })
+  expect(selectCompatiblePluginVersion(data, name, null)).toMatchObject({ status: 'unknown', version: null })
+  const malformed = packument(name, '1.0.0', { '1.0.0': { engines: { dsh: 'workspace:unsupported' } } })
+  expect(selectCompatiblePluginVersion(malformed, name, '0.2.1-rc.3').status).toBe('unknown')
+})
+
+it('resolves the SSH monorepo package and pins install under the locked runtime', async () => {
+  const { root, profileDir } = await tempProfile()
+  const entry = { name: 'dsh-web#packages/dsh-ssh', owner: 'zhu1090093659', url: 'https://github.com/zhu1090093659/dsh-web/tree/main/packages/dsh-ssh', category: 'plugin' }
+  const gitOnly = { name: 'git-only', owner: 'zhu1090093659', url: 'https://github.com/linxin666/git-only', category: 'plugin' }
+  const unsupported = { name: 'missing', owner: 'zhu1090093659', url: 'https://github.com/zhu1090093659/dsh-web/tree/main/packages/missing', category: 'plugin' }
+  const npm = '@linxin666/dsh-ssh'
+  const raw = 'https://raw.githubusercontent.com/zhu1090093659/dsh-web/main/packages/dsh-ssh/package.json'
+  const official = 'https://registry.npmjs.org/' + encodeURIComponent(npm)
+  const versions = {
+    '0.4.14': { peerDependencies: { '@deepseek-ai/dsh': '>=0.2.1-rc.3' } },
+    '0.4.22': { peerDependencies: { '@deepseek-ai/dsh': '>=0.2.3-alpha.2' } },
+  }
+  const mirror = 'https://registry.npmmirror.com/' + encodeURIComponent(npm)
+  const requests: Array<{ url: string; cache?: RequestCache }> = []
+  const calls: string[][] = []
+  let runtime: string | undefined = '0.2.1-rc.3'
+  let fail = false
+  let officialUnavailable = false
+  let explicitCatalogAlias = false
+  const createService = () => createDshMarketService({
+    targeted: true,
+    readSettings: async () => ({ ...marketSettings, dshHome: root, workspace: root, launchExecutable: 'npx.cmd', dshVersion: runtime }),
+    prepareNodeRuntime: async () => ({ root, node: 'node', npm: 'npm', npx: 'npx', managed: false }),
+    preparePnpmRuntime: async () => ({ root, executable: 'pnpm' }),
+    fetchImpl: async (input, init) => {
+      const url = String(input)
+      requests.push({ url, cache: init?.cache })
+      if (url === 'https://awesome-dsh-plugin.com/plugins.json') return registryResponse([{ ...entry, ...(explicitCatalogAlias ? { npm } : {}) }, gitOnly, unsupported])
+      if (url === raw) return Response.json({ name: npm, version: '0.4.22' })
+      if (url === official && officialUnavailable) return new Response(null, { status: 503 })
+      if (url === official || url === mirror) return Response.json(packument(npm, '0.4.22', versions))
+      return new Response(null, { status: 404 })
+    },
+    runCommand: async (_executable, args, options) => {
+      calls.push(args)
+      expect(options.env.DSH_HOME).toBe(root)
+      if (fail) return { exitCode: 1, output: 'fixture failure' }
+      const pkg = path.join(profileDir, 'node_modules', npm, 'package.json')
+      await mkdir(path.dirname(pkg), { recursive: true })
+      await writeFile(pkg, JSON.stringify({
+        name: npm, version: '0.4.14', dsh: { bundle: { patch: 'bundle.yml' } },
+        repository: { type: 'git', url: 'https://github.com/zhu1090093659/dsh-web.git' },
+      }))
+      await writeFile(path.join(path.dirname(pkg), 'bundle.yml'), '')
+      await writeFile(path.join(profileDir, 'package.json'), JSON.stringify({ dependencies: { [npm]: '0.4.14' } }))
+      return { exitCode: 0, output: '' }
+    },
+    emitProgress: () => undefined,
+    emitOutput: () => undefined,
+  })
+  try {
+    const wrongUrl = { ...entry, url: unsupported.url }
+    const wrongName = { ...entry, name: npm }
+    const identity = { url: entry.url, expectedVersion: '0.4.14' }
+    const requestKeys = [entry, gitOnly, unsupported, wrongUrl, wrongName].map(({ name, url }) => ({ name, url }))
+    const service = createService()
+    const compatibility = await service.compatibility(requestKeys)
+    expect(compatibility).toEqual({ dshVersion: runtime, entries: [
+      { ...requestKeys[0], status: 'compatible', version: '0.4.14', latestVersion: '0.4.22' },
+      ...requestKeys.slice(1).map(key => ({ ...key, status: 'unknown', version: null, latestVersion: null })),
+    ] })
+    await expect(service.install(entry.name, { ...identity, url: unsupported.url })).rejects.toThrow('不在')
+    runtime = '0.3.1'
+    await expect(service.install(entry.name, identity)).rejects.toThrow('兼容插件版本已变更')
+    runtime = '0.1.0'
+    await expect(service.install(entry.name, identity)).rejects.toThrow('无法确定')
+    runtime = undefined
+    await expect(service.install(entry.name, identity)).rejects.toThrow('无法确定')
+    expect(calls).toEqual([])
+    expect(requests.filter(({ url, cache }) => url === official && cache === 'no-store')).toHaveLength(2)
+    expect(requests.filter(({ url, cache }) => url === raw && cache === 'no-store')).toHaveLength(2)
+    runtime = '0.2.1-rc.3'
+    fail = true
+    await expect(service.install(entry.name, identity)).rejects.toThrow('fixture failure')
+    fail = false
+    officialUnavailable = true
+    await expect(service.install(entry.name)).resolves.toMatchObject([{ packageName: npm, version: '0.4.14' }])
+    expect(calls).toEqual(Array.from({ length: 2 }, () => ['--yes', '@deepseek-ai/dsh@0.2.1-rc.3', 'plugin', '--profile', 'web', 'add', npm + '@0.4.14']))
+    expect(requests.filter(({ url }) => url === mirror)).toEqual([{ url: mirror, cache: 'no-store' }])
+    expect((await createService().load()).plugins[0]).toMatchObject({ packageName: npm, installed: true, version: '0.4.14' })
+    explicitCatalogAlias = true
+    expect((await createService().load()).plugins[0]).toMatchObject({ packageName: npm, installed: true, version: '0.4.14' })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('checks and updates the exact npm dependency using only the target profile', async () => {
   const { root, profileDir } = await tempProfile()
   const targetName = 'pack-b'
@@ -147,13 +259,13 @@ it('checks and updates the exact npm dependency using only the target profile', 
   let reportSuccessWithoutUpdate = false
   const service = createDshMarketService({
     targeted: true,
-    readSettings: async () => ({ ...marketSettings, dshHome: root, profileName: targetName }),
+    readSettings: async () => ({ ...marketSettings, dshHome: root, profileName: targetName, dshVersion: '0.2.1-rc.3' }),
     prepareNodeRuntime: async () => ({ root, node: 'node', npm: 'npm', npx: 'npx', managed: false }),
     preparePnpmRuntime: async () => ({ root, executable: 'pnpm' }),
     fetchImpl: async input => {
       requests.push(String(input))
-      return String(input).endsWith('/latest')
-        ? Response.json({ name: registryName, version: '1.0.0-rc.10' })
+      return String(input).endsWith('/' + encodeURIComponent(packageName))
+        ? Response.json(packument(registryName, '1.0.0-rc.10', { '1.0.0-rc.10': {} }))
         : registryResponse([entry])
     },
     runCommand: async (_executable, args, options) => {
@@ -175,7 +287,7 @@ it('checks and updates the exact npm dependency using only the target profile', 
     const targetManifest = path.join(targetDir, 'package.json')
     await writeFile(targetManifest, JSON.stringify({ dependencies: { '@unrelated/demo': '0.0.1' } }))
     expect((await service.load(true)).plugins[0]).toMatchObject({ installed: false, updateAvailable: false })
-    expect(requests.some(url => url.endsWith('/latest'))).toBe(false)
+    expect(requests).toEqual(['https://awesome-dsh-plugin.com/plugins.json'])
     await writeFile(targetManifest, JSON.stringify(manifest))
     await writePlugin(targetDir, '1.0.0-rc.2', packageName, '@wrong/demo')
     expect((await service.load(true)).plugins[0]).toMatchObject({ installed: false, version: null, updateAvailable: false })
@@ -190,8 +302,10 @@ it('checks and updates the exact npm dependency using only the target profile', 
     await expect(service.update(entry.name, { url: entry.url, packageName: '@unrelated/demo' })).rejects.toThrow('插件身份已变更')
     await expect(service.update(entry.name, { url: 'https://github.com/other/demo', packageName })).rejects.toThrow('不在')
     expect(calls).toHaveLength(0)
+    await expect(service.update(entry.name, { url: entry.url, packageName, expectedVersion: '1.0.0-rc.9' })).rejects.toThrow('兼容插件版本已变更')
+    expect(calls).toHaveLength(0)
     reportSuccessWithoutUpdate = true
-    await expect(service.update(entry.name, { url: entry.url, packageName })).rejects.toThrow('未在目标整合包中检测到指定的更新版本')
+    await expect(service.update(entry.name, { url: entry.url, packageName })).rejects.toThrow('未在目标整合包中检测到指定的插件版本')
     reportSuccessWithoutUpdate = false
     await service.update(entry.name, { url: entry.url, packageName })
     expect(calls).toEqual(Array.from({ length: 2 }, () => ({ home: root, args: ['plugin', '--profile', targetName, 'add', packageName + '@1.0.0-rc.10'] })))
@@ -210,10 +324,15 @@ it('requires the exact monorepo directory to recognize a Git-only entry installe
   const installed = path.join(profileDir, 'node_modules', name)
   const service = createDshMarketService({
     targeted: true,
-    readSettings: async () => ({ ...marketSettings, dshHome: root }),
+    readSettings: async () => ({ ...marketSettings, dshHome: root, dshVersion: '0.2.1-rc.3' }),
     prepareNodeRuntime: async () => { throw new Error('not used while reading') },
     preparePnpmRuntime: async () => { throw new Error('not used while reading') },
-    fetchImpl: async input => String(input).endsWith('/latest') ? Response.json({ name, version: '2.0.0' }) : registryResponse([entry]),
+    fetchImpl: async input => {
+      const url = String(input)
+      if (url.startsWith('https://raw.githubusercontent.com/')) return Response.json({ name })
+      if (url.endsWith('/' + encodeURIComponent(name))) return Response.json(packument(name, '2.0.0', { '2.0.0': {} }))
+      return registryResponse([entry])
+    },
     emitProgress: () => undefined,
     emitOutput: () => undefined,
   })
@@ -229,7 +348,7 @@ it('requires the exact monorepo directory to recognize a Git-only entry installe
     await dependency('github:owner/demo#path:/packages/other')
     expect((await service.load(true)).plugins[0]).toMatchObject({ installed: false })
     await dependency('github:owner/demo#path:/packages/bundle')
-    expect((await service.load(true)).plugins[0]).toMatchObject({ installed: true, npm: null, packageName: name, updateAvailable: false })
+    expect((await service.load(true)).plugins[0]).toMatchObject({ installed: true, packageName: name, updateAvailable: false })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

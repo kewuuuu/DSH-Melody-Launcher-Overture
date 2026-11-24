@@ -6,7 +6,8 @@ import type { NodeRuntime, PnpmRuntime } from './node-runtime'
 import { findManagedDshVersions } from './runtime-versions'
 import { createPackControl } from './pack-control'
 import { ensureLauncherControlSkill } from './launcher-control-skill'
-import { createDshMarketService } from './dsh-market'
+import { createDshMarketService, parseMarketCompatibilityEntries } from './dsh-market'
+import { createMarketMetadataLookup, isExactPluginVersion } from './dsh-market-compatibility'
 import { createInstaller } from './installer'
 import { matchSkillsShTarget } from './skills-sh'
 import { isSafeRepositoryName } from './profile'
@@ -48,6 +49,7 @@ export function createLauncherControl(options: {
 }) {
   const { userData, settings } = options
   const storage = options.storage
+  const marketMetadata = createMarketMetadataLookup(options.fetchImpl)
   const control = createPackControl({
     userData,
     registryPath: path.join(userData, 'packs.json'),
@@ -97,6 +99,32 @@ export function createLauncherControl(options: {
       throw new Error('Unsupported lifecycle command')
     },
     market: async (command, target, args) => {
+      if (command === 'pack.market.compatibility' || command === 'pack.market.catalog' || command === 'pack.market.install' || command === 'pack.market.update') {
+        const market = createDshMarketService({
+          readSettings: async () => target,
+          prepareNodeRuntime: options.prepareNodeRuntime,
+          preparePnpmRuntime: options.preparePnpmRuntime,
+          fetchImpl: options.fetchImpl,
+          cachePath: path.join(userData, 'dsh-market-cache.json'),
+          packageStoreRoot: path.join(userData, 'plugin-store'),
+          emitProgress: () => undefined,
+          emitOutput: (_level, text) => options.emitOutput(text),
+          targeted: true,
+          metadataLookup: marketMetadata,
+        })
+        if (command === 'pack.market.compatibility') return market.compatibility(parseMarketCompatibilityEntries(args.entries))
+        if (command === 'pack.market.catalog') return market.load(args.checkUpdates === true)
+        const { name, url, packageName, expectedVersion } = args
+        if (typeof name !== 'string' || !name.trim()) throw new Error('Market plugin name required')
+        if (expectedVersion !== undefined && !isExactPluginVersion(expectedVersion)) throw new Error('Invalid expected market plugin version')
+        if (url !== undefined && (typeof url !== 'string' || !url.trim())) throw new Error('Invalid market plugin URL')
+        if (command === 'pack.market.install') {
+          if (expectedVersion !== undefined && url === undefined) throw new Error('Market plugin identity required')
+          return market.install(name, { url, expectedVersion })
+        }
+        if (typeof url !== 'string' || typeof packageName !== 'string') throw new Error('Market plugin identity required')
+        return market.update(name, { url, packageName, expectedVersion })
+      }
       const installer = createInstaller({
         readSettings: async () => target,
         saveSettings: async () => { throw new Error('Explicit pack installs cannot change global settings') },
@@ -127,25 +155,10 @@ export function createLauncherControl(options: {
         }
         throw new Error('Skill not found in source repository')
       }
-      const market = createDshMarketService({
-        readSettings: async () => target,
-        prepareNodeRuntime: options.prepareNodeRuntime,
-        preparePnpmRuntime: options.preparePnpmRuntime,
-        fetchImpl: options.fetchImpl,
-        cachePath: path.join(userData, 'dsh-market-cache.json'),
-        packageStoreRoot: path.join(userData, 'plugin-store'),
-        emitProgress: () => undefined,
-        emitOutput: (_level, text) => options.emitOutput(text),
-        targeted: true,
-      })
-      if (command === 'pack.market.catalog') return market.load(args.checkUpdates === true)
-      if (typeof args.name !== 'string' || !args.name.trim()) throw new Error('Market plugin name required')
-      if (command === 'pack.market.install') return market.install(args.name, typeof args.url === 'string' ? { url: args.url } : undefined)
-      if (command === 'pack.market.update') {
-        if (typeof args.url !== 'string' || typeof args.packageName !== 'string') throw new Error('Market plugin identity required')
-        return market.update(args.name, { url: args.url, packageName: args.packageName })
+      if (command === 'pack.market.remove') {
+        if (typeof args.name !== 'string' || !args.name.trim()) throw new Error('Market plugin name required')
+        return installer.remove(args.name, target.profileName)
       }
-      if (command === 'pack.market.remove') return installer.remove(args.name, target.profileName)
       throw new Error('Unsupported targeted market command')
     },
   })

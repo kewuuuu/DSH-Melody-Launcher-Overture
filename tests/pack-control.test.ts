@@ -34,6 +34,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createPackControl } from '../electron/pack-control'
 import * as atomic from '../electron/fs-atomic'
 import { createLauncherControl } from '../electron/launcher-control'
+import * as packRegistry from '../electron/pack-registry'
 import { writePackRegistry, type PackRecord } from '../electron/pack-registry'
 import type { AppSettings, RuntimeState } from '../src/types'
 
@@ -172,22 +173,94 @@ describe('explicit pack control', () => {
   })
   it('resolves the pack profile by id without selecting it globally', async () => {
     const { root, settings } = await fixture()
+    settings.dshVersion = '0.3.1'
+    const packVersion = '0.2.1-rc.3'
+    const newerPackVersion = '0.3.1'
+    const registryPath = path.join(root, 'packs.json')
+    const records = await packRegistry.readPackRegistry(registryPath)
+    const setTargetVersion = (version: string) => writePackRegistry(registryPath, records.map(r => r.id === 'b' ? { ...r, dshVersion: version } : r))
+    await setTargetVersion(packVersion)
+    for (const version of [packVersion, newerPackVersion]) {
+      const modules = path.join(root, 'versions', version, 'node_modules')
+      const bin = path.join(modules, '.bin')
+      const manifest = path.join(modules, '@deepseek-ai', 'dsh', 'package.json')
+      await mkdir(bin, { recursive: true })
+      await writeFile(path.join(bin, process.platform === 'win32' ? 'dsh.cmd' : 'dsh'), '')
+      await mkdir(path.dirname(manifest), { recursive: true })
+      await writeFile(manifest, JSON.stringify({ name: '@deepseek-ai/dsh', version }))
+    }
     const home = path.join(root, 'b')
     await mkdir(path.join(home, 'profiles', 'b'), { recursive: true })
     await writeFile(path.join(home, 'profiles', 'b', 'package.json'), JSON.stringify({ dependencies: { 'fixture-plugin': '1.0.0' }, dsh: { profile: { bundles: ['fixture-plugin'] } } }))
     const installed = path.join(home, 'profiles', 'b', 'node_modules', 'fixture-plugin')
     await mkdir(installed, { recursive: true })
     await writeFile(path.join(installed, 'package.json'), JSON.stringify({ name: 'fixture-plugin', version: '1.0.0' }))
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith('/latest')
-      ? Response.json({ name: 'fixture-plugin', version: '1.2.0' })
-      : Response.json({ plugins: [{ name: 'fixture', owner: 'owner', npm: 'fixture-plugin', url: 'https://github.com/owner/fixture', category: 'tools' }] }))
+    const url = 'https://github.com/owner/fixture'
+    const packageUrl = 'https://registry.npmjs.org/fixture-plugin'
+    const prepareNodeRuntime = vi.fn()
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => String(input) === packageUrl
+      ? Response.json({ name: 'fixture-plugin', 'dist-tags': { latest: '2.0.0' }, versions: {
+        '1.2.0': { name: 'fixture-plugin', version: '1.2.0', engines: { dsh: '>=0.2.1-rc.3' } },
+        '2.0.0': { name: 'fixture-plugin', version: '2.0.0', engines: { dsh: '>=0.3.0' } },
+      } })
+      : Response.json({ plugins: [{ name: 'fixture', owner: 'owner', npm: 'fixture-plugin', url, category: 'tools' }] }))
     const save = vi.fn()
-    const control = createLauncherControl({ userData: root, cliPath: path.join(root, 'cli.cjs'), settings: { readStored: async () => settings, read: async () => settings, save }, packManager: {} as never, prepareNodeRuntime: vi.fn(), preparePnpmRuntime: vi.fn(), openExternal: vi.fn(), fallbackWorkspace: () => root, fetchImpl, emitOutput: () => undefined, loginRegistration: vi.fn(), storage: { get: () => ({ dataDir: root, source: 'install' as const, portableDir: root, pointerFile: null, legacy: { dataDir: root, hasData: false }, restartRequired: false, warning: null }), set: vi.fn(), reset: vi.fn() }, legacyRuntimeRunning: () => false })
+    const control = createLauncherControl({ userData: root, cliPath: path.join(root, 'cli.cjs'), settings: { readStored: async () => settings, read: async () => settings, save }, packManager: {} as never, prepareNodeRuntime, preparePnpmRuntime: vi.fn(), openExternal: vi.fn(), fallbackWorkspace: () => root, fetchImpl, emitOutput: () => undefined, loginRegistration: vi.fn(), storage: { get: () => ({ dataDir: root, source: 'install' as const, portableDir: root, pointerFile: null, legacy: { dataDir: root, hasData: false }, restartRequired: false, warning: null }), set: vi.fn(), reset: vi.fn() }, legacyRuntimeRunning: () => false })
     const list = await control.execute({ command: 'pack.resources.list', packId: 'b', args: { kind: 'plugins' } }) as { items: Array<{ packageName: string }> }
     expect(list.items.some(i => i.packageName === 'fixture-plugin')).toBe(true)
+    const exact = { name: 'fixture', url }
+    const wrong = { name: 'fixture', url: 'https://github.com/owner/other' }
+    const compatibility = (packId: string | undefined, entries: unknown) => control.execute({ command: 'pack.market.compatibility', packId, args: { entries } })
+    await expect(compatibility(undefined, [exact])).rejects.toThrow('packId is required')
+    await expect(compatibility('other', [exact])).rejects.toThrow('Unknown pack')
+    await expect(compatibility('b', { exact })).rejects.toThrow('must be an array')
+    await expect(compatibility('b', [{ name: 'fixture', url: 123 }])).rejects.toThrow('Invalid market compatibility entry')
+    await expect(compatibility('b', Array.from({ length: 49 }, (_, i) => ({ name: 'entry-' + i, url })))).rejects.toThrow('48 unique entries')
+    expect(fetchImpl).not.toHaveBeenCalled()
+    const configPath = path.join(root, 'pack-control.json')
+    await writeFile(configPath, '{malformed')
+    await expect(compatibility('b', [])).resolves.toEqual({ dshVersion: packVersion, entries: [] })
+    expect(await readFile(configPath, 'utf8')).toBe('{malformed')
+    await rm(configPath)
+    await expect(compatibility('b', [wrong, ...Array.from({ length: 49 }, () => ({ ...exact, npm: 'forged-name' }))])).resolves.toEqual({
+      dshVersion: packVersion, entries: [
+        { ...wrong, status: 'unknown', version: null, latestVersion: null },
+        { ...exact, status: 'compatible', version: '1.2.0', latestVersion: '2.0.0' },
+      ],
+    })
+    await expect(compatibility('a', [exact])).resolves.toEqual({
+      dshVersion: '0.3.1', entries: [{ ...exact, status: 'compatible', version: '2.0.0', latestVersion: '2.0.0' }],
+    })
+    expect(fetchImpl.mock.calls.filter(([input]) => input === packageUrl)).toHaveLength(1)
     const catalog = (packId: string) => control.execute({ command: 'pack.market.catalog', packId, args: { checkUpdates: true } })
-    await expect(catalog('b')).resolves.toMatchObject({ plugins: [{ packageName: 'fixture-plugin', installed: true, version: '1.0.0', updateAvailable: true, updateVersion: '1.2.0' }] })
+    await expect(catalog('b')).resolves.toMatchObject({ dshVersion: packVersion, plugins: [{ packageName: 'fixture-plugin', installed: true, version: '1.0.0', updateAvailable: true, updateVersion: '1.2.0' }] })
     await expect(catalog('a')).resolves.toMatchObject({ plugins: [{ installed: false, updateAvailable: false }] })
+    let unlock!: () => void
+    let entered!: () => void
+    const held = new Promise<void>(resolve => { entered = resolve })
+    const release = new Promise<void>(resolve => { unlock = resolve })
+    const mutation = control.withPackMutation('b', async () => { entered(); await release })
+    await held
+    const originalRead = packRegistry.readPackRegistry
+    let readOldRecord!: () => void
+    const oldRecordRead = new Promise<void>(resolve => { readOldRecord = resolve })
+    const registryRead = vi.spyOn(packRegistry, 'readPackRegistry').mockImplementationOnce(async (...args) => {
+      const oldRecords = await originalRead(...args)
+      readOldRecord()
+      return oldRecords
+    })
+    const install = control.execute({ command: 'pack.market.install', packId: 'b', args: { ...exact, expectedVersion: '1.2.0' } })
+    try {
+      await oldRecordRead
+      await expect(compatibility('b', [exact])).resolves.toMatchObject({ dshVersion: packVersion })
+      await setTargetVersion(newerPackVersion)
+    } finally {
+      registryRead.mockRestore()
+      unlock()
+      await mutation
+    }
+    await expect(install).rejects.toThrow('兼容插件版本已变更')
+    expect(prepareNodeRuntime).not.toHaveBeenCalled()
     expect(save).not.toHaveBeenCalled(); expect(settings.activePackId).toBe('a')
   })
   it('shares flat skills as file references and removes only the target link', async () => {
