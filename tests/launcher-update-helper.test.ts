@@ -1,14 +1,11 @@
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  APPLY_WAIT_POLL_SECONDS,
   APPLY_WAIT_TIMEOUT_SECONDS,
   buildApplyCommand,
   buildApplyCommandPath,
-  buildApplyLauncherPath,
   buildApplyLogName,
   buildApplyLogPath,
-  buildHiddenLauncherScript,
   buildInstallDirArgument,
   buildRestartCommand,
   installDirFromExecPath,
@@ -60,9 +57,8 @@ describe('日志路径', () => {
     expect(buildApplyLogPath(UPDATE_ROOT, date)).toBe(path.join(UPDATE_ROOT, 'apply-20261115-231019.log'))
   })
 
-  it('一次性脚本以 pid 命名，cmd 与 vbs 成对', () => {
+  it('一次性批处理以 pid 命名', () => {
     expect(buildApplyCommandPath(UPDATE_ROOT, 4321)).toBe(path.join(UPDATE_ROOT, 'apply-4321.cmd'))
-    expect(buildApplyLauncherPath(UPDATE_ROOT, 4321)).toBe(path.join(UPDATE_ROOT, 'apply-4321.vbs'))
   })
 })
 
@@ -95,28 +91,31 @@ describe('buildApplyCommand', () => {
     expect(command).not.toContain('/D="')
   })
 
-  it('安装前先轮询等旧进程 PID 退出', () => {
+  function waitScript(command: string): string {
+    const encoded = command.match(/-EncodedCommand ([A-Za-z0-9+/=]+)/)?.[1]
+    return Buffer.from(encoded ?? '', 'base64').toString('utf16le')
+  }
+
+  it('安装前直接等待旧进程 PID 退出', () => {
     const command = buildApplyCommand(BASE)
-    expect(command).toContain(':wait\r\n')
-    expect(command).toContain('/nh /fi "PID eq 4321"')
-    expect(command).toContain('find.exe "4321"')
-    expect(command).toContain('if errorlevel 1 goto launcher_gone')
-    expect(command).toContain('goto wait')
-    expect(command).toContain('ping.exe -n ' + (APPLY_WAIT_POLL_SECONDS + 1) + ' 127.0.0.1')
+    expect(waitScript(command)).toContain('[Diagnostics.Process]::GetProcessById(4321)')
+    expect(waitScript(command)).toContain('catch [ArgumentException] { exit 0 }')
+    expect(waitScript(command)).toContain('WaitForExit(' + APPLY_WAIT_TIMEOUT_SECONDS * 1000 + ')')
+    expect(command).toContain('if "%ERRORLEVEL%"=="0" goto launcher_gone')
+    expect(command).not.toContain('tasklist.exe')
   })
 
-  it('等不到退出就按上限放弃，不带着文件占用去装', () => {
+  it('超时或无法确认旧进程退出时不执行安装', () => {
     const command = buildApplyCommand(BASE)
-    const tries = Math.ceil(APPLY_WAIT_TIMEOUT_SECONDS / APPLY_WAIT_POLL_SECONDS)
-    expect(command).toContain('if %TRIES% GEQ ' + tries + ' goto wait_timeout')
+    expect(waitScript(command)).toContain('exit 2')
+    expect(command).toContain('if "%ERRORLEVEL%"=="2" goto wait_timeout')
+    expect(command).toContain('could not verify launcher exit; setup was not run')
     expect(branch(command, ':wait_timeout', ':launcher_gone')).toContain('setup was not run')
     expect(branch(command, ':wait_timeout', ':launcher_gone')).not.toContain('/S /D=')
   })
 
-  it('等待上限与轮询间隔可按入参收紧', () => {
-    const command = buildApplyCommand({ ...BASE, waitTimeoutSeconds: 5, pollSeconds: 2 })
-    expect(command).toContain('if %TRIES% GEQ 3 goto wait_timeout')
-    expect(command).toContain('ping.exe -n 3 127.0.0.1')
+  it('等待上限可按入参收紧', () => {
+    expect(waitScript(buildApplyCommand({ ...BASE, waitTimeoutSeconds: 5 }))).toContain('WaitForExit(5000)')
   })
 
   it('安装成功后才启动新版本，顺序在安装之后', () => {
@@ -162,27 +161,5 @@ describe('buildApplyCommand', () => {
 
   it('安装目录带元字符时整段脚本都生成失败（宁愿让用户手动装）', () => {
     expect(() => buildApplyCommand({ ...BASE, installDir: 'C:\\A&B' })).toThrow('无法安全传给安装程序')
-  })
-})
-
-describe('buildHiddenLauncherScript', () => {
-  it('用 WScript.Shell 以窗口模式 0 拉起 cmd，不出现控制台黑框', () => {
-    const commandPath = buildApplyCommandPath(UPDATE_ROOT, 4321)
-    const script = buildHiddenLauncherScript(commandPath)
-    expect(script).toContain('Set shell = CreateObject("WScript.Shell")')
-    expect(script).toContain('shell.Run """' + commandPath + '""", 0, False')
-    expect(script).not.toContain('""""')
-  })
-
-  it('vbs 自己跑完即删', () => {
-    const script = buildHiddenLauncherScript(buildApplyCommandPath(UPDATE_ROOT, 4321))
-    expect(script).toContain('CreateObject("Scripting.FileSystemObject").DeleteFile WScript.ScriptFullName')
-  })
-
-  it('Run 的实参就是那条 cmd（三引号进出 = VBScript 里的带引号字符串）', () => {
-    const commandPath = buildApplyCommandPath(UPDATE_ROOT, 4321)
-    const script = buildHiddenLauncherScript(commandPath)
-    const line = script.split('\r\n').find(item => item.startsWith('shell.Run ')) ?? ''
-    expect(line).toBe('shell.Run """' + commandPath + '""", 0, False')
   })
 })

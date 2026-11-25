@@ -21,6 +21,7 @@ const HELP = `DSH Launcher control (Node >=20)
   update check
   update status
   update apply [--wait <minutes>] [--force]
+  update apply --pack <pack-id> --session <session-id> --resume "<prompt>" [--wait <minutes>]
   update cancel
   api list
   api add <route> --name <name> --base-url <url> --protocol <protocol> --models a,b [--api-key <key>]
@@ -45,12 +46,16 @@ Options: --json --user-data <directory> --launcher <explicit executable>
 Config flags: --port, --port-mode, --run-as-admin, --auto-start, --pinned-at,
               --workspace, --launch-args '["web"]'
 API flags (api add only): --name, --base-url, --protocol, --models, --api-key
-Resume flags: --resume "<prompt>" --session <id> (both with pack restart only), --pack <id> (pending list only)
+Resume flags: --resume and --session apply to pack restart or update apply.
+              --pack applies to pending list or update apply.
 Upgrade flag: --dsh-version <version> (pack upgrade only; upgrades only, the pack must be stopped)
-Update: "update apply" downloads the new version, waits up to --wait / settings.updateWaitMinutes
-        for every pack to have no running session, records the packs that were running, then
-        installs and restarts; --force skips the wait. The next launch restores only those packs
-        and skips autostart entries.
+Update: With user approval, "update apply" waits for every pack to have no running sessions
+        before installing and restarting the launcher. --force skips the wait. A continuation-
+        capable launcher adopts verified running packs in place and skips autostart.
+        Continuation requires update status to report supportsResume:true, all three targeting
+        flags, and no --force. The CLI checks support before sending update apply.
+        Use the original session ID from verified runtime information and a self-contained prompt.
+        On accepted:true, end the current turn immediately without waiting or polling.
 Uninstall: "uninstall now" stops running packs first, then on an installed build launches the
            uninstaller the Setup registered (Uninstall DSH-launcher-KEWU.exe, interactive) and
            returns {started, mode:"nsis", dataRemoved:false}; --delete-data cannot be honored on
@@ -152,7 +157,7 @@ function parse(argv) {
     }
   }
   else if (group === 'update') {
-    if (!['check', 'status', 'apply', 'cancel'].includes(action)) throw new Error('用法：update check | update status | update apply [--wait <分钟>] [--force] | update cancel')
+    if (!['check', 'status', 'apply', 'cancel'].includes(action)) throw new Error('用法：update check | update status | update apply [--wait <分钟>] [--force] | update cancel（续接用法见 --help）')
     command = 'update.' + action
   }
   else if (group === 'idle-shutdown') {
@@ -220,12 +225,23 @@ function parse(argv) {
     if (command !== 'update.apply') throw new Error('--force 只用于 update apply')
     args.force = true
   }
-  if (flags.pack !== undefined && command !== 'pending.list') throw new Error('--pack 只用于 pending list')
-  if (flags.resume !== undefined) {
-    if (command !== 'pack.restart') throw new Error('--resume 只用于 pack restart <pack-id>')
-    if (!packId) throw new Error('pack restart --resume 需要一个整合包 ID')
-    if (!String(flags.resume).trim()) throw new Error('--resume 需要一段续接内容')
-    args.resume = { prompt: flags.resume, ...(flags.session ? { sessionId: flags.session } : {}) }
+  if (command === 'update.apply') {
+    const { pack, session, resume } = flags
+    if (pack !== undefined || session !== undefined || resume !== undefined) {
+      if (!pack?.trim() || !session?.trim() || !resume?.trim()) {
+        throw new Error('update apply 续接需要同时提供非空的 --pack、--session 和 --resume')
+      }
+      args.resume = { packId: pack, sessionId: session, prompt: resume }
+    }
+    if (args.force === true && args.resume !== undefined) throw new Error('update apply 续接不能与 --force 一起使用')
+  } else {
+    if (flags.pack !== undefined && command !== 'pending.list') throw new Error('--pack 只用于 pending list 或 update apply')
+    if (flags.resume !== undefined) {
+      if (command !== 'pack.restart') throw new Error('--resume 只用于 pack restart <pack-id> 或 update apply')
+      if (!packId) throw new Error('pack restart --resume 需要一个整合包 ID')
+      if (!flags.resume.trim()) throw new Error('--resume 需要一段续接内容')
+      args.resume = { prompt: flags.resume, ...(flags.session ? { sessionId: flags.session } : {}) }
+    }
   }
   if (flags['dsh-version'] !== undefined) {
     if (command !== 'pack.upgrade') throw new Error('--dsh-version 只用于 pack upgrade <pack-id>')
@@ -246,17 +262,20 @@ function defaultUserData() {
   if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Application Support', 'dsh-launcher')
   return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'dsh-launcher')
 }
-async function invoke(userData, request) {
+async function readEndpoint(userData) {
   let endpoint
   try { endpoint = JSON.parse(await fs.readFile(path.join(userData, 'launcher-control.json'), 'utf8')) }
   catch { throw Object.assign(new Error('Launcher control is unavailable; open the launcher or use --launcher <executable>'), { unavailable: true }) }
   let url
   try { url = new URL(endpoint.url) } catch { throw new Error('Invalid launcher endpoint metadata') }
   if (endpoint.version !== 1 || url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.pathname !== '/control' || url.username || url.password || url.search || url.hash || typeof endpoint.token !== 'string' || !/^[a-f0-9]{64}$/.test(endpoint.token)) throw new Error('Invalid launcher endpoint metadata')
+  return { url, token: endpoint.token }
+}
+async function invoke({ url, token }, request) {
   const body = JSON.stringify(request)
   if (Buffer.byteLength(body) > 65536) throw new Error('Control payload exceeds 64 KiB')
   let response
-  try { response = await fetch(url, { method: 'POST', headers: { Authorization: 'Bearer ' + endpoint.token, 'Content-Type': 'application/json' }, body, redirect: 'error', signal: AbortSignal.timeout(120000) }) }
+  try { response = await fetch(url, { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body, redirect: 'error', signal: AbortSignal.timeout(120000) }) }
   catch (error) {
     const unavailable = error.cause?.code === 'ECONNREFUSED'
     throw Object.assign(new Error(unavailable ? 'Cannot reach launcher control; open the launcher and retry' : 'Launcher request interrupted; its outcome is unknown. Inspect pack status before retrying'), { unavailable })
@@ -266,23 +285,42 @@ async function invoke(userData, request) {
   if (!response.ok || envelope.ok !== true) throw Object.assign(new Error(envelope.error?.message || 'Launcher command failed (HTTP ' + response.status + ')'), { code: envelope.error?.code || 'HTTP_' + response.status })
   return envelope.result
 }
+async function invokeWithLauncher(userData, request, launcher) {
+  async function send() {
+    const endpoint = await readEndpoint(userData)
+    return { endpoint, result: await invoke(endpoint, request) }
+  }
+  try { return await send() }
+  catch (error) {
+    if (!error.unavailable || !launcher) throw error
+    const executable = path.resolve(launcher)
+    await fs.access(executable)
+    await new Promise((resolve, reject) => { const child = spawn(executable, [], { detached: true, stdio: 'ignore', windowsHide: true }); child.once('error', reject); child.once('spawn', () => { child.unref(); resolve() }) })
+    const deadline = Date.now() + 15000
+    while (true) {
+      await new Promise(resolve => setTimeout(resolve, 200))
+      try { return await send() } catch (next) { if (!next.unavailable || Date.now() >= deadline) throw next }
+    }
+  }
+}
 async function main() {
   const parsed = parse(process.argv.slice(2))
   if (parsed.help) { process.stdout.write(HELP); return }
   const { flags, request } = parsed
   const userData = path.resolve(flags['user-data'] || process.env.DSH_LAUNCHER_USER_DATA || defaultUserData())
   let result
-  try { result = await invoke(userData, request) }
-  catch (error) {
-    if (!error.unavailable || !flags.launcher) throw error
-    const executable = path.resolve(flags.launcher)
-    await fs.access(executable)
-    await new Promise((resolve, reject) => { const child = spawn(executable, [], { detached: true, stdio: 'ignore', windowsHide: true }); child.once('error', reject); child.once('spawn', () => { child.unref(); resolve() }) })
-    const deadline = Date.now() + 15000
-    while (true) {
-      await new Promise(resolve => setTimeout(resolve, 200))
-      try { result = await invoke(userData, request); break } catch (next) { if (!next.unavailable || Date.now() >= deadline) throw next }
+  if (request.command === 'update.apply' && request.args?.resume !== undefined) {
+    const { endpoint, result: status } = await invokeWithLauncher(userData, { command: 'update.status' }, flags.launcher)
+    if (status?.supportsResume !== true) {
+      throw Object.assign(new Error('The running launcher does not advertise update continuation support; no update was requested.'), { code: 'UPDATE_RESUME_UNSUPPORTED' })
     }
+    result = await invoke(endpoint, request)
+    if (result?.accepted !== true) {
+      const detail = typeof result?.message === 'string' && result.message ? ' ' + result.message : ''
+      throw Object.assign(new Error('Launcher did not acknowledge update continuation. Check update status before retrying.' + detail), { code: 'UPDATE_RESUME_NOT_ACCEPTED' })
+    }
+  } else {
+    ({ result } = await invokeWithLauncher(userData, request, flags.launcher))
   }
   if (request.command === 'pending.list' && request.args && request.args.packId) {
     const wanted = request.args.packId

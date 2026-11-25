@@ -11,9 +11,7 @@ import { downloadReleaseAsset } from './release-download'
 import {
   buildApplyCommand,
   buildApplyCommandPath,
-  buildApplyLauncherPath,
   buildApplyLogPath,
-  buildHiddenLauncherScript,
   installDirFromExecPath,
 } from './launcher-update-helper'
 
@@ -315,6 +313,8 @@ export interface LauncherApplyOptions {
   signal?: AbortSignal
   /** 安装助手即将启动，此后不能取消。 */
   onCommit?: () => void
+  beforeCommit?: () => Promise<void>
+  continuation?: { operationId: string; toVersion: string }
 }
 
 export interface LauncherUpdater {
@@ -481,7 +481,7 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
   }
 
   /**
-   * 安装版：写一个一次性助手（cmd + vbs），由它等本进程退出后再执行
+   * 安装版：写一个一次性批处理助手，由它等本进程退出后再执行
    * 《Setup /S /D=<当前安装目录>》，装成功才重新拉起启动器。
    *
    * - 必须等本进程退出：Setup 要覆盖正在运行的 exe，活着装就是文件占用。
@@ -489,7 +489,7 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
    *   用户自定义的安装目录（连同 EXE 同级的 launcher-storage.json 数据目录指针）就丢了。
    * - 装失败不拉起 exe；保留安装包和日志，供手动恢复。
    */
-  async function writeSetupHelper(target: PendingUpdate, execPath: string): Promise<string> {
+  async function writeSetupHelper(target: PendingUpdate, execPath: string, operationId?: string): Promise<string> {
     const setup = target.setup
     if (!setup) throw new Error('新版本没有可下载的安装版安装包。')
     const setupPath = path.join(updateRoot, setup.name)
@@ -503,7 +503,6 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     // 写明安装请求，便于排查助手没有启动的情况。
     await writeFile(logPath, `[apply] apply requested for ${setup.name} at ${new Date().toISOString()}\n`, { flag: 'a' })
     const commandPath = buildApplyCommandPath(updateRoot, process.pid)
-    const launcherPath = buildApplyLauncherPath(updateRoot, process.pid)
     await writeFile(commandPath, buildApplyCommand({
       pid: process.pid,
       setupPath,
@@ -512,18 +511,23 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
       logPath,
       adoptRunningPacks: options.preserveRunningPacks,
       relaunchDataDir: options.relaunchDataDir,
+      operationId,
     }))
-    await writeFile(launcherPath, buildHiddenLauncherScript('.\\' + path.basename(commandPath)))
-    return launcherPath
+    return commandPath
   }
 
-  async function startSetupHelper(launcherPath: string): Promise<void> {
+  async function startSetupHelper(commandPath: string): Promise<void> {
     const doSpawn = options.spawnProcess ?? nodeSpawn
+    const systemRoot = process.env.SystemRoot
+    const cmd = systemRoot ? path.win32.join(systemRoot, 'System32', 'cmd.exe') : 'cmd.exe'
+    // CreateProcess sets the working directory. Only the generated filename goes through cmd.
+    const args = ['/d', '/c', '.\\' + path.basename(commandPath)]
     try {
-      const child = doSpawn('wscript.exe', [launcherPath], {
+      const child = doSpawn(cmd, args, {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
+        windowsVerbatimArguments: true,
         cwd: updateRoot,
       })
       await once(child, 'spawn')
@@ -539,6 +543,10 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
       throw new Error('没有已下载的启动器更新。')
     }
     const target = pending as PendingUpdate
+    const continuation = applyOptions.continuation
+    if (continuation && (!options.preserveRunningPacks || normalizeVersion(target.tag) !== normalizeVersion(continuation.toVersion))) {
+      throw new Error('待安装更新版本与续接请求不匹配。')
+    }
     const execPath = execPathOf()
     // 便携版已停发：历史便携包没有安装目录，也没法覆盖安装，只能请用户改用安装版。
     if (isPortableRuntime(execPath)) {
@@ -556,7 +564,7 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     let rollback: RelaunchRollback | void = undefined
     status = { ...status, state: 'applying', message: '正在准备安装更新，请稍候…' }
     try {
-      const launcherPath = await writeSetupHelper(target, execPath)
+      const commandPath = await writeSetupHelper(target, execPath, continuation?.operationId)
       signal.throwIfAborted()
       if (options.preserveRunningPacks && prepare) {
         rollback = await prepare(signal)
@@ -564,10 +572,12 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
         await stopRunningPacks()
       }
       signal.throwIfAborted()
+      await applyOptions.beforeCommit?.()
+      signal.throwIfAborted()
       options.emitProgress({ phase: 'applying', percent: 100 })
       signal.throwIfAborted()
       applyOptions.onCommit?.()
-      await startSetupHelper(launcherPath)
+      await startSetupHelper(commandPath)
     } catch (error) {
       let message = errorMessage(error)
       try {

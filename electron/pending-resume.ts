@@ -11,6 +11,28 @@ const CONNECT_PATH = '/connect'
 const SESSION_LIST_METHOD = 'session/list'
 const SESSION_PROMPT_METHOD = 'session/prompt'
 
+export interface ExactResumeInput {
+  packId: string
+  sessionId: string
+  prompt: string
+}
+
+export function parseExactResume(value: unknown): ExactResumeInput {
+  if (!isRecord(value) || Object.keys(value).some(key => !['packId', 'sessionId', 'prompt'].includes(key))) {
+    throw new Error('update.apply 的 resume 必须指定 packId、sessionId 和 prompt。')
+  }
+  const { packId, sessionId, prompt } = value
+  if (typeof packId !== 'string' || !packId || packId !== packId.trim()
+    || typeof sessionId !== 'string' || !sessionId || sessionId !== sessionId.trim()
+    || typeof prompt !== 'string' || !prompt.trim()) {
+    throw new Error('update.apply 的 resume 必须指定准确的 packId、sessionId 和非空 prompt。')
+  }
+  if (prompt.length > PENDING_RESUME_PROMPT_LIMIT) {
+    throw new Error('续接内容过长（最多 ' + PENDING_RESUME_PROMPT_LIMIT + ' 字符）。')
+  }
+  return { packId, sessionId, prompt }
+}
+
 export interface PendingResumeInput {
   packId: string
   prompt: string
@@ -170,6 +192,7 @@ async function callPackRpc(fetcher: Fetcher, origin: string, method: string, arg
   const init: RequestInit = {
     method: 'POST',
     headers: { 'content-type': 'application/json', cookie },
+    redirect: 'error',
     body,
   }
   if (signal) init.signal = signal
@@ -256,7 +279,59 @@ export async function readRunningSessions(options: {
   const base = parsePackBaseUrl(options.baseUrl)
   const cookie = await connectPackSession(fetcher, base.origin, base.token, options.signal)
   const value = await callPackRpc(fetcher, base.origin, SESSION_LIST_METHOD, {}, cookie, '读取会话列表', options.signal)
-  return runningSessionsOf(value)
+  const sessions = readKnownSessions(value)
+  for (const session of sessions) {
+    if (!isRecord(session)) throw new Error('无法确认会话运行状态。')
+    if (typeof session.running === 'boolean') continue
+    const status = session.status ?? session.state
+    if (typeof status !== 'string' || !['running', 'idle', 'completed', 'stopped', 'failed', 'cancelled', 'canceled'].includes(status)) {
+      throw new Error('无法确认会话运行状态。')
+    }
+  }
+  return runningSessionsOf(sessions)
+}
+
+function readKnownSessions(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value
+  if (isRecord(value) && Array.isArray(value.sessions)) return value.sessions
+  if (isRecord(value) && Array.isArray(value.items)) return value.items
+  throw new Error('无法确认会话列表。')
+}
+
+function requireExactSession(value: unknown, id: string): void {
+  const matches = readKnownSessions(value).filter(item => isRecord(item)
+    && (item.id ?? item.sessionId ?? item.session_id) === id)
+  if (matches.length !== 1) throw new Error('无法确认目标整合包中的指定会话。')
+}
+
+async function openExactResumeSession(options: { baseUrl: string; sessionId: string; signal: AbortSignal; fetch?: Fetcher }) {
+  const fetcher = resolveFetcher(options.fetch)
+  const { origin, token } = parsePackBaseUrl(options.baseUrl)
+  const url = new URL(origin)
+  if (url.protocol !== 'http:' && url.protocol !== 'https:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
+    throw new Error('续接要求已验证的本地 Web 服务。')
+  }
+  const cookie = await connectPackSession(fetcher, origin, token, options.signal)
+  requireExactSession(await callPackRpc(fetcher, origin, SESSION_LIST_METHOD, {}, cookie, '读取会话列表', options.signal), options.sessionId)
+  options.signal.throwIfAborted()
+  return { fetcher, origin, cookie }
+}
+
+export async function verifyExactResumeSession(options: Parameters<typeof openExactResumeSession>[0]): Promise<void> {
+  await openExactResumeSession(options)
+}
+
+export async function sendExactResume(options: Parameters<typeof openExactResumeSession>[0] & {
+  requestId: string
+  prompt: string
+}): Promise<void> {
+  const { fetcher, origin, cookie } = await openExactResumeSession(options)
+  await callPackRpc(fetcher, origin, SESSION_PROMPT_METHOD, {
+    requestId: options.requestId,
+    sessionId: options.sessionId,
+    mode: 'queue',
+    content: [{ type: 'text', text: options.prompt }],
+  }, cookie, '发送续接消息', options.signal)
 }
 
 export function createPendingResumeQueue(deps: PendingResumeQueueDeps): PendingResumeQueue {

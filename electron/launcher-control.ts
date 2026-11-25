@@ -15,7 +15,7 @@ import type { StorageController } from './storage-root'
 import { createApiLibrary, type ApiLibrary } from './api-library'
 import { createPackApis, type PackApis } from './pack-apis'
 import { readPackApiGrants } from './pack-api-grants'
-import { createPendingResumeQueue, enqueueBeforeRestart, type PendingResumeQueue } from './pending-resume'
+import { createPendingResumeQueue, enqueueBeforeRestart, parseExactResume, type PendingResumeQueue } from './pending-resume'
 import { migratePath } from './path-migration'
 import type { IdleShutdownService } from './idle-shutdown'
 import type { UpdateFlowService } from './update-flow'
@@ -353,7 +353,10 @@ export function createLauncherControl(options: {
         if (action === 'apply') {
           const waitMinutes = request.args?.waitMinutes
           if (waitMinutes !== undefined && (typeof waitMinutes !== 'number' || !Number.isFinite(waitMinutes))) throw new Error('update.apply 的 waitMinutes 必须是数字（分钟）。')
-          return flow.start({ waitMinutes: waitMinutes as number | undefined, force: request.args?.force === true })
+          const hasResume = request.args !== undefined && Object.hasOwn(request.args, 'resume')
+          const resume = hasResume ? parseExactResume(request.args?.resume) : undefined
+          if (resume && request.packId !== undefined && request.packId !== resume.packId) throw new Error('update.apply 的 packId 与续接目标不一致。')
+          return flow.start({ waitMinutes: waitMinutes as number | undefined, force: request.args?.force === true, ...(resume ? { resume } : {}) })
         }
         if (action === 'check') return flow.check()
         throw new Error('用法：update check|status|apply|cancel')

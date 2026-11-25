@@ -17,10 +17,11 @@ import { registerAppearanceProtocol, registerAppearanceScheme } from './appearan
 import { registerBackupsIpc } from './backups-ipc'
 import { registerPathMigrationIpc } from './path-migration-ipc'
 import { registerPendingResumesIpc } from './pending-resume-ipc'
-import { createPendingResumeQueue, PENDING_RESUMES_FILENAME, readRunningSessions } from './pending-resume'
-import { createIdleShutdownService, type IdleShutdownPack, type IdleShutdownService } from './idle-shutdown'
-import { createUpdateFlow, type UpdateFlowService } from './update-flow'
+import { createPendingResumeQueue, PENDING_RESUMES_FILENAME, readRunningSessions, sendExactResume, verifyExactResumeSession } from './pending-resume'
+import { createIdleShutdownService, type IdleShutdownService } from './idle-shutdown'
+import { createUpdateFlow, type UpdateFlowPack, type UpdateFlowService } from './update-flow'
 import { clearUpdateResume, saveUpdateResume } from './update-resume'
+import { clearUpdateContinuation, consumeUpdateContinuation, saveUpdateContinuation, UPDATE_CONTINUATION_FLAG } from './update-continuation'
 import { assertLegacyRuntimePreservable, prepareUserQuit } from './main-lifecycle'
 import { registerIdleShutdownIpc } from './idle-shutdown-ipc'
 import { registerLauncherPluginsIpc } from './launcher-plugins-ipc'
@@ -168,6 +169,7 @@ function relaunchLauncher(): void {
         const isDataDirFlag = (value: string | undefined) => value === '--data-dir' || value === '--user-data-dir'
         return !isDataDirFlag(argument) && !argument.startsWith('--data-dir=') && !argument.startsWith('--user-data-dir=')
           && !(isDataDirFlag(argv[index - 1]) && !argument.startsWith('--')) && argument !== '--adopt-running-packs'
+          && !argument.startsWith(UPDATE_CONTINUATION_FLAG)
       }),
     })
   })
@@ -189,6 +191,7 @@ interface Services {
   stopLegacyRuntime: () => Promise<void>
   legacyRuntimeBusy: () => boolean
   packsReconciled: Promise<boolean>
+  findUpdateRuntime: Parameters<typeof consumeUpdateContinuation>[0]['findRuntime']
   packControl: ReturnType<typeof createLauncherControl>
   launcherControl: ReturnType<typeof createLauncherControl>['execute']
   /** 所有整合包都空闲后自动关机的状态机；IPC、CLI、设置保存都指向这一份。 */
@@ -1217,16 +1220,16 @@ function createServices(bootSettings?: SettingsStore): Services {
       }
     },
   }
-  const listLivePacks = async () => {
+  const listLivePacks = async (): Promise<UpdateFlowPack[]> => {
     const listed = await packControl!.execute({ command: 'pack.list' }) as {
-      packs: { id: string; name: string; runtime?: { running?: boolean; url?: string | null; ownership?: 'owned' | 'observer'; lastError?: string | null }; externalRuntime?: { pid: number } | null }[]
+      packs: { id: string; name: string; runtime?: { running?: boolean; ownership?: 'owned' | 'observer'; lastError?: string | null }; externalRuntime?: { pid: number } | null }[]
     }
-    const packs = listed.packs.flatMap<IdleShutdownPack>(pack => {
+    const packs = listed.packs.flatMap<UpdateFlowPack>(pack => {
       if (pack.runtime?.running === true) {
         if (pack.runtime.ownership === 'observer') {
           return [{ id: pack.id, name: pack.name, url: null, unmanaged: true, note: pack.runtime.lastError ?? '整合包由另一个启动器管理。' }]
         }
-        return [{ id: pack.id, name: pack.name, url: packControl!.runtimeUrl(pack.id) }]
+        return [{ id: pack.id, name: pack.name, url: packControl!.runtimeUrl(pack.id), identity: packControl!.runtimeIdentity(pack.id) }]
       }
       if (pack.externalRuntime) {
         return [{ id: pack.id, name: pack.name, url: null, unmanaged: true, note: '发现未托管的整合包实例（PID ' + pack.externalRuntime.pid + '）。' }]
@@ -1235,6 +1238,10 @@ function createServices(bootSettings?: SettingsStore): Services {
     })
     if (legacyRuntimeBusy()) packs.push({ id: 'legacy-runtime', name: '旧版运行实例', url: null, unmanaged: true, note: '旧版运行实例尚未停止。' })
     return packs
+  }
+  const findUpdateRuntime: Services['findUpdateRuntime'] = async packId => {
+    const pack = (await listLivePacks()).find(item => item.id === packId)
+    return pack?.identity && pack.url && !pack.unmanaged ? { identity: pack.identity, url: pack.url } : null
   }
   const idleShutdown = createIdleShutdownService({
     settings,
@@ -1270,6 +1277,11 @@ function createServices(bootSettings?: SettingsStore): Services {
     countRunningSessions: async (url, signal) => (await readRunningSessions({ baseUrl: url, signal })).length,
     saveResume: resume => saveUpdateResume(userData, resume),
     clearResume: () => clearUpdateResume(userData),
+    continuation: {
+      verifySession: (pack, sessionId, signal) => verifyExactResumeSession({ baseUrl: pack.url, sessionId, signal }),
+      save: entry => saveUpdateContinuation(userData, entry),
+      clear: () => clearUpdateContinuation(userData),
+    },
     emitOutput: text => events.output('runtime', 'info', text),
   })
   packControl = createLauncherControl({
@@ -1289,7 +1301,7 @@ function createServices(bootSettings?: SettingsStore): Services {
     legacyRuntimeRunning: legacyRuntimeBusy, prepareOfficeCliTool,
     loginRegistration, uninstall, onUninstallStarted: quitAfterUninstallStarted, idleShutdown, updateFlow,
   })
-  return { packControl, packsReconciled, legacyRuntimeBusy, stopLegacyRuntime, uninstall, uninstallPlan, idleShutdown, updateFlow, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
+  return { packControl, packsReconciled, findUpdateRuntime, legacyRuntimeBusy, stopLegacyRuntime, uninstall, uninstallPlan, idleShutdown, updateFlow, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
 }
 
 // helper 已在 %TEMP% 里跑起来，主进程必须让位：EXE 被自己占着就永远删不掉。
@@ -1497,6 +1509,18 @@ app.whenReady().then(async () => {
   })
   // 启动时按设置校正一次登录项：缺省 false 会主动注销历史遗留的旧注册项。
   syncLaunchAtLogin(startupSettings, services.loginRegistration)
+  if (process.argv.some(arg => arg.startsWith(UPDATE_CONTINUATION_FLAG))) {
+    await consumeUpdateContinuation({
+      userData: app.getPath('userData'),
+      argv: process.argv,
+      version: app.getVersion(),
+      reconciled,
+      findRuntime: services.findUpdateRuntime,
+      deliver: resume => sendExactResume({ ...resume, signal: AbortSignal.timeout(5_000) }),
+    }).then(sent => {
+      if (!sent) console.warn('[update] 启动时未能验证更新续接请求。')
+    }).catch(error => console.warn('[update] 启动后发送续接消息失败。', error))
+  }
   controlServer = await createLauncherControlServer({ userData: app.getPath('userData'), execute: request => services!.launcherControl(request) })
   // 外观图片统一落在 userData/appearance/，渲染层经 dsh-appearance:// 读取。
   const appearanceDirectory = path.join(app.getPath('userData'), 'appearance')

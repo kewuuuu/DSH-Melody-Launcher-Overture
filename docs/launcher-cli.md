@@ -271,17 +271,22 @@ node bin/launcher-control.cjs update check --json
 node bin/launcher-control.cjs update apply --json
 node bin/launcher-control.cjs update apply --wait 30 --json
 node bin/launcher-control.cjs update apply --force --json
+node bin/launcher-control.cjs update apply --pack pack-a --session "<原会话 ID>" --resume "继续排查启动失败。已完成版本比对，下一步检查最新启动日志并汇报。" --wait 30 --json
 node bin/launcher-control.cjs update status --json
 node bin/launcher-control.cjs update cancel
 ~~~
 
-`update check` 只比对本地版本与最新 Release（`kewuuuu/DSH-Melody-Launcher-Overture`），返回 LauncherUpdateStatus（state 为 `up-to-date` / `update-available` / `downloaded` / `error`）。`update apply` 立刻返回 `{phase:"checking",…}`，剩下的在后台推进：检查 → 下载 Setup → 等所有整合包的会话跑完 → 记录「此刻正在运行的包」→ 停包 → 交给升级助手覆盖安装并重启启动器。**流程走完启动器会自己退出重启，包括托管当前对话的那个整合包**，所以要么让用户知道会断连，要么指定一个别的时机。
+`update check` 比对本地版本与最新 Release（`kewuuuu/DSH-Melody-Launcher-Overture`），返回 `LauncherUpdateStatus`，状态为 `up-to-date` / `update-available` / `downloaded` / `error`。取得用户明确同意后再运行 `update apply`。它返回当前更新状态，后台检查并下载 Setup，等所有整合包的会话空闲后原地安装并重启启动器。支持续接的启动器在重启后接管已核实的运行中整合包，保留原进程 PID、监听和端口，并跳过本次启动的 `autoStart`。
 
-等待口径与空闲自动关机一致：任一整合包上还有 running 会话算忙，探针失败或拿不到 Web 地址也算忙（宁可多等），没被启动器托管的实例同样算忙（停不掉它）。上限取 `--wait` 或设置里的 `updateWaitMinutes`（默认 10 分钟，1–120），到点仍有会话就取消本次更新并把忙的原因写进 message；`--force` 跳过等待直接装。`update cancel` 只在安装开始前有效（applying 阶段会报「安装已经开始，无法取消本次更新。」）。
+在当前对话中申请更新并续接时，**正在运行的启动器服务端**必须支持更新续接。CLI 先查询 `update status`，只有收到 `supportsResume: true` 才会向同一控制端点发送 `update apply`。`--pack`、`--session`、`--resume` 必须同时提供或一起省略，续接不能与 `--force` 一起用。CLI 发送 `update.apply`，将三项放在 `args.resume = { packId, sessionId, prompt }` 中。
 
-更新后首次启动只恢复名单里那些原本在跑的整合包，`autoStart` 的包一律不启动；名单文件是 `<userData>/launcher-update/resume-after-update.json`，读完即删，恢复失败的包只记日志。更新失败（下载失败、没有安装包、`--force` 之外的取消）会删掉名单，下次启动照旧走 autoStart。
+用 `pack list` 核对整合包 ID。只有可信的运行时元数据或能够核实就是当前对话的 DSH 会话界面，才可作为原会话 ID 的来源。无法核实就不要提交续接。续接只发往指定整合包中的原会话，提示应写清任务、已完成的工作、下一步和所需上下文。
 
-`update status` 返回 UpdateFlowState：{phase,waitMinutes,localVersion,remoteVersion,busy,resumePacks,startedAt,message}，phase 为 idle/checking/downloading/waiting/applying/failed。
+**收到 `accepted: true` 后，告知用户请求已受理并立即结束当前轮。** 禁止在这一轮等待或轮询 `update status`，因为当前轮必须先结束，后台更新才能等到会话空闲。响应里的 `message` 会提示下一步。如果服务端未明确受理，CLI 以非零状态退出。先查看报错和 `update status`，确认结果后再决定是否重试。
+
+等待上限取 `--wait` 或 `updateWaitMinutes`（默认 10 分钟，可设 1–120 的整数）。任一整合包上还有运行中的会话，或者无法确认其会话状态，都继续等待。到期仍忙则取消本次更新，`message` 说明原因。不带续接参数时可用 `--force` 跳过等待。`update cancel` 只在安装开始前有效。
+
+`update status` 返回 `UpdateFlowState`，包括 `phase`、`waitMinutes`、`localVersion`、`remoteVersion`、`busy`、`resumePacks`、`startedAt` 和 `message`。阶段为 `idle` / `checking` / `downloading` / `waiting` / `applying` / `failed`。
 
 ## 原地切换 DSH 版本（pack upgrade）
 

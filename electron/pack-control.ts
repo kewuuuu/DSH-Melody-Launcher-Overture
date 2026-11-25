@@ -112,7 +112,7 @@ export function createPackControl(options: PackControlOptions) {
   const claims = new Map<string, { identity: PackIdentity; release: () => void }>()
   const discovered = new Map<string, { home: string; worker?: VerifiedWorker; external?: ExternalRuntime; blocked?: boolean }>()
   const removals = new Map<string, Promise<void>>()
-  const verifiedUrls = new Map<string, { url: string; pid: number; startedAt: string | null; rawUrl: string }>()
+  const verifiedUrls = new Map<string, { url: string; process: ProcessIdentity; port: number; startedAt: string | null; rawUrl: string }>()
   const publications = new Map<string, Promise<void>>()
   const immediateStops = new Set<Promise<unknown>>()
   const queues = new Map<string, Promise<unknown>>()
@@ -564,11 +564,17 @@ export function createPackControl(options: PackControlOptions) {
   async function verifiedRuntimeUrl(id: string, state: PackRuntimeState): Promise<URL | null> {
     if (!state.running || !state.url || !validPort(state.port) || state.pid === null) return null
     const url = loopbackUrl(state.url, state.port)
+    let process: ProcessIdentity
     if (controllers.get(id)?.isRunning()) {
       const current = readProcessIdentity(state.pid)
       if (current.status !== 'alive' || !await ownsListener(current.identity, url, state.port)) return null
-    } else if (!discovered.get(id)?.worker || verifyProcessIdentity(discovered.get(id)!.worker!.record.runtime) !== 'match') return null
-    verifiedUrls.set(id, { url: url.href, pid: state.pid, startedAt: state.startedAt, rawUrl: state.url })
+      process = current.identity
+    } else {
+      const worker = discovered.get(id)?.worker
+      if (!worker || worker.record.runtime.pid !== state.pid || verifyProcessIdentity(worker.record.runtime) !== 'match') return null
+      process = worker.record.runtime
+    }
+    verifiedUrls.set(id, { url: url.href, process, port: state.port, startedAt: state.startedAt, rawUrl: state.url })
     return url
   }
 
@@ -791,7 +797,15 @@ export function createPackControl(options: PackControlOptions) {
     runtimeUrl: (id: string) => {
       const latest = runtimeStateOf(id)
       const verified = verifiedUrls.get(id)
-      return latest.running && verified && verified.pid === latest.pid && verified.startedAt === latest.startedAt && verified.rawUrl === latest.url ? verified.url : null
+      return latest.running && verified && verified.process.pid === latest.pid && verified.startedAt === latest.startedAt && verified.rawUrl === latest.url && verified.port === latest.port ? verified.url : null
+    },
+    runtimeIdentity: (id: string) => {
+      const latest = runtimeStateOf(id)
+      const verified = verifiedUrls.get(id)
+      if (!latest.running || latest.ownership !== 'owned' || !verified || verified.process.pid !== latest.pid ||
+          verified.startedAt !== latest.startedAt || verified.rawUrl !== latest.url || verified.port !== latest.port ||
+          verifyProcessIdentity(verified.process) !== 'match') return undefined
+      return { ...verified.process, port: verified.port }
     },
     assertPackRemovable,
     acquirePackRemoval,

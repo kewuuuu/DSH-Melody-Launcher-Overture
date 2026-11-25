@@ -18,6 +18,7 @@ import type { LauncherUpdater } from '../electron/launcher-update'
 import { LAUNCHER_RELEASE_REPOSITORY } from '../src/constants'
 
 import { createUpdateFlow } from '../electron/update-flow'
+import { defaultSettings } from '../electron/settings'
 
 const SETUP_KEWU = 'DSH-launcher-KEWU-Setup-1.1.0.exe'
 const LEGACY_SETUP = 'DSH-Launcher-1.0.4-setup.exe'
@@ -547,7 +548,7 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
     }
   })
 
-  it('先停整合包，再写 cmd+vbs、以 wscript 隐藏拉起并退出应用', async () => {
+  it('先停整合包，再以 cmd 隐藏拉起批处理并退出应用', async () => {
     delete process.env.PORTABLE_EXECUTABLE_FILE
     const { updater, updateRoot, calls, spawned, exitCodes } = await readyUpdater()
     await updater.apply()
@@ -555,26 +556,24 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
     // 顺序：先停整合包，再拉起助手。
     expect(calls).toEqual(['stop', 'spawn'])
     expect(spawned).toHaveLength(1)
-    expect(spawned[0].command).toBe('wscript.exe')
-    const launcherPath = spawned[0].args[0]
-    expect(launcherPath).toContain('apply-' + process.pid + '.vbs')
-    expect(spawned[0].options?.windowsHide).toBe(true)
-    expect(spawned[0].options?.detached).toBe(true)
+    expect(path.win32.basename(spawned[0].command)).toBe('cmd.exe')
+    expect(spawned[0].args).toEqual(['/d', '/c', '.\\apply-' + process.pid + '.cmd'])
+    expect(spawned[0].options).toMatchObject({
+      cwd: updateRoot,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    })
     expect(exitCodes).toEqual([0])
 
-    // vbs 只用窗口模式 0 拉起 cmd：隐藏运行，不留黑框；跑完自删。
-    const launcherScript = await readFile(launcherPath, 'utf8')
-    expect(launcherScript).toContain('WScript.Shell')
-    expect(launcherScript).toContain(', 0, False')
-    expect(launcherScript).toContain('DeleteFile WScript.ScriptFullName')
-    expect(launcherScript).toContain('shell.Run """.\\apply-' + process.pid + '.cmd""", 0, False')
     const commandPath = path.join(updateRoot, 'apply-' + process.pid + '.cmd')
 
     // cmd：等 PID 退出 → Setup /S /D=<当前安装目录> → 只有成功才 start 新 exe。
     const command = await readFile(commandPath, 'utf8')
     expect(command).toContain('/D=' + INSTALLED_DIR)
-    expect(command).toContain('"PID eq ' + process.pid + '"')
-    expect(command).toContain('goto wait')
+    expect(command).toContain('waiting for launcher pid ' + process.pid)
+    expect(command).toContain('if "%ERRORLEVEL%"=="0" goto launcher_gone')
     expect(command).toContain('start "" "' + INSTALLED_EXEC + '"\r\n')
     expect(command).not.toContain('--adopt-running-packs')
     expect(command).toContain('if not "%CODE%"=="0" goto setup_failed')
@@ -598,7 +597,7 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
     expect(failedBranch).toContain('setup failed with exit code %CODE%')
   })
 
-  it('preserves live sessions through the CLI flow and writes the adoption relaunch command', async () => {
+  it('waits for sessions before preserving the live packs and writes the adoption relaunch command', async () => {
     const dataDir = 'D:\\Custom data & 10% !'
     const prepared: boolean[] = []
     const { updater, updateRoot, calls, exitCodes } = await readyUpdater({
@@ -611,20 +610,24 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
       forbidden.push(name)
       throw new Error(name)
     }
+    let probes = 0
+    const wait = vi.fn(async () => {})
     const flow = createUpdateFlow({
       preserveRunningPacks: true,
       updater,
-      settings: { read: forbiddenCall('settings') },
-      listRunningPacks: forbiddenCall('list'),
-      countRunningSessions: forbiddenCall('probe'),
+      settings: { read: async () => defaultSettings({ homeDirectory: updateRoot, documentsDirectory: updateRoot, platform: 'win32' }) },
+      listRunningPacks: async () => [{ id: 'pack-a', url: 'http://127.0.0.1:3080/web' }],
+      countRunningSessions: async () => ++probes === 1 ? 1 : 0,
       saveResume: forbiddenCall('save'),
       clearResume: forbiddenCall('clear'),
-      wait: forbiddenCall('wait'),
+      wait,
     })
     expect((await updater.check()).state).toBe('downloaded')
     await flow.start()
     await flow.settled()
     expect(forbidden).toEqual([])
+    expect(wait).toHaveBeenCalledTimes(1)
+    expect(probes).toBe(3)
     expect(flow.status()).toMatchObject({ phase: 'applying', busy: [], resumePacks: [] })
     expect(prepared).toEqual([false])
     expect(calls).toEqual(['spawn'])
@@ -678,11 +681,11 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
       prepareForRelaunch: () => () => { rollback.push('rollback') },
       spawnProcess: (() => {
         const child = new EventEmitter()
-        queueMicrotask(() => child.emit('error', new Error('wscript missing')))
+        queueMicrotask(() => child.emit('error', new Error('cmd missing')))
         return child
       }) as never,
     })
-    await expect(failing.updater.apply()).rejects.toThrow('wscript missing')
+    await expect(failing.updater.apply()).rejects.toThrow('cmd missing')
     expect(failing.exitCodes).toEqual([])
     expect(rollback).toEqual(['rollback'])
     expect((await failing.updater.check()).state).toBe('downloaded')

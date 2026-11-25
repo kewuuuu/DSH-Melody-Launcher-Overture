@@ -19,13 +19,16 @@ async function temporary() {
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   return root
 }
-async function fixture() {
+async function fixture(update: { status?: unknown; apply?: unknown } = {}) {
   const userData = await temporary()
   const requests: unknown[] = []
   const server = await createLauncherControlServer({ userData, execute: async request => {
     requests.push(request)
     if (request.packId === 'missing') throw new Error('Unknown pack: missing')
     if (request.command === 'pack.list') return { packs: [{ id: 'pack-a', runtime: { phase: 'running' } }] }
+    if (request.command === 'pending.list') return [{ id: 'one', packId: 'pack-a' }, { id: 'two', packId: 'pack-b' }]
+    if (request.command === 'update.status' && update.status !== undefined) return update.status
+    if (request.command === 'update.apply' && update.apply !== undefined) return update.apply
     return request
   } })
   cleanups.push(() => server.close())
@@ -82,6 +85,59 @@ describe('launcher control CLI real Node processes', () => {
     }
     expect((await f.run('--help')).stdout).toContain('update apply [--wait <minutes>] [--force]')
   })
+  it('checks server support and sends the exact continuation in a single apply', async () => {
+    const accepted = { phase: 'checking', accepted: true, message: 'End the current turn without polling.' }
+    const f = await fixture({ status: { phase: 'idle', supportsResume: true }, apply: accepted })
+    const prompt = 'Continue the audit.\nVerify the result and report.'
+    const result = await f.run('update', 'apply', '--pack', 'pack-a', '--session', 'session-A', '--resume', prompt, '--wait', '30', '--json')
+    expect(JSON.parse(result.stdout)).toEqual(accepted)
+    expect(f.requests).toEqual([
+      { command: 'update.status' },
+      { command: 'update.apply', args: { waitMinutes: 30, resume: { packId: 'pack-a', sessionId: 'session-A', prompt } } },
+    ])
+    const help = (await f.run('--help')).stdout
+    expect(help).toContain('update apply --pack <pack-id> --session <session-id> --resume "<prompt>" [--wait <minutes>]')
+    expect(help).toContain('supportsResume:true')
+    expect(help).toContain('On accepted:true, end the current turn immediately without waiting or polling')
+  })
+  it('blocks continuation on an older server but still permits plain apply', async () => {
+    const f = await fixture({ status: { phase: 'idle' }, apply: { phase: 'checking' } })
+    await expect(f.run('update', 'apply', '--pack', 'pack-a', '--session', 'session-A', '--resume', 'Audit', '--json')).rejects.toMatchObject({ code: 1, stdout: '', stderr: expect.stringContaining('UPDATE_RESUME_UNSUPPORTED') })
+    expect(f.requests).toEqual([{ command: 'update.status' }])
+    expect(JSON.parse((await f.run('update', 'apply', '--json')).stdout)).toEqual({ phase: 'checking' })
+    expect(f.requests).toEqual([{ command: 'update.status' }, { command: 'update.apply' }])
+  })
+  it('requires an explicit apply acknowledgement and surfaces the server message', async () => {
+    const f = await fixture({ status: { supportsResume: true }, apply: { phase: 'waiting', message: 'Another update is already running.' } })
+    await expect(f.run('update', 'apply', '--pack', 'pack-a', '--session', 'session-A', '--resume', 'Audit', '--json')).rejects.toMatchObject({ code: 1, stdout: '', stderr: expect.stringMatching(/UPDATE_RESUME_NOT_ACCEPTED.*Another update is already running/) })
+    expect(f.requests).toEqual([
+      { command: 'update.status' },
+      { command: 'update.apply', args: { resume: { packId: 'pack-a', sessionId: 'session-A', prompt: 'Audit' } } },
+    ])
+  })
+  it('rejects incomplete, blank, or forced continuation before contacting the launcher', async () => {
+    const f = await fixture()
+    const pack = ['--pack', 'pack-a'], session = ['--session', 'session-A'], resume = ['--resume', 'Audit']
+    const invalid = [
+      [...pack, ...session], [...pack, ...resume], [...session, ...resume], pack, session, resume,
+      ['--pack', ' ', ...session, ...resume], [...pack, '--session', ' ', ...resume], [...pack, ...session, '--resume', ' '],
+      [...pack, ...session, ...resume, '--force'],
+      [...pack, ...session, ...resume, '--args', '{"force":true}'],
+      [...pack, ...session, ...resume, '--wait', '121'],
+    ]
+    for (const args of invalid) {
+      await expect(f.run('update', 'apply', ...args, '--json')).rejects.toMatchObject({ code: 1, stdout: '', stderr: expect.stringContaining('CLI_ERROR') })
+    }
+    await expect(f.run('update', 'status', ...pack, ...session, ...resume, '--json')).rejects.toMatchObject({ code: 1 })
+    expect(f.requests).toEqual([])
+  })
+  it('preserves pack restart resumes and pending list filtering', async () => {
+    const f = await fixture()
+    expect(JSON.parse((await f.run('pack', 'restart', 'pack-a', '--resume', 'Audit', '--session', 'session-A', '--json')).stdout)).toEqual({ command: 'pack.restart', packId: 'pack-a', args: { resume: { prompt: 'Audit', sessionId: 'session-A' } } })
+    expect(JSON.parse((await f.run('pack', 'restart', 'pack-a', '--resume', 'Audit', '--json')).stdout)).toEqual({ command: 'pack.restart', packId: 'pack-a', args: { resume: { prompt: 'Audit' } } })
+    expect(JSON.parse((await f.run('pending', 'list', '--pack', 'pack-b', '--json')).stdout)).toEqual([{ id: 'two', packId: 'pack-b' }])
+    expect(f.requests.at(-1)).toEqual({ command: 'pending.list', args: { packId: 'pack-b' } })
+  })
   it('uses environment discovery and rejects invalid authentication metadata', async () => {
     const f = await fixture()
     const result = await exec(process.execPath, [cliPath, 'pack', 'list', '--json'], { env: { ...process.env, DSH_LAUNCHER_USER_DATA: f.userData } })
@@ -105,6 +161,10 @@ describe('managed launcher skill', () => {
     for (const phrase of ['name: launcher-control', 'pack', 'list', 'stop', 'restart', 'pack-a', 'DSH_LAUNCHER_USER_DATA', 'disconnect', 'settings', 'config']) expect(content).toContain(phrase)
     const argv = content.split('\n').filter(line => line.startsWith('[')).map(line => JSON.parse(line) as string[])
     expect(argv.some(args => args.includes('restart') && args.includes('pack-a'))).toBe(true)
+    expect(argv.map(args => args.slice(4))).toContainEqual(['update', 'apply', '--pack', 'pack-a', '--session', '<verified-original-session-id>', '--resume', '<self-contained continuation task>', '--json'])
+    for (const phrase of ['explicit user approval', 'trusted runtime metadata', 'supportsResume:true', 'cannot be combined with --force', 'On accepted:true', 'end the current turn immediately without waiting or polling', 'adopts verified running packs in place without autostart', 'only the specified pack and original session']) {
+      expect(content).toContain(phrase)
+    }
     expect(path.isAbsolute(argv[0][1])).toBe(true)
     expect(await readFile(argv[0][1], 'utf8')).toBe(await readFile(cliPath, 'utf8'))
     expect((await exec(argv[0][0], [argv[0][1], '--help'])).stdout).toContain('pack start|stop|restart')

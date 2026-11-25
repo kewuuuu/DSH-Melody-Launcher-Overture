@@ -196,21 +196,29 @@ describe('update flow', () => {
     expect(h.applied).toEqual([])
   })
 
-  it.each([false, true])('preserves running sessions without listing, waiting, or touching resume (force=%s)', async force => {
-    const h = harness({ sessions: 3, preserveRunningPacks: true })
-    await h.service.start({ waitMinutes: 1, force })
+  it('preserves running packs after waiting for active sessions on a plain update', async () => {
+    const h = harness({ sessions: 3, sessionsEndAfterPolls: 1, preserveRunningPacks: true })
+    await expect(h.service.start({ waitMinutes: 1 })).resolves.toMatchObject({ accepted: true })
     await h.service.settled()
     expect(h.service.status()).toMatchObject({ phase: 'applying', busy: [], resumePacks: [] })
     expect(h.applied).toEqual(['apply'])
-    expect(h.listRunningPacks).not.toHaveBeenCalled()
-    expect(h.wait).not.toHaveBeenCalled()
-    expect(h.polls).toEqual([])
+    expect(h.wait).toHaveBeenCalledTimes(1)
+    expect(h.polls).toHaveLength(2)
     expect(h.saved).toEqual([])
     expect(h.cleared).toEqual([])
   })
 
-  it('leaves the resume file alone if live preparation fails', async () => {
+  it('allows an explicit force to skip the wait for a plain update', async () => {
     const h = harness({ sessions: 3, preserveRunningPacks: true })
+    await h.service.start({ waitMinutes: 1, force: true })
+    await h.service.settled()
+    expect(h.applied).toEqual(['apply'])
+    expect(h.listRunningPacks).not.toHaveBeenCalled()
+    expect(h.wait).not.toHaveBeenCalled()
+  })
+
+  it('leaves the resume file alone if live preparation fails', async () => {
+    const h = harness({ preserveRunningPacks: true })
     h.failApply(new Error('preparation failed'))
     await h.service.start()
     await h.service.settled()

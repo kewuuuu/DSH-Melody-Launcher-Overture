@@ -76,6 +76,18 @@ describe('launcher control update commands', () => {
     ])
   })
 
+  it('forwards the exact continuation and rejects malformed or conflicting targets before starting', async () => {
+    const f = await fixture()
+    const resume = { packId: 'pack-a', sessionId: 'original', prompt: 'Continue' }
+    await f.control.execute({ command: 'update.apply', args: { resume, force: true } })
+    expect(f.calls).toEqual([{ op: 'start', options: { waitMinutes: undefined, force: true, resume } }])
+    for (const value of [null, '', { ...resume, sessionId: ' ' }, { ...resume, packId: ' other' }, { ...resume, prompt: 'x'.repeat(8001) }, { ...resume, extra: true }]) {
+      await expect(f.control.execute({ command: 'update.apply', args: { resume: value } })).rejects.toThrow()
+    }
+    await expect(f.control.execute({ command: 'update.apply', packId: 'other', args: { resume } })).rejects.toThrow('packId')
+    expect(f.calls).toHaveLength(1)
+  })
+
   it('rejects a bad wait value, an unknown action and a missing flow', async () => {
     const f = await fixture()
     await expect(f.control.execute({ command: 'update.apply', args: { waitMinutes: 'soon' } })).rejects.toThrow('waitMinutes 必须是数字')

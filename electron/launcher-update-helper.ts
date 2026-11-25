@@ -1,5 +1,5 @@
 // 升级助手（纯函数）：安装版自更新要交给一个「活得比启动器久」的进程去装。
-// 这里只拼文本：一次性 cmd、隐藏启动它的 vbs、日志路径、重启命令。不碰进程也不碰文件，
+// 这里只拼文本：一次性 cmd、日志路径、重启命令。不碰进程也不碰文件，
 // 测试断言生成结果就够了；真正的 spawn 在 launcher-update.ts 里做。
 //
 // 为什么不能让启动器自己装：
@@ -11,13 +11,12 @@
 // 而这段脚本是隐藏运行的，乱码日志等于没有日志。中文文案留在 TS 层的状态与错误信息里。
 
 import path from 'node:path'
+import { isUpdateOperationId, UPDATE_CONTINUATION_FLAG } from './update-continuation'
 
 /** 日志文件名前缀：<userData>/launcher-update/apply-<时间戳>.log。 */
 export const APPLY_LOG_PREFIX = 'apply-'
 /** 等旧进程退出的上限（秒）：等不到就放弃安装，绝不带着文件占用去装。 */
 export const APPLY_WAIT_TIMEOUT_SECONDS = 60
-/** 轮询旧进程的间隔（秒）。 */
-export const APPLY_WAIT_POLL_SECONDS = 1
 
 function pad2(value: number): string {
   return value < 10 ? `0${value}` : String(value)
@@ -45,11 +44,6 @@ export function buildApplyCommandPath(updateRoot: string, pid: number): string {
   return path.join(updateRoot, `apply-${Math.trunc(pid)}.cmd`)
 }
 
-/** 隐藏启动批处理的 vbs：apply-<pid>.vbs（跑完自删）。 */
-export function buildApplyLauncherPath(updateRoot: string, pid: number): string {
-  return path.join(updateRoot, `apply-${Math.trunc(pid)}.vbs`)
-}
-
 /** 安装目录 = 当前 exe 所在目录。按 win32 口径解析：下游是 Windows 批处理。 */
 export function installDirFromExecPath(execPath: string): string {
   return path.win32.dirname(execPath.trim())
@@ -58,10 +52,12 @@ export function installDirFromExecPath(execPath: string): string {
 /** 安装成功后重新拉起启动器的那一行。 */
 export const ADOPT_RUNNING_PACKS_FLAG = '--adopt-running-packs'
 
-export function buildRestartCommand(exePath: string, adoptRunningPacks = false, dataDir?: string): string {
+export function buildRestartCommand(exePath: string, adoptRunningPacks = false, dataDir?: string, operationId?: string): string {
+  if (operationId !== undefined && (!adoptRunningPacks || !isUpdateOperationId(operationId))) throw new Error('Invalid launcher update continuation ID')
+  const continuation = operationId ? ' ' + UPDATE_CONTINUATION_FLAG + operationId : ''
   const adopt = adoptRunningPacks ? ' ' + ADOPT_RUNNING_PACKS_FLAG : ''
   const override = dataDir ? ' --data-dir ' + cmdQuoted(dataDir.replace(/\\+$/, tail => tail + tail)) : ''
-  return `start "" ${cmdQuoted(exePath)}${adopt}${override}`
+  return `start "" ${cmdQuoted(exePath)}${adopt}${override}${continuation}`
 }
 
 /** 安装目录里会让批处理命令行跑偏的字符：它们没有可靠的转义写法，只能拒绝。 */
@@ -83,7 +79,7 @@ export function buildInstallDirArgument(installDir: string): string {
 }
 
 export interface ApplyCommandInput {
-  /** 正在运行的启动器进程号：脚本轮询等它退出。 */
+  /** 正在运行的启动器进程号：助手等待它退出。 */
   pid: number
   /** 下载好的 Setup 全路径。 */
   setupPath: string
@@ -95,29 +91,27 @@ export interface ApplyCommandInput {
   logPath: string
   adoptRunningPacks?: boolean
   relaunchDataDir?: string
+  operationId?: string
   /** 等待上限（秒），缺省 APPLY_WAIT_TIMEOUT_SECONDS。 */
   waitTimeoutSeconds?: number
-  /** 轮询间隔（秒），缺省 APPLY_WAIT_POLL_SECONDS。 */
-  pollSeconds?: number
 }
 
 /**
  * 生成一次性批处理文本（CRLF：cmd 对只有 LF 的批处理会读错行）。
- * 顺序是固定的：轮询等 PID 退出 → `Setup /S /D=<安装目录>` → 只有退出码 0 才 start 新 exe。
+ * 顺序是固定的：等待 PID 退出 → `Setup /S /D=<安装目录>` → 只有退出码 0 才 start 新 exe。
  */
 export function buildApplyCommand(input: ApplyCommandInput): string {
   const pid = Math.trunc(input.pid)
   const waitTimeoutSeconds =
-    typeof input.waitTimeoutSeconds === 'number' && input.waitTimeoutSeconds >= 1
+    typeof input.waitTimeoutSeconds === 'number' && Number.isFinite(input.waitTimeoutSeconds) && input.waitTimeoutSeconds >= 1
       ? Math.trunc(input.waitTimeoutSeconds)
       : APPLY_WAIT_TIMEOUT_SECONDS
-  const pollSeconds =
-    typeof input.pollSeconds === 'number' && input.pollSeconds >= 1
-      ? Math.trunc(input.pollSeconds)
-      : APPLY_WAIT_POLL_SECONDS
-  const tries = Math.max(1, Math.ceil(waitTimeoutSeconds / pollSeconds))
-  // ping -n N 的间隔是 N-1 秒。不用 timeout.exe：它要读控制台输入，隐藏进程里会直接失败。
-  const pingCount = pollSeconds + 1
+  const waitCommand = Buffer.from([
+    '$ErrorActionPreference = "Stop"',
+    `try { $launcher = [Diagnostics.Process]::GetProcessById(${pid}) } catch [ArgumentException] { exit 0 }`,
+    `if ($launcher.WaitForExit(${waitTimeoutSeconds * 1000})) { exit 0 }`,
+    'exit 2',
+  ].join('\n'), 'utf16le').toString('base64')
   const setup = cmdQuoted(input.setupPath)
   const installDirArg = buildInstallDirArgument(input.installDir)
   return [
@@ -130,14 +124,11 @@ export function buildApplyCommand(input: ApplyCommandInput): string {
     'call :log "=== apply start: %DATE% %TIME% ==="',
     'set "CODE=1"',
     `call :log "waiting for launcher pid ${pid} to exit (up to ${waitTimeoutSeconds}s)"`,
-    'set "TRIES=0"',
-    ':wait',
-    `%SystemRoot%\\System32\\tasklist.exe /nh /fi "PID eq ${pid}" | %SystemRoot%\\System32\\find.exe "${pid}" >nul`,
-    'if errorlevel 1 goto launcher_gone',
-    'set /a TRIES+=1',
-    `if %TRIES% GEQ ${tries} goto wait_timeout`,
-    `%SystemRoot%\\System32\\ping.exe -n ${pingCount} 127.0.0.1 >nul`,
-    'goto wait',
+    `"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${waitCommand} 2>>"%LOG%"`,
+    'if "%ERRORLEVEL%"=="0" goto launcher_gone',
+    'if "%ERRORLEVEL%"=="2" goto wait_timeout',
+    'call :log "could not verify launcher exit; setup was not run"',
+    'goto done',
     ':wait_timeout',
     `call :log "launcher pid ${pid} is still running after ${waitTimeoutSeconds}s; setup was not run"`,
     'call :log "=== apply aborted: %DATE% %TIME% ==="',
@@ -148,7 +139,7 @@ export function buildApplyCommand(input: ApplyCommandInput): string {
     'set "CODE=%ERRORLEVEL%"',
     'if not "%CODE%"=="0" goto setup_failed',
     'call :log "setup finished with exit code 0; starting the new version"',
-    buildRestartCommand(input.exePath, input.adoptRunningPacks, input.relaunchDataDir),
+    buildRestartCommand(input.exePath, input.adoptRunningPacks, input.relaunchDataDir, input.operationId),
     'set "CODE=%ERRORLEVEL%"',
     'if not "%CODE%"=="0" goto restart_failed',
     'call :log "=== apply done: %DATE% %TIME% ==="',
@@ -165,21 +156,6 @@ export function buildApplyCommand(input: ApplyCommandInput): string {
     ':log',
     '>>"%LOG%" echo [apply] %~1',
     'goto :eof',
-    '',
-  ].join('\r\n')
-}
-
-/**
- * 隐藏启动批处理的 vbs。cmd 是控制台程序，detached spawn 会给它新建一个可见的黑色窗口，
- * 借 wscript（GUI 子系统）以窗口模式 0 拉起就看不见；vbs 自己跑完即删，目录不留垃圾。
- */
-export function buildHiddenLauncherScript(commandPath: string): string {
-  // 三引号是 VBScript 里「字符串内容带一个引号」的写法："""C:\x.cmd""" 的实参就是 "C:\x.cmd"。
-  const quoted = commandPath.split('"').join('')
-  return [
-    'Set shell = CreateObject("WScript.Shell")',
-    `shell.Run """${quoted}""", 0, False`,
-    'CreateObject("Scripting.FileSystemObject").DeleteFile WScript.ScriptFullName',
     '',
   ].join('\r\n')
 }

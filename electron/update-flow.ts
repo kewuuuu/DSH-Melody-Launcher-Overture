@@ -1,10 +1,13 @@
+import { randomUUID } from 'node:crypto'
+import { armUpdateContinuation, samePreservedRuntime, type PreservedRuntime, type UpdateContinuation } from './update-continuation'
+import { parseExactResume, type ExactResumeInput } from './pending-resume'
 import type { AppSettings, LauncherUpdateStatus } from '../src/types'
 import { LauncherRelaunchExitError, type LauncherApplyOptions } from './launcher-update'
 import type { UpdateResumeFile, UpdateResumePack } from './update-resume'
 import { UPDATE_RESUME_VERSION } from './update-resume'
 
 /**
- * 「CLI 触发更新」的状态机：检查 → 下载 → 交给升级助手。旧模式会先等整合包会话结束并记录恢复清单。
+ * CLI 更新状态机：检查、下载、等待会话空闲、交给升级助手。
  * 主进程只注入能力（包查询、会话探针、updater、resume 文件），判定逻辑留在这里好测。
  *
  * 等待语义复用空闲自动关机：有会话算忙、探针失败也算忙（宁可多等，也不在用户正干活时重启）；
@@ -21,6 +24,7 @@ export interface UpdateFlowPack {
   /** 启动器管不着的实例：停不掉也查不到会话，只能算忙。 */
   unmanaged?: boolean
   note?: string
+  identity?: PreservedRuntime
 }
 
 export interface UpdateFlowBusy {
@@ -38,6 +42,9 @@ export interface UpdateFlowState {
   resumePacks: UpdateResumePack[]
   startedAt: string | null
   message: string | null
+  supportsResume?: true
+  accepted?: true
+  operationId?: string
 }
 
 export interface UpdateFlowDeps {
@@ -47,12 +54,17 @@ export interface UpdateFlowDeps {
     download(): Promise<LauncherUpdateStatus>
     apply(options?: LauncherApplyOptions): Promise<void>
   }
-  /** 调用方须同时启用 updater 的整合包保留模式。--wait 和 --force 仍可传入，但不影响此模式。 */
+  /** 调用方须同时启用 updater 的整合包保留模式。 */
   preserveRunningPacks?: boolean
   listRunningPacks: () => Promise<UpdateFlowPack[]>
   countRunningSessions: (url: string, signal: AbortSignal) => Promise<number>
   saveResume: (file: UpdateResumeFile) => Promise<void>
   clearResume: () => Promise<void>
+  continuation?: {
+    verifySession: (pack: UpdateFlowPack & { url: string }, sessionId: string, signal: AbortSignal) => Promise<void>
+    save: (entry: UpdateContinuation) => Promise<void>
+    clear: () => Promise<void>
+  }
   now?: () => number
   wait?: (milliseconds: number) => Promise<void>
   probeTimeoutMs?: number
@@ -65,7 +77,7 @@ export interface UpdateFlowService {
   /** 只检查、不下载不安装；结果同时写进 status() 的版本与 message。 */
   check(): Promise<LauncherUpdateStatus>
   /** 起一轮更新；立刻返回当前状态，流程在后台推进（apply 会自己让进程退出）。 */
-  start(options?: { waitMinutes?: number; force?: boolean }): Promise<UpdateFlowState>
+  start(options?: { waitMinutes?: number; force?: boolean; resume?: ExactResumeInput }): Promise<UpdateFlowState>
   cancel(): Promise<UpdateFlowState>
   /** 当前这轮流程跑完（或被取消/失败）时兑现；没有流程在跑时立即兑现。 */
   settled(): Promise<void>
@@ -102,6 +114,7 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
     resumePacks: [],
     startedAt: null,
     message: null,
+    ...(deps.preserveRunningPacks && deps.continuation ? { supportsResume: true } : {}),
   }
 
   let running: Promise<void> | null = null
@@ -164,6 +177,7 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
       }
       try {
         const count = await runWithTimeout(signal => deps.countRunningSessions(pack.url as string, signal), probeTimeoutMs)
+        if (!Number.isSafeInteger(count) || count < 0) throw new Error('会话计数无效')
         if (count > 0) busy.push({ packId: pack.id, reason: count === 1 ? '有 1 个会话正在运行' : '有 ' + count + ' 个会话正在运行' })
       } catch (error) {
         busy.push({ packId: pack.id, reason: '无法确认有没有会话在跑（' + messageOf(error) + '）' })
@@ -187,19 +201,28 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
       if (now() >= deadline) {
         throw new Error('等待 ' + waitMinutes + ' 分钟仍有会话在运行，已取消本次更新：' + busy.map(item => item.packId + '（' + item.reason + '）').join('；'))
       }
-      await wait(pollIntervalMs)
+      await wait(Math.min(pollIntervalMs, deadline - now()))
     }
   }
 
-  const run = async (options: Parameters<UpdateFlowService['start']>[0], signal: AbortSignal): Promise<void> => {
+  const exactPack = async (resume: ExactResumeInput, expected?: PreservedRuntime) => {
+    const pack = (await deps.listRunningPacks()).find(item => item.id === resume.packId)
+    const url = pack?.url
+    const identity = pack?.identity
+    if (!pack || pack.unmanaged || !url || !identity || (expected && !samePreservedRuntime(expected, identity))) {
+      throw new Error('无法验证续接目标整合包及其本地 Web 服务。')
+    }
+    await runWithTimeout(signal => deps.continuation!.verifySession({ ...pack, url }, resume.sessionId, signal), probeTimeoutMs)
+    return identity
+  }
+
+  const run = async (options: Parameters<UpdateFlowService['start']>[0], signal: AbortSignal, continuation?: UpdateContinuation): Promise<void> => {
     let writingResume = false
+    let handedOff = false
     try {
-      if (!preserveRunningPacks) {
-        const settings = await deps.settings.read()
-        if (signal.aborted) return
-        state.waitMinutes = waitMinutesOf(options?.waitMinutes ?? settings.updateWaitMinutes)
-      }
+      const settings = await deps.settings.read()
       if (signal.aborted) return
+      state.waitMinutes = waitMinutesOf(options?.waitMinutes ?? settings.updateWaitMinutes)
       const checked = await deps.updater.check()
       if (signal.aborted) return
       adopt(checked)
@@ -218,20 +241,39 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
       if (signal.aborted) return
       adopt(downloaded)
       if (downloaded.state !== 'downloaded') throw new Error(downloaded.message || '更新下载失败。')
-      if (preserveRunningPacks) {
-        state.phase = 'applying'
-        state.message = '正在保留运行中的整合包并准备安装更新…'
-        emit('[update] ' + state.message)
-        if (signal.aborted) return
-        await deps.updater.apply({ signal, onCommit: () => { committed = true } })
-        committed = true
-        return
-      }
-      if (options?.force !== true) {
+      const mustWait = options?.force !== true || continuation !== undefined
+      if (mustWait) {
         state.phase = 'waiting'
         state.busy = []
         await waitUntilIdle(state.waitMinutes, signal)
         if (signal.aborted) return
+      }
+      if (preserveRunningPacks) {
+        const expectedVersion = downloaded.remoteVersion
+        if (continuation && !expectedVersion) throw new Error('无法确认待安装的更新版本。')
+        state.phase = 'applying'
+        state.message = '正在保留运行中的整合包并准备安装更新…'
+        emit('[update] ' + state.message)
+        if (signal.aborted) return
+        await deps.updater.apply({
+          signal,
+          onCommit: () => { committed = true },
+          ...(continuation && expectedVersion ? { continuation: { operationId: continuation.operationId, toVersion: expectedVersion } } : {}),
+          ...(mustWait ? { beforeCommit: async () => {
+            if (continuation && expectedVersion) {
+              await exactPack(continuation.resume, continuation.runtime)
+              signal.throwIfAborted()
+              await deps.continuation!.save(armUpdateContinuation(continuation, expectedVersion, now()))
+            }
+            const busy = await collectBusy()
+            signal.throwIfAborted()
+            state.busy = busy
+            if (busy.length > 0) throw new Error('安装前有会话正在运行或无法确认状态，已中止本次更新。')
+          } } : {}),
+        })
+        committed = true
+        handedOff = true
+        return
       }
       // 记录「此刻还在跑」的包：停包之后就没有现场了，恢复只能靠这一份。
       const packs = await deps.listRunningPacks()
@@ -269,6 +311,16 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
       state.message = messageOf(error)
       if (!preserveRunningPacks) await deps.clearResume().catch(() => undefined)
       emit('[update] 更新失败：' + state.message)
+    } finally {
+      if (continuation && !handedOff) await clearContinuation()
+    }
+  }
+
+  const clearContinuation = async () => {
+    try {
+      await deps.continuation?.clear()
+    } catch (error) {
+      emit('[update] 清理续接记录失败：' + messageOf(error))
     }
   }
 
@@ -297,6 +349,8 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
     },
     start: async options => {
       if (running || checking || committed) throw new Error('已有一个更新流程在进行中。')
+      const resume = options?.resume === undefined ? undefined : parseExactResume(options.resume)
+      if (resume && (!preserveRunningPacks || !deps.continuation)) throw new Error('当前更新流程不支持会话续接。')
       const next = new AbortController()
       controller = next
       state.phase = 'checking'
@@ -304,13 +358,33 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlowService {
       state.busy = []
       state.resumePacks = []
       state.startedAt = new Date(now()).toISOString()
+      delete state.operationId
       state.message = '正在检查更新…'
-      running = Promise.resolve().then(() => run(options, next.signal)).finally(() => {
+      let continuation: UpdateContinuation | undefined
+      const accepted = Promise.resolve().then(async (): Promise<UpdateFlowState> => {
+        if (resume) {
+          state.message = '正在验证续接目标…'
+          const runtime = await exactPack(resume)
+          next.signal.throwIfAborted()
+          continuation = { operationId: randomUUID(), resume, runtime, handoff: null }
+          await deps.continuation!.save(continuation)
+          next.signal.throwIfAborted()
+          state.operationId = continuation.operationId
+          state.message = '已登记更新续接，将等待所有会话空闲后安装。'
+        }
+        return { ...snapshot(), accepted: true }
+      })
+      running = accepted.then(() => run(options, next.signal, continuation), async error => {
+        if (continuation) await clearContinuation()
+        if (next.signal.aborted) return
+        state.phase = 'failed'
+        state.message = messageOf(error)
+      }).finally(() => {
         controller = null
         running = null
         if (state.phase !== 'applying') committed = false
       })
-      return snapshot()
+      return accepted
     },
     cancel: async () => {
       if (committed) throw new Error('安装已经开始，无法取消本次更新。')
