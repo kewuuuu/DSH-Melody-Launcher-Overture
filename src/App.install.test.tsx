@@ -5,7 +5,12 @@ import { expect, it, vi } from 'vitest'
 import App from './App'
 import { DSH_REPOSITORY } from './constants'
 import { demoApi } from './demo-api'
-import type { InstallProgress, LauncherApi } from './types'
+import type { InstallProgress, LauncherApi, RepositoryInstallResult } from './types'
+
+vi.mock('./api/client', async importOriginal => {
+  const actual = await importOriginal<typeof import('./api/client')>()
+  return { ...actual, resolveLauncherApi: () => window.launcher }
+})
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 
@@ -66,6 +71,52 @@ it('shows scoped DSH stages and cancellation on the pack overview and the versio
     expect(button('取消安装', versionStage)).toBeUndefined()
     await act(async () => rejectVersion(new Error('已取消安装。')))
     expect(button('下载', row)?.disabled).toBe(false)
+  } finally {
+    await act(async () => root.unmount())
+    delete window.launcher
+    container.remove()
+  }
+})
+
+it('首页更新完成后立即在 DSH 版本页显示新安装版本', async () => {
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const before = await demoApi.readRuntimeEnvironment()
+  const version = '0.2.2-rc.5'
+  const item = {
+    version, root: 'C:\\test-runtime', executable: 'C:\\test-runtime\\dsh.cmd',
+    source: 'launcher' as const, selected: true, removable: true,
+  }
+  const after = { ...before, dshSelectedVersion: version, dshInstalled: [...before.dshInstalled, item] }
+  const installation = { installed: true, version, executable: item.executable, source: 'launcher' as const }
+  const result: RepositoryInstallResult = {
+    kind: 'dsh',
+    settings: { ...await demoApi.getSettings(), dshVersion: version, launchExecutable: item.executable },
+    profile: await demoApi.readProfile(),
+    dshInstallation: installation,
+  }
+  const readRuntimeEnvironment = vi.fn().mockResolvedValueOnce(before).mockResolvedValue(after)
+  const installPlugin = vi.fn().mockResolvedValue(result)
+  window.launcher = {
+    ...demoApi, readRuntimeEnvironment, installPlugin,
+    detectDshInstallation: async () => ({ installed: true, version: '0.2.1-rc.3', executable: 'demo-dsh.exe', source: 'launcher' }),
+  } satisfies LauncherApi
+  const click = async (label: string) => {
+    const button = Array.from(container.querySelectorAll('button')).find(item => item.textContent === label)
+    expect(button).toBeDefined()
+    await act(async () => button!.click())
+  }
+  try {
+    await act(async () => root.render(<App />))
+    expect(readRuntimeEnvironment).toHaveBeenCalledTimes(1)
+    await click('整合包')
+    await click('更新 DSH')
+    expect(installPlugin).toHaveBeenCalledExactlyOnceWith(DSH_REPOSITORY)
+    await click('DSH版本')
+    const installed = Array.from(container.querySelectorAll('.settings-panel')).find(panel => panel.textContent?.includes('已安装版本'))!
+    expect(installed.textContent).toContain(version)
+    expect(readRuntimeEnvironment).toHaveBeenCalledTimes(2)
   } finally {
     await act(async () => root.unmount())
     delete window.launcher

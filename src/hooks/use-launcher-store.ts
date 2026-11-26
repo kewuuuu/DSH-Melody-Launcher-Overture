@@ -528,6 +528,9 @@ export function useLauncherStore() {
     finish()
     if (!result) return undefined
     applyInstallResult(result)
+    await api.readRuntimeEnvironment().then(setRuntimeEnvironment).catch(error => {
+      showToast({ kind: 'error', message: `DSH 已安装，但版本列表刷新失败：${errorText(error)}` })
+    })
     void api.checkDshUpdate().then(setDshUpdate).catch(() => undefined)
     return result
   }, [api, applyInstallResult, beginDshInstall, run, showToast])
@@ -578,7 +581,7 @@ export function useLauncherStore() {
     }, progress => progress.kind === 'dsh' && progress.repository === repository)
     if (!finish) return false
     const next = await run(`runtime-dsh-install:${version}`, () => api.installDshVersion(version), {
-      success: `DSH ${version} 已安装并设为当前版本。`,
+      success: `DSH ${version} 已安装，可在整合包设置中选择此版本。`,
       onError: error => {
         const message = errorText(error)
         finish(message)

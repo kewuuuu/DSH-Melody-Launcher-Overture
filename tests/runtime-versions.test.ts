@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { buildDshCoreOverrides, buildManagedDshInstallArgs, buildManagedDshPnpmArgs, createRuntimeVersionService, listAvailableDshVersions, MissingDshDependencyError, resolveDshCoreOverrides } from '../electron/runtime-versions'
@@ -298,5 +298,106 @@ describe('DSH 版本安装的网络环境', () => {
       vi.unstubAllGlobals()
       await rm(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('运行中的 DSH 与独立版本下载', () => {
+  async function withRuntime(test: (fixture: {
+    root: string
+    settings: AppSettings
+    service: ReturnType<typeof createRuntimeVersionService>
+    saveSettings: ReturnType<typeof vi.fn>
+    runCommand: ReturnType<typeof vi.fn>
+    writeRuntime: (version: string) => Promise<void>
+  }) => Promise<void>) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-side-by-side-'))
+    const writeRuntime = async (version: string) => {
+      const versionRoot = path.join(root, 'versions', version)
+      const bin = path.join(versionRoot, 'node_modules', '.bin')
+      const pkg = path.join(versionRoot, 'node_modules', '@deepseek-ai', 'dsh')
+      await mkdir(bin, { recursive: true })
+      await mkdir(pkg, { recursive: true })
+      await writeFile(path.join(bin, 'dsh.cmd'), '@echo off\r\n')
+      await writeFile(path.join(bin, 'dsh'), '#!/bin/sh\n')
+      await writeFile(path.join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version }))
+    }
+    const settings = {
+      dshInstallPath: root,
+      dshHome: path.join(root, 'home'),
+      dshVersion: '0.2.1-rc.3',
+      nodeVersion: null,
+      activePackId: 'pack-test',
+      launchExecutable: path.join(root, 'versions', '0.2.1-rc.3', 'node_modules', '.bin', 'dsh.cmd'),
+      launchArgs: ['web'],
+      network: {},
+    } as AppSettings
+    const saveSettings = vi.fn(async (next: AppSettings) => Object.assign(settings, next))
+    const runCommand = vi.fn(async () => {
+      await writeRuntime('0.2.2-rc.5')
+      return { exitCode: 0, output: '' }
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) })))
+    const service = createRuntimeVersionService({
+      dshRoot: root,
+      nodeRoot: path.join(root, 'node-runtime'),
+      readSettings: async () => settings,
+      saveSettings,
+      prepareNodeRuntime: async () => ({ root, node: process.execPath, npm: '', npx: '', managed: false }),
+      preparePnpmRuntime: async () => ({ root, executable: path.join(root, 'pnpm.cmd') }),
+      isRuntimeRunning: () => true,
+      emitOutput: () => {},
+      emitProgress: () => {},
+      githubFetch: async () => { throw new Error('不应查询在线版本列表') },
+      runCommand,
+    })
+    try {
+      await writeRuntime('0.2.1-rc.3')
+      await test({ root, settings, service, saveSettings, runCommand, writeRuntime })
+    } finally {
+      vi.unstubAllGlobals()
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+
+  it.each([true, false])('可下载新版本，保留运行环境及设置（已有绑定：%s）', async bound => {
+    await withRuntime(async ({ root, settings, service, saveSettings, runCommand }) => {
+      if (!bound) {
+        settings.activePackId = null
+        settings.dshVersion = null
+      }
+      const before = structuredClone(settings)
+      const currentManifest = path.join(root, 'versions', '0.2.1-rc.3', 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
+      const currentContent = await readFile(currentManifest, 'utf8')
+      const environment = await service.installDsh('0.2.2-rc.5')
+      expect(environment.dshInstalled.map(item => item.version)).toEqual(['0.2.2-rc.5', '0.2.1-rc.3'])
+      expect(environment.dshSelectedVersion).toBe('0.2.1-rc.3')
+      expect((await getManagedDshStatus(path.join(root, 'versions', '0.2.2-rc.5'))).installed).toBe(true)
+      expect(await readFile(currentManifest, 'utf8')).toBe(currentContent)
+      expect(settings).toEqual(before)
+      expect(saveSettings).not.toHaveBeenCalled()
+      expect(runCommand).toHaveBeenCalledOnce()
+      await service.installDsh('0.2.2-rc.5')
+      expect(runCommand).toHaveBeenCalledOnce()
+      expect(saveSettings).not.toHaveBeenCalled()
+      await expect(service.selectDsh('0.2.2-rc.5')).rejects.toThrow('请先停止 DSH')
+      await expect(service.removeDsh('0.2.2-rc.5')).rejects.toThrow('请先停止 DSH')
+    })
+  })
+
+  it.each(['executable', 'version', 'incomplete'])('保护可能正在使用的目标目录：%s', async reason => {
+    await withRuntime(async ({ root, settings, service, saveSettings, runCommand }) => {
+      const target = path.join(root, 'versions', '0.2.2-rc.5')
+      if (reason === 'executable') settings.launchExecutable = path.join(target, 'node_modules', '.bin', 'dsh.cmd')
+      if (reason === 'version') settings.dshVersion = '0.2.2-rc.5'
+      if (reason === 'incomplete') {
+        await mkdir(target, { recursive: true })
+        await writeFile(path.join(target, '.launcher-install-incomplete'), 'keep')
+      }
+      await expect(service.installDsh('0.2.2-rc.5')).rejects.toThrow('请先停止 DSH')
+      expect(runCommand).not.toHaveBeenCalled()
+      expect(saveSettings).not.toHaveBeenCalled()
+      if (reason === 'incomplete') expect(await readFile(path.join(target, '.launcher-install-incomplete'), 'utf8')).toBe('keep')
+      else await expect(access(target)).rejects.toThrow()
+    })
   })
 })

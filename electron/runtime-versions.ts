@@ -395,7 +395,6 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
     const emit = (progress: InstallProgress) => options.emitProgress({ ...progress, ...installProgressState(operation, progress.phase) })
     return runExclusive(`安装 DSH ${normalized}`, async () => {
       emit(progressFor(normalized, `正在准备 DSH ${normalized}`, 'preparing', 3))
-      if (options.isRuntimeRunning()) throw new Error('请先停止 DSH，再安装或更新本地 DSH。')
       const settings = await options.readSettings()
       const installNetwork = buildNetworkEnvironment(settings)
       const root = dshVersionRoot(settings.dshInstallPath, normalized)
@@ -403,11 +402,16 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
       if (existing.installed) {
         operation.commit()
         emit(progressFor(normalized, `正在应用已安装的 DSH ${normalized}`, 'configuring', 95))
-        if (!settings.activePackId || !settings.dshVersion) {
+        if (!options.isRuntimeRunning() && (!settings.activePackId || !settings.dshVersion)) {
           await options.saveSettings({ ...settings, dshVersion: normalized, launchExecutable: existing.executable!, launchArgs: ['web'] })
         }
         emit(progressFor(normalized, `DSH ${normalized} 已安装`, 'complete', 100))
         return readInstalled(await options.readSettings())
+      }
+      const configuredExecutable = path.resolve(settings.launchExecutable).toLowerCase()
+      const targetRoot = `${path.resolve(root).toLowerCase()}${path.sep}`
+      if (options.isRuntimeRunning() && (existsSync(root) || configuredExecutable.startsWith(targetRoot) || settings.dshVersion === normalized)) {
+        throw new Error('该版本目录可能正在使用，请先停止 DSH，再修复或重新安装此版本。')
       }
       operation.signal.throwIfAborted()
       await prepareDshInstallRoot(root)
@@ -548,10 +552,10 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
       operation.commit()
       emit(progressFor(normalized, `正在保存 DSH ${normalized} 安装配置`, 'configuring', 95))
       await finishDshInstallRoot(root)
-      const adoptAsCurrent = !settings.activePackId || !settings.dshVersion
-      await options.saveSettings(adoptAsCurrent
-        ? { ...settings, dshVersion: normalized, launchExecutable: executable, launchArgs: ['web'] }
-        : settings)
+      const currentSettings = await options.readSettings()
+      if (!options.isRuntimeRunning() && (!currentSettings.activePackId || !currentSettings.dshVersion)) {
+        await options.saveSettings({ ...currentSettings, dshVersion: normalized, launchExecutable: executable, launchArgs: ['web'] })
+      }
       emit(progressFor(normalized, `DSH ${normalized} 已安装`, 'complete', 100))
       return readInstalled(await options.readSettings())
     }).catch(error => {
