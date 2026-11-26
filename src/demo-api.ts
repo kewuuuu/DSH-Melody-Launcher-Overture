@@ -491,6 +491,37 @@ function wait(milliseconds: number): Promise<void> {
   return new Promise(resolve => window.setTimeout(resolve, milliseconds))
 }
 
+type DemoInstallProgress = Pick<InstallProgress, 'operationId' | 'cancellable' | 'percent' | 'message'> & {
+  phase: 'resolving' | 'downloading' | 'verifying' | 'complete' | 'error'
+}
+
+let nextDemoInstallId = 0
+const demoCancellableInstalls = new Map<string, AbortController>()
+
+async function demoPrepareInstall(emit: (progress: DemoInstallProgress) => void, downloadMessage: string, commitMessage: string) {
+  const operationId = `demo-install-${++nextDemoInstallId}`
+  const controller = new AbortController()
+  demoCancellableInstalls.set(operationId, controller)
+  const stage = (phase: DemoInstallProgress['phase'], percent: number, message: string, cancellable = false) =>
+    emit({ operationId, phase, percent, message, cancellable })
+  try {
+    stage('resolving', 5, '正在解析安装来源', true)
+    await wait(200)
+    controller.signal.throwIfAborted()
+    stage('downloading', 42, downloadMessage, true)
+    await wait(650)
+    controller.signal.throwIfAborted()
+  } catch (error) {
+    stage('error', 0, error instanceof Error ? error.message : '安装失败')
+    throw error
+  } finally {
+    demoCancellableInstalls.delete(operationId)
+  }
+  stage('verifying', 90, commitMessage)
+  await wait(250)
+  return (message: string) => stage('complete', 100, message)
+}
+
 async function demoAnalyzeCatalogRepository(
   fullName: string,
   defaultBranch: string,
@@ -887,13 +918,18 @@ export const demoApi: LauncherApi = {
       const installed = items.find(item => item.packageName === packageName)
       const { version } = demoMarketCompatibility(plugin, pack.dshVersion)
       if (!version || (args.expectedVersion !== undefined && args.expectedVersion !== version)) throw new Error('No matching compatible version')
-      if (command === 'pack.market.update') {
-        if (packageName !== args.packageName || installed?.version !== '1.0.0' || installed.version === version) throw new Error('No available update')
-        installed.version = version
-      } else {
-        if (installed) throw new Error('Plugin already installed')
+      const updating = command === 'pack.market.update'
+      if (updating && (packageName !== args.packageName || installed?.version !== '1.0.0' || installed.version === version)) throw new Error('No available update')
+      if (!updating && installed) throw new Error('Plugin already installed')
+      const complete = await demoPrepareInstall(
+        progress => dshMarketProgressListeners.forEach(listener => listener({ ...progress, name: plugin.name, packId: id })),
+        '正在下载插件及依赖', '正在更新整合包的插件配置',
+      )
+      if (updating && installed) installed.version = version
+      else {
         items.push({ packageName, displayName: plugin.name, version, description: plugin.description.zh ?? '', repository: plugin.url, enabled: true, builtin: false, locked: false, compatible: true, order: null })
       }
+      complete(updating ? '插件更新完成' : '插件安装完成')
       return { installed: true }
     }
     if (command.startsWith('pack.skillMarket.')) return { installed: true }
@@ -913,6 +949,10 @@ export const demoApi: LauncherApi = {
   }),
   installDshVersion: async version => {
     const normalized = version.replace(/^v/i, '')
+    const complete = await demoPrepareInstall(
+      progress => installProgressListeners.forEach(listener => listener({ ...progress, repository: normalized, kind: 'dsh' })),
+      '正在下载 DSH 及依赖', '正在写入 DSH 版本',
+    )
     const item = { version: normalized, root: `${demoSettings.dshInstallPath}\\versions\\${normalized}`, executable: `${demoSettings.dshInstallPath}\\versions\\${normalized}\\node_modules\\.bin\\dsh.cmd`, source: 'launcher' as const, selected: true, removable: true }
     demoDshVersions = demoDshVersions.map(entry => ({ ...entry, selected: false, removable: true })).filter(entry => entry.version !== normalized)
     demoDshVersions.push(item)
@@ -921,6 +961,7 @@ export const demoApi: LauncherApi = {
       demoSettings = { ...demoSettings, dshVersion: normalized, launchExecutable: item.executable, launchArgs: ['web'] }
     }
     demoDshInstallation = { installed: true, version: normalized, executable: item.executable, source: 'launcher' }
+    complete(`DSH ${normalized} 已安装`)
     return demoApi.readRuntimeEnvironment()
   },
   selectDshVersion: async version => {
@@ -1457,19 +1498,25 @@ export const demoApi: LauncherApi = {
   installDshMarketPlugin: async name => {
     const plugin = demoDshMarketPlugins.find(item => item.name === name)
     if (!plugin) throw new Error('插件不在 dsh-market 精选目录中。')
-    dshMarketProgressListeners.forEach(listener => listener({ name, phase: 'downloading', percent: 52, message: '正在下载插件及依赖' }))
-    await wait(500)
+    const complete = await demoPrepareInstall(
+      progress => dshMarketProgressListeners.forEach(listener => listener({ ...progress, name })),
+      '正在下载插件及依赖', '正在写入插件配置',
+    )
     plugin.installed = true; plugin.enabled = true; plugin.version = '1.0.0'
     upsertDemoPluginFromMarket(plugin)
+    complete('插件安装完成')
     return demoDshMarketPlugins.filter(item => item.installed)
   },
   updateDshMarketPlugin: async name => {
     const plugin = demoDshMarketPlugins.find(item => item.name === name)
     if (!plugin?.installed) throw new Error('插件尚未安装，不能更新。')
-    dshMarketProgressListeners.forEach(listener => listener({ name, phase: 'verifying', percent: 86, message: '正在检查插件更新' }))
-    await wait(450)
+    const complete = await demoPrepareInstall(
+      progress => dshMarketProgressListeners.forEach(listener => listener({ ...progress, name })),
+      '正在下载插件更新及依赖', '正在写入插件配置',
+    )
     plugin.updateAvailable = false; plugin.updateVersion = null
     upsertDemoPluginFromMarket(plugin)
+    complete('插件更新完成')
     return demoDshMarketPlugins.filter(item => item.installed)
   },
   uninstallDshMarketPlugin: async name => {
@@ -1491,13 +1538,12 @@ export const demoApi: LauncherApi = {
   installPlugin: async request => {
     const fullName = typeof request === 'string' ? request : request.repository
     const repo = demoRepositories.find(item => item.fullName === fullName)
-    const kind = repo?.kind === 'dsh' ? 'dsh' : 'plugin'
-    installProgressListeners.forEach(listener => listener({ repository: fullName, kind, phase: 'resolving', percent: 18, message: kind === 'dsh' ? '正在解析 DSH 安装包' : '正在解析插件仓库' }))
-    await wait(350)
-    installProgressListeners.forEach(listener => listener({ repository: fullName, kind, phase: 'downloading', percent: 28, message: kind === 'dsh' ? '正在下载并安装 DSH' : '正在下载并安装插件', indeterminate: true, downloadedBytes: 19_341_312 }))
-    await wait(900)
-    installProgressListeners.forEach(listener => listener({ repository: fullName, kind, phase: 'configuring', percent: 90, message: kind === 'dsh' ? '正在切换本地启动命令' : '正在更新插件配置' }))
-    await wait(350)
+    const kind = fullName.toLowerCase() === DSH_REPOSITORY || repo?.kind === 'dsh' ? 'dsh' : 'plugin'
+    const complete = await demoPrepareInstall(
+      progress => installProgressListeners.forEach(listener => listener({ ...progress, repository: fullName, kind })),
+      kind === 'dsh' ? '正在下载 DSH 及依赖' : '正在下载插件及依赖',
+      kind === 'dsh' ? '正在切换本地启动命令' : '正在更新插件配置',
+    )
     if (kind === 'dsh') {
       demoDshInstallation = { installed: true, version: '0.1.3-alpha.2', executable: `${demoSettings.dshInstallPath}\\node_modules\\.bin\\dsh.cmd`, source: 'launcher' }
       demoSettings = { ...demoSettings, launchExecutable: demoDshInstallation.executable!, launchArgs: ['web'] }
@@ -1516,7 +1562,7 @@ export const demoApi: LauncherApi = {
         order: 0,
       }])
     }
-    installProgressListeners.forEach(listener => listener({ repository: fullName, kind, phase: 'complete', percent: 100, message: kind === 'dsh' ? 'DSH 已安装' : '插件安装完成' }))
+    complete(kind === 'dsh' ? 'DSH 已安装' : '插件安装完成')
     const analysis = kind === 'plugin' ? demoAnalysis(fullName, repo?.defaultBranch ?? 'main') : null
     return {
       kind,
@@ -1527,13 +1573,17 @@ export const demoApi: LauncherApi = {
       packageName: analysis?.targets[0].packageName,
     }
   },
+  cancelInstall: async operationId => {
+    const controller = demoCancellableInstalls.get(operationId)
+    if (!controller || controller.signal.aborted) throw new Error('当前阶段无法取消安装。')
+    controller.abort(new Error('已取消安装。'))
+  },
   installPluginFromNpm: async request => {
     const repository = request.repository ?? `npm:${request.packageName}`
-    installProgressListeners.forEach(listener => listener({ repository, kind: 'plugin', phase: 'preparing', percent: 5, message: '正在准备 npm 插件' }))
-    await wait(700)
-    installProgressListeners.forEach(listener => listener({ repository, kind: 'plugin', phase: 'downloading', percent: 40, message: '正在下载插件及依赖', indeterminate: true }))
-    await wait(900)
-    installProgressListeners.forEach(listener => listener({ repository, kind: 'plugin', phase: 'configuring', percent: 88, message: '正在核对插件加载顺序' }))
+    const complete = await demoPrepareInstall(
+      progress => installProgressListeners.forEach(listener => listener({ ...progress, repository, kind: 'plugin' })),
+      '正在下载插件及依赖', '正在核对插件加载顺序',
+    )
     demoPlugins = renumber([...demoPlugins, {
       packageName: request.packageName,
       displayName: request.packageName.split('/').at(-1) ?? request.packageName,
@@ -1545,7 +1595,7 @@ export const demoApi: LauncherApi = {
       compatible: true,
       order: 0,
     }])
-    installProgressListeners.forEach(listener => listener({ repository, kind: 'plugin', phase: 'complete', percent: 100, message: '插件安装完成' }))
+    complete('插件安装完成')
     return {
       kind: 'plugin',
       profile: profile(),

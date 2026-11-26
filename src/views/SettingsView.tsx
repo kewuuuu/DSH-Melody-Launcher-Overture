@@ -30,6 +30,7 @@ import { SkeletonStrip } from '../components/Skeleton'
 import { DshMarketView } from './DshMarketView'
 import { DesktopPackRow, DesktopPluginsPanel } from './DesktopPluginsPanel'
 import { PluginAddDialog } from '../components/dialogs/PluginAddDialog'
+import { InstallStage } from '../components/InstallStage'
 import { WorkspaceSkillsPanel } from '../components/workspace-skills/WorkspaceSkillsPanel'
 import {
   SKILL_CATEGORIES,
@@ -86,6 +87,9 @@ interface SettingsPanelsProps {
   busy: string | null
   profileMutationLocked: boolean
   installProgress: InstallProgress | null
+  cancellingInstall?: boolean
+  cancelInstallError?: string | null
+  onCancelInstall?: () => void
   onRefresh: () => void
   onImportPack: () => void
   onImportPackPath: (path: string) => void
@@ -142,6 +146,9 @@ export function SettingsPanels({
   busy,
   profileMutationLocked,
   installProgress,
+  cancellingInstall,
+  cancelInstallError,
+  onCancelInstall,
   onRefresh,
   onImportPack,
   onImportPackPath,
@@ -230,6 +237,9 @@ export function SettingsPanels({
               installed={Boolean(dshInstallation.installed)}
               busy={locked}
               installProgress={installProgress}
+              cancellingInstall={cancellingInstall}
+              cancelInstallError={cancelInstallError}
+              onCancelInstall={onCancelInstall}
               onInstall={onInstallDshVersion}
               onRemove={onRemoveDshVersion}
               onOpenFolder={onOpenDshFolder}
@@ -343,6 +353,9 @@ function SettingsVersions({
   installed,
   busy,
   installProgress,
+  cancellingInstall,
+  cancelInstallError,
+  onCancelInstall,
   onInstall,
   onRemove,
   onOpenFolder,
@@ -353,6 +366,9 @@ function SettingsVersions({
   installed: boolean
   busy: boolean
   installProgress: InstallProgress | null
+  cancellingInstall?: boolean
+  cancelInstallError?: string | null
+  onCancelInstall?: () => void
   onInstall: (version: string) => Promise<boolean>
   onRemove: (version: string) => Promise<boolean>
   onOpenFolder: () => void
@@ -426,16 +442,7 @@ function SettingsVersions({
         <div className="settings-panel-heading">
           <div className="settings-panel-title"><Download size={17} /><span>可下载版本</span></div>
         </div>
-        {dshProgress && (
-          <div className="settings-progress">
-            <LoaderCircle size={14} className="spin" />
-            <span>{dshProgress.message}</span>
-            <div className={`settings-progress-track ${dshProgress.indeterminate || dshProgress.percent === 0 ? 'indeterminate' : 'determinate'}`}>
-              {!dshProgress.indeterminate && dshProgress.percent > 0 && <span style={{ width: `${dshProgress.percent}%` }} />}
-            </div>
-            {!dshProgress.indeterminate && dshProgress.percent > 0 && <strong>{dshProgress.percent}%</strong>}
-          </div>
-        )}
+        {installProgress && <InstallStage progress={installProgress} cancelling={cancellingInstall} cancelError={cancelInstallError} onCancel={onCancelInstall} />}
         <div className="settings-hint">点「下载」安装该版本并生成一个同名整合包；到整合包页切换即可使用，不会动当前环境。版本按发布渠道归堆，越靠前的渠道越稳定。</div>
         {versionGroups.length === 0 && <div className="settings-empty">registry 里没有更多可下载的版本。</div>}
         {versionGroups.map(group => (

@@ -11,11 +11,14 @@ export async function prepareUserQuit(deps: {
   isPackRunning: () => boolean
   isLegacyRuntimeBusy: () => boolean
   showMessageBox: (options: MessageBoxOptions) => Promise<{ response: number }>
+  drainInstalls?: () => Promise<void>
   stopLegacyRuntime: () => Promise<void>
   shutdownPacks: (mode: 'stop' | 'keep') => Promise<void>
 }): Promise<false | void> {
   const choice = await resolvePackExitChoice(deps.policy, deps.isLegacyRuntimeBusy() || deps.isPackRunning(), deps.showMessageBox)
   if (choice === 'cancel') return false
+  if (choice === 'keep') assertLegacyRuntimePreservable(deps.isLegacyRuntimeBusy())
+  await deps.drainInstalls?.()
   if (choice === 'stop') await deps.stopLegacyRuntime()
   else assertLegacyRuntimePreservable(deps.isLegacyRuntimeBusy())
   await deps.shutdownPacks(choice)

@@ -1,4 +1,4 @@
-import { access, readdir, readFile, realpath } from 'node:fs/promises'
+import { access, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { DSH_PACKAGE_NAME, DSH_REPOSITORY } from '../src/constants'
 import type { DshInstallationStatus, InstallProgress } from '../src/types'
@@ -211,7 +211,27 @@ export function packageManagerProgress(
   return null
 }
 
-export async function getManagedDshStatus(runtimeRoot: string): Promise<DshInstallationStatus> {
+const incompleteInstall = (root: string) => path.join(root, '.launcher-install-incomplete')
+
+export async function prepareDshInstallRoot(root: string): Promise<void> {
+  if (await access(incompleteInstall(root)).then(() => true, () => false)) {
+    // Keep the marker present across cleanup, including a launcher crash during retry.
+    for (const entry of await readdir(root)) {
+      if (entry !== path.basename(incompleteInstall(root))) await rm(path.join(root, entry), { recursive: true, force: true })
+    }
+  }
+  await mkdir(root, { recursive: true })
+  await writeFile(incompleteInstall(root), '')
+}
+
+export function finishDshInstallRoot(root: string): Promise<void> {
+  return rm(incompleteInstall(root), { force: true })
+}
+
+export async function getManagedDshStatus(runtimeRoot: string, allowIncomplete = false): Promise<DshInstallationStatus> {
+  if (!allowIncomplete && await access(incompleteInstall(runtimeRoot)).then(() => true, () => false)) {
+    return missingDshStatus()
+  }
   const executable = managedDshExecutable(runtimeRoot)
   return inspectDshExecutable(executable, 'launcher')
 }

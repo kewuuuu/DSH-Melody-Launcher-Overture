@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 import { compareDshMarketVersions, createDshMarketService, dshMarketInstallTarget, findDshMarketInstalledAlias, parseDshMarketSourceUrl } from '../electron/dsh-market'
 import { selectCompatiblePluginVersion } from '../electron/dsh-market-compatibility'
-import type { AppSettings } from '../src/types'
+import { createInstallOperations } from '../electron/install-operations'
+import type { AppSettings, DshMarketProgress } from '../src/types'
 
 const marketSettings: AppSettings = {
   dshInstallPath: 'C:/dsh-runtime',
@@ -172,10 +173,20 @@ it('resolves the SSH monorepo package and pins install under the locked runtime'
   let fail = false
   let officialUnavailable = false
   let explicitCatalogAlias = false
+  const installs = createInstallOperations()
+  const events: DshMarketProgress[] = []
+  let onPrepare: (() => Promise<void>) | undefined
+  let releaseWrite: (() => void) | undefined
+  let reportWrite: (() => void) | undefined
   const createService = () => createDshMarketService({
     targeted: true,
+    packId: 'pack-target',
+    installOperations: installs,
     readSettings: async () => ({ ...marketSettings, dshHome: root, workspace: root, launchExecutable: 'npx.cmd', dshVersion: runtime }),
-    prepareNodeRuntime: async () => ({ root, node: 'node', npm: 'npm', npx: 'npx', managed: false }),
+    prepareNodeRuntime: async () => {
+      await onPrepare?.()
+      return { root, node: 'node', npm: 'npm', npx: 'npx', managed: false }
+    },
     preparePnpmRuntime: async () => ({ root, executable: 'pnpm' }),
     fetchImpl: async (input, init) => {
       const url = String(input)
@@ -188,6 +199,7 @@ it('resolves the SSH monorepo package and pins install under the locked runtime'
     },
     runCommand: async (_executable, args, options) => {
       calls.push(args)
+      if (reportWrite) await new Promise<void>(resolve => { releaseWrite = resolve; reportWrite?.() })
       expect(options.env.DSH_HOME).toBe(root)
       if (fail) return { exitCode: 1, output: 'fixture failure' }
       const pkg = path.join(profileDir, 'node_modules', npm, 'package.json')
@@ -200,7 +212,7 @@ it('resolves the SSH monorepo package and pins install under the locked runtime'
       await writeFile(path.join(profileDir, 'package.json'), JSON.stringify({ dependencies: { [npm]: '0.4.14' } }))
       return { exitCode: 0, output: '' }
     },
-    emitProgress: () => undefined,
+    emitProgress: progress => events.push(progress),
     emitOutput: () => undefined,
   })
   try {
@@ -225,11 +237,34 @@ it('resolves the SSH monorepo package and pins install under the locked runtime'
     expect(requests.filter(({ url, cache }) => url === official && cache === 'no-store')).toHaveLength(2)
     expect(requests.filter(({ url, cache }) => url === raw && cache === 'no-store')).toHaveLength(2)
     runtime = '0.2.1-rc.3'
+    onPrepare = async () => {
+      const progress = events.at(-1)!
+      expect(progress).toMatchObject({ packId: 'pack-target', cancellable: true })
+      await installs.cancel('wrong-operation')
+      expect(installs.isBusy()).toBe(true)
+      void installs.cancel(progress.operationId!)
+    }
+    await expect(service.install(entry.name, identity)).rejects.toThrow('已取消')
+    expect(calls).toHaveLength(0)
+    expect(events.at(-1)).toMatchObject({ packId: 'pack-target', phase: 'error', cancellable: false })
+    onPrepare = undefined
     fail = true
     await expect(service.install(entry.name, identity)).rejects.toThrow('fixture failure')
     fail = false
     officialUnavailable = true
-    await expect(service.install(entry.name)).resolves.toMatchObject([{ packageName: npm, version: '0.4.14' }])
+    const writing = new Promise<void>(resolve => { reportWrite = resolve })
+    const pending = service.install(entry.name)
+    await writing
+    const committing = events.at(-1)!
+    expect(committing).toMatchObject({ packId: 'pack-target', phase: 'building', cancellable: false })
+    const cancelled = installs.cancel(committing.operationId!)
+    const drained = installs.drain()
+    expect(() => installs.start('new install')).toThrow('退出')
+    expect(installs.isBusy()).toBe(true)
+    releaseWrite!()
+    await expect(pending).resolves.toMatchObject([{ packageName: npm, version: '0.4.14' }])
+    await Promise.all([cancelled, drained])
+    expect(events.at(-1)).toMatchObject({ packId: 'pack-target', phase: 'complete', cancellable: false })
     expect(calls).toEqual(Array.from({ length: 2 }, () => ['--yes', '@deepseek-ai/dsh@0.2.1-rc.3', 'plugin', '--profile', 'web', 'add', npm + '@0.4.14']))
     expect(requests.filter(({ url }) => url === mirror)).toEqual([{ url: mirror, cache: 'no-store' }])
     expect((await createService().load()).plugins[0]).toMatchObject({ packageName: npm, installed: true, version: '0.4.14' })

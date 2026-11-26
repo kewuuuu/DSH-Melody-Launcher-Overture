@@ -570,6 +570,23 @@ input:focus-visible {
   background: var(--surface-soft);
 }
 
+.packs-runtime-install {
+  flex: 1 0 100%;
+  min-width: 0;
+}
+
+.packs-runtime-install .settings-progress {
+  margin-bottom: 0;
+}
+
+.install-stage {
+  flex-wrap: wrap;
+}
+
+.install-stage .secondary-button {
+  flex: none;
+}
+
 .packs-runtime-state {
   display: flex;
   align-items: center;

@@ -38,9 +38,11 @@ async function downloadArchive(
   destination: string,
   onProgress: ProgressListener,
   fetchImpl: typeof fetch,
+  signal: AbortSignal,
 ): Promise<void> {
   const response = await fetchImpl(`https://codeload.github.com/${repository}/zip/${commit}`, {
     headers: { 'User-Agent': 'DSH-Launcher' },
+    signal,
   })
   if (!response.ok || !response.body) throw new Error(`下载插件仓库失败（HTTP ${response.status}）。`)
   const declaredTotal = Number(response.headers.get('content-length'))
@@ -79,6 +81,7 @@ export async function prepareSubdirectoryPlugin(
   target: PluginInstallTarget,
   onProgress: ProgressListener,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (!isSafeRepositoryName(repository) || !/^[a-f0-9]{40}$/i.test(target.commit)) {
     throw new Error('插件仓库或提交版本无效。')
@@ -104,7 +107,9 @@ export async function prepareSubdirectoryPlugin(
 
   try {
     onProgress({ percent: 20, message: '正在下载包含插件组件的仓库', indeterminate: true })
-    await downloadArchive(repository, target.commit, zipPath, onProgress, fetchImpl)
+    const timeout = AbortSignal.timeout(5 * 60_000)
+    await downloadArchive(repository, target.commit, zipPath, onProgress, fetchImpl, signal ? AbortSignal.any([signal, timeout]) : timeout)
+    signal?.throwIfAborted()
     onProgress({ percent: 64, message: '正在解压插件组件' })
     await mkdir(extractPath, { recursive: true })
     new AdmZip(zipPath).extractAllTo(extractPath, true)
@@ -115,6 +120,7 @@ export async function prepareSubdirectoryPlugin(
     assertInside(extractedRoot, extractedPackage)
     if (!await exists(path.join(extractedPackage, 'package.json'))) throw new Error('仓库子目录中没有找到 package.json。')
     if (await exists(destination)) await rm(destination, { recursive: true, force: true })
+    signal?.throwIfAborted()
     await rename(extractedRoot, destination)
     onProgress({ percent: 68, message: '插件组件已准备完成' })
     return packageDirectory

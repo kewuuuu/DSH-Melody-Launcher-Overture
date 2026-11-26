@@ -1,3 +1,4 @@
+import { createInstallOperations } from './install-operations'
 import { app, BrowserWindow, dialog, ipcMain, net, Notification, safeStorage, shell } from 'electron'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -188,6 +189,7 @@ const getWindow = (): BrowserWindow | null => mainWindow
 const events = createRendererEvents(createRendererChannel(getWindow))
 
 interface Services {
+  installOperations: ReturnType<typeof createInstallOperations>
   stopLegacyRuntime: () => Promise<void>
   legacyRuntimeBusy: () => boolean
   packsReconciled: Promise<boolean>
@@ -271,6 +273,7 @@ function createLauncherSettingsStore(userData: string): SettingsStore {
 
 /** bootSettings = 提权判定之前就读好的那个实例，装配时直接接管，避免读两次设置。 */
 function createServices(bootSettings?: SettingsStore): Services {
+  const installOperations = createInstallOperations()
   const userData = app.getPath('userData')
   const managedDshRoot = path.join(userData, 'dsh-runtime')
   const managedNodeRoot = path.join(userData, 'node-runtime')
@@ -567,6 +570,7 @@ function createServices(bootSettings?: SettingsStore): Services {
   let relayDshProgressToPack = false
 
   const runtimeVersions = createRuntimeVersionService({
+    installOperations,
     dshRoot: managedDshRoot,
     nodeRoot: managedNodeRoot,
     readSettings: () => settings.read(),
@@ -601,6 +605,7 @@ function createServices(bootSettings?: SettingsStore): Services {
   })
 
   installer = createInstaller({
+    installOperations,
     readSettings: () => settings.read(),
     saveSettings: next => settings.save(next),
     prepareNodeRuntime: onProgress => prepareNodeRuntime('plugin', onProgress),
@@ -629,6 +634,7 @@ function createServices(bootSettings?: SettingsStore): Services {
   // analyzers or installers. It mirrors dsh-market's curated registry and
   // package command rules behind a separate API surface.
   const dshMarket = createDshMarketService({
+    installOperations,
     readSettings: () => settings.read(),
     prepareNodeRuntime: () => prepareNodeRuntime('plugin'),
     preparePnpmRuntime: node => preparePnpmRuntime('plugin', node),
@@ -1112,15 +1118,19 @@ function createServices(bootSettings?: SettingsStore): Services {
       lifecycleOperation = 'update'
       try {
         assertLegacyRuntimePreservable(legacyRuntimeBusy())
+        await installOperations.drain()
+        signal.throwIfAborted()
         const rollback = await packControl!.prepareForRelaunch(signal)
         return async () => {
           try {
             await rollback()
           } finally {
+            installOperations.resume()
             lifecycleOperation = null
           }
         }
       } catch (error) {
+        installOperations.resume()
         lifecycleOperation = null
         events.output('runtime', 'error', '无法保留整合包并更新：' + errorMessage(error))
         throw error
@@ -1285,6 +1295,8 @@ function createServices(bootSettings?: SettingsStore): Services {
     emitOutput: text => events.output('runtime', 'info', text),
   })
   packControl = createLauncherControl({
+    installOperations,
+    emitMarketProgress: progress => events.dshMarketProgress(progress),
     userData, cliPath: path.join(app.getAppPath(), 'bin/launcher-control.cjs'), settings, packManager: packManager!, storage: storageController,
     prepareNodeRuntime: () => prepareNodeRuntime('runtime'),
     preparePnpmRuntime: node => preparePnpmRuntime('plugin', node),
@@ -1301,7 +1313,7 @@ function createServices(bootSettings?: SettingsStore): Services {
     legacyRuntimeRunning: legacyRuntimeBusy, prepareOfficeCliTool,
     loginRegistration, uninstall, onUninstallStarted: quitAfterUninstallStarted, idleShutdown, updateFlow,
   })
-  return { packControl, packsReconciled, findUpdateRuntime, legacyRuntimeBusy, stopLegacyRuntime, uninstall, uninstallPlan, idleShutdown, updateFlow, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
+  return { installOperations, packControl, packsReconciled, findUpdateRuntime, legacyRuntimeBusy, stopLegacyRuntime, uninstall, uninstallPlan, idleShutdown, updateFlow, launcherControl: request => packControl!.execute(request), loginRegistration, apiLibrary: packControl.apiLibrary, packApis: packControl.packApis, settings, pluginReceiptsPath, runtime, installer, launcherUpdater, pluginTrial, aiInstaller, copilot, packManager: packManager!, githubAuth, applicationAddons, catalogSync, dshMarket, desktopPlugins, recommendedWebUi, runtimeVersions, profiles: profileService, profilePoolReady, restoreOfficialPack, listOfficialPackVersions: async () => listOfficialPackVersions(await officialListDeps()), readOfficialPackStatus: force => resolveOfficialPackStatus(force === true), installOfficialPackVersion, officialPackBootstrap }
 }
 
 // helper 已在 %TEMP% 里跑起来，主进程必须让位：EXE 被自己占着就永远删不掉。
@@ -1590,6 +1602,7 @@ function delay(milliseconds: number): Promise<void> {
 
 async function shutdownLauncherProcesses(): Promise<void> {
   const current = services
+  await current?.installOperations.drain()
   // 先让监督器对仍在运行的根进程做快照；若 DSH 派生了脱离父进程树的服务，
   // 必须在正常停止根进程前收集它们，否则关闭后无法再定位微信机器人 PID。
   const supervisorShutdown = processSupervisor?.shutdown().catch(error => {
@@ -1633,6 +1646,7 @@ function errorMessage(error: unknown): string {
 }
 
 async function stopLauncherRuntimes(): Promise<void> {
+  await services?.installOperations.drain()
   await services?.stopLegacyRuntime()
   await services?.packControl.shutdown('stop')
 }
@@ -1661,6 +1675,7 @@ async function requestLauncherQuit(operation: string, prepare: () => Promise<fal
     dialog.showErrorBox('无法退出或重启启动器', errorMessage(error))
   } finally {
     if (!allowFinalQuit) {
+      services?.installOperations.resume()
       lifecycleOperation = null
       isQuitting = false
     }
@@ -1679,6 +1694,7 @@ app.on('before-quit', event => {
       isPackRunning: current.packControl.isRunning,
       isLegacyRuntimeBusy: current.legacyRuntimeBusy,
       showMessageBox: options => mainWindow && !mainWindow.isDestroyed() ? dialog.showMessageBox(mainWindow, options) : dialog.showMessageBox(options),
+      drainInstalls: current.installOperations.drain,
       stopLegacyRuntime: current.stopLegacyRuntime,
       shutdownPacks: current.packControl.shutdown,
     })

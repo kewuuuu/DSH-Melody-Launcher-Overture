@@ -4,6 +4,7 @@ import { DSH_REPOSITORY, EMPTY_DSH_INSTALLATION, EMPTY_RUNTIME_STATE, MAX_LOG_LI
 import { downloadProgressText, errorText } from '../lib/format'
 import { launchFailureHeadline, launchFailureStageLabel } from '../lib/launch-failure'
 import { finalizeInstallProgress } from '../lib/install-progress'
+import { useInstallOperation } from './use-install-operation'
 import { reorderProfilePlugins } from '../lib/profile-order'
 import type {
   ApplicationInstallResult,
@@ -63,6 +64,8 @@ export function useLauncherStore() {
   const api = useLauncherApi()
   const { toast, showToast, dismissToast } = useToast()
   const { busy, run } = useAsyncAction(showToast)
+  const dshInstall = useInstallOperation<InstallProgress>(api.cancelInstall)
+  const { begin: beginDshInstall, acceptProgress: acceptDshProgress } = dshInstall
 
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [recommendedWebUi, setRecommendedWebUi] = useState<RecommendedWebUiStatus | null>(null)
@@ -284,30 +287,33 @@ export function useLauncherStore() {
       .catch(() => { /* 主进程已把网络失败转换为 error 状态 */ })
 
     const handleInstallProgress = (progress: InstallProgress) => {
-        const frame = installProgressFrame.current
-        if (progress.phase === 'complete' || progress.phase === 'error' || progress.phase !== frame.latest?.phase) {
-          // 终态与阶段切换立即渲染；挂起的尾随帧一并作废。
-          if (frame.timer != null) {
-            window.clearTimeout(frame.timer)
-            frame.timer = null
-          }
-          frame.latest = progress
-          frame.lastFlushAt = Date.now()
-          setInstallProgress(progress)
-        } else {
-          frame.latest = progress
-          const elapsed = Date.now() - frame.lastFlushAt
-          if (elapsed >= 120) {
+        const trackedDsh = acceptDshProgress(progress)
+        if (!trackedDsh && !(progress.kind === 'dsh' && progress.operationId)) {
+          const frame = installProgressFrame.current
+          if (progress.phase === 'complete' || progress.phase === 'error' || progress.phase !== frame.latest?.phase) {
+            // 终态与阶段切换立即渲染；挂起的尾随帧一并作废。
+            if (frame.timer != null) {
+              window.clearTimeout(frame.timer)
+              frame.timer = null
+            }
+            frame.latest = progress
             frame.lastFlushAt = Date.now()
             setInstallProgress(progress)
-          } else if (frame.timer == null) {
-            frame.timer = window.setTimeout(() => {
-              frame.timer = null
-              if (frame.latest) {
-                frame.lastFlushAt = Date.now()
-                setInstallProgress(frame.latest)
-              }
-            }, 120 - elapsed)
+          } else {
+            frame.latest = progress
+            const elapsed = Date.now() - frame.lastFlushAt
+            if (elapsed >= 120) {
+              frame.lastFlushAt = Date.now()
+              setInstallProgress(progress)
+            } else if (frame.timer == null) {
+              frame.timer = window.setTimeout(() => {
+                frame.timer = null
+                if (frame.latest) {
+                  frame.lastFlushAt = Date.now()
+                  setInstallProgress(frame.latest)
+                }
+              }, 120 - elapsed)
+            }
           }
         }
         const key = `${progress.kind}:${progress.repository}`
@@ -403,7 +409,7 @@ export function useLauncherStore() {
         flushRuntimeLogFrame()
       }
     }
-  }, [api, flushRuntimeLogFrame, queueRuntimeLog, showToast])
+  }, [acceptDshProgress, api, flushRuntimeLogFrame, queueRuntimeLog, showToast])
 
   const refreshProfile = useCallback(async () => {
     try {
@@ -506,21 +512,25 @@ export function useLauncherStore() {
   }, [appendRuntimeLog])
 
   const installDsh = useCallback(async (): Promise<RepositoryInstallResult | undefined> => {
-    setInstallProgress({
-      repository: DSH_REPOSITORY,
-      kind: 'dsh',
-      phase: 'preparing',
-      percent: 0,
-      message: '正在准备本地 DSH',
-    })
+    const finish = beginDshInstall({
+      repository: DSH_REPOSITORY, kind: 'dsh', phase: 'preparing', percent: 0,
+      message: '正在准备本地 DSH', indeterminate: true,
+    }, progress => progress.kind === 'dsh' && progress.repository === DSH_REPOSITORY)
+    if (!finish) return undefined
     const result = await run(BUSY.dshInstall, () => api.installPlugin(DSH_REPOSITORY), {
       success: installed => `本地 DSH ${installed.dshInstallation.version ?? ''} 已安装，可以启动。`,
+      onError: error => {
+        const message = errorText(error)
+        finish(message)
+        showToast({ kind: 'error', message })
+      },
     })
+    finish()
     if (!result) return undefined
     applyInstallResult(result)
     void api.checkDshUpdate().then(setDshUpdate).catch(() => undefined)
     return result
-  }, [api, applyInstallResult, run])
+  }, [api, applyInstallResult, beginDshInstall, run, showToast])
 
   /**
    * 首页主按钮。尚未安装 DSH 时先完成部署，之后才是启动/停止。
@@ -561,18 +571,25 @@ export function useLauncherStore() {
   }, [api, run, showToast])
 
   const installDshVersion = useCallback(async (version: string): Promise<boolean> => {
+    const repository = version.replace(/^v/i, '')
+    const finish = beginDshInstall({
+      repository, kind: 'dsh', phase: 'preparing', percent: 0,
+      message: `正在准备 DSH ${repository}`, indeterminate: true,
+    }, progress => progress.kind === 'dsh' && progress.repository === repository)
+    if (!finish) return false
     const next = await run(`runtime-dsh-install:${version}`, () => api.installDshVersion(version), {
       success: `DSH ${version} 已安装并设为当前版本。`,
       onError: error => {
         const message = errorText(error)
-        setInstallProgress({ repository: version.replace(/^v/i, ''), kind: 'dsh', phase: 'error', percent: 0, message, indeterminate: false })
+        finish(message)
         showToast({ kind: 'error', message })
       },
     })
+    finish()
     if (!next) return false
     await applyRuntimeEnvironment(next)
     return true
-  }, [api, applyRuntimeEnvironment, run, showToast])
+  }, [api, applyRuntimeEnvironment, beginDshInstall, run, showToast])
 
   const selectDshVersion = useCallback(async (version: string): Promise<boolean> => {
     const next = await run(`runtime-dsh-select:${version}`, () => api.selectDshVersion(version), {
@@ -1281,6 +1298,7 @@ export function useLauncherStore() {
     launcherUpdate,
     launcherUpdateProgress,
     installProgress,
+    dshInstall,
     pluginTrials,
     installedRepositories,
     installedSkills,

@@ -145,6 +145,7 @@ const api: LauncherApi = {
   toggleDshMarketPlugin: (name, enabled) => ipcRenderer.invoke(IPC.dshMarketToggle, { name, enabled }),
   checkDshMarketUpdates: force => ipcRenderer.invoke(IPC.dshMarketUpdates, force),
   installPlugin: request => ipcRenderer.invoke(IPC.pluginsInstall, request),
+  cancelInstall: operationId => ipcRenderer.invoke(IPC.installCancel, operationId),
   installPluginFromNpm: request => ipcRenderer.invoke(IPC.pluginsInstallNpm, request),
   desktopStatus: () => ipcRenderer.invoke(IPC.desktopStatus),
   desktopInstall: target => ipcRenderer.invoke(IPC.desktopInstall, target),

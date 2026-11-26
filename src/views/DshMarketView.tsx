@@ -4,6 +4,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { useLauncherApi } from '../api/client'
 import { CatalogPagination } from '../components/CatalogPagination'
 import { PageHeading } from '../components/PageHeading'
+import { InstallStage } from '../components/InstallStage'
+import { isInstallTerminal, useInstallOperation } from '../hooks/use-install-operation'
 import { SkeletonCards } from '../components/Skeleton'
 import { formatStars } from '../lib/format'
 import type { DshMarketCatalog, DshMarketCompatibility, DshMarketCompatibilityEntry, DshMarketPlugin, DshMarketProgress, LauncherApi } from '../types'
@@ -88,6 +90,9 @@ function ScopedDshMarketView({ onProfileChanged, embedded = false, activeProfile
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  const busyAction = useRef<string | null>(null)
+  const install = useInstallOperation<DshMarketProgress>(api.cancelInstall)
+  const { acceptProgress, begin } = install
   const [progress, setProgress] = useState<DshMarketProgress | null>(null)
   const [page, setPage] = useState(1)
   const activeApi = useRef<LauncherApi | null>(null)
@@ -128,24 +133,11 @@ function ScopedDshMarketView({ onProfileChanged, embedded = false, activeProfile
     }
   }
 
-  // 终端阶段（complete / error）短暂保留后清空进度条，避免「卡在 84%」错觉残留。
-  const progressClearRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const handleProgress = (next: DshMarketProgress) => {
-    setProgress(next)
-    if (progressClearRef.current) { clearTimeout(progressClearRef.current); progressClearRef.current = null }
-    if (next.phase === 'complete' || next.phase === 'error') {
-      progressClearRef.current = setTimeout(() => setProgress(null), 1800)
-    }
-  }
-
-  useEffect(() => {
-    if (targetPackId) return
-    const unsubscribe = api.onDshMarketProgress(handleProgress)
-    return () => {
-      unsubscribe()
-      if (progressClearRef.current) clearTimeout(progressClearRef.current)
-    }
-  }, [api, targetPackId])
+  useEffect(() => api.onDshMarketProgress?.(next => {
+    if (next.packId !== targetPackId || acceptProgress(next)) return
+    if (targetPackId || next.name) return
+    setProgress(isInstallTerminal(next.phase) ? null : next)
+  }), [acceptProgress, api, targetPackId])
 
   useEffect(() => {
     let cancelled = false
@@ -248,7 +240,17 @@ function ScopedDshMarketView({ onProfileChanged, embedded = false, activeProfile
   const mutate = async (plugin: DshMarketPlugin, action: 'install' | 'update' | 'uninstall' | 'toggle', enabled?: boolean) => {
     const expectedVersion = action === 'install' ? compatibleVersion(byEntry?.get(entryKey(plugin))) : plugin.updateVersion
     if (targetPackId && (action === 'install' || action === 'update') && (!expectedVersion || loading || checkingUpdates || runtimeChanged)) return
+    if (busyAction.current) return
+    const message = action === 'install' ? '正在准备安装插件'
+      : action === 'update' ? '正在准备更新插件' : '正在准备卸载插件'
+    const tracksProgress = action !== 'toggle'
+    const finish = tracksProgress ? begin({
+      name: plugin.name, packId: targetPackId, phase: 'resolving', percent: null, message,
+    }, next => next.packId === targetPackId && next.name === plugin.name) : null
+    if (tracksProgress && !finish) return
+    busyAction.current = plugin.name
     setBusy(plugin.name)
+    setProgress(null)
     setError(null)
     try {
       if (targetPackId) {
@@ -261,6 +263,7 @@ function ScopedDshMarketView({ onProfileChanged, embedded = false, activeProfile
       else if (action === 'update') await api.updateDshMarketPlugin(plugin.name)
       else if (action === 'uninstall') await api.uninstallDshMarketPlugin(plugin.name)
       else await api.toggleDshMarketPlugin(plugin.name, enabled === true)
+      finish?.()
       // The market service and startup-item manager share the same Profile on
       // disk, but their renderer state is otherwise independent. Refresh the
       // shared Profile before redrawing the market so both switches agree.
@@ -271,6 +274,8 @@ function ScopedDshMarketView({ onProfileChanged, embedded = false, activeProfile
     } catch (cause) {
       if (activeApi.current === api) setError(cause instanceof Error ? cause.message : '操作失败')
     } finally {
+      finish?.()
+      busyAction.current = null
       if (activeApi.current === api) setBusy(null)
     }
   }
@@ -304,16 +309,9 @@ function ScopedDshMarketView({ onProfileChanged, embedded = false, activeProfile
             <span role="status">已检查 {checked} / {scanWindow.length} 个（共 {candidates.length} 个匹配）{scanning ? ' · 正在检查兼容性…' : ''}</span>
             {!scanning && scanWindow.length < candidates.length && <button type="button" className="secondary-button" onClick={() => setScanLimit(scanLimit + COMPATIBILITY_WINDOW)}>继续检查下一批</button>}
           </div>)}
-      {progress && progress.phase !== 'complete' && progress.phase !== 'error' && (
-        <div className="dsh-market-progress">
-          <LoaderCircle size={14} className="spin" />
-          <span>{progress.message}</span>
-          <div className={`dsh-market-progress-track ${progress.percent !== null ? 'determinate' : 'indeterminate'}`}>
-            {progress.percent !== null && <span style={{ width: `${progress.percent}%` }} />}
-          </div>
-          {progress.percent !== null && <strong>{progress.percent}%</strong>}
-        </div>
-      )}
+      {install.progress
+        ? <InstallStage progress={install.progress} cancelling={install.cancelling} cancelError={install.cancelError} onCancel={install.cancel} variant="dsh-market" />
+        : progress && <InstallStage progress={progress} variant="dsh-market" />}
       {error && <div className="error-banner"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
       {loading && catalog === null && <><div className="settings-hint">正在读取 DSH Market 目录…</div><SkeletonCards count={8} /></>}
       {!loading && catalog !== null && visible.length === 0 && !scanning && !needsKeyword && !runtimeChanged && <div className="empty-state"><Search size={22} /><span>{compatibleOnly ? '已检查的结果中没有确认兼容的插件。' : '没有匹配的精选插件。'}</span></div>}
@@ -328,7 +326,7 @@ function ScopedDshMarketView({ onProfileChanged, embedded = false, activeProfile
               <div className="dsh-market-card-head"><div><h2>{plugin.name}</h2><span>{plugin.owner}</span></div><span className="dsh-market-stars"><Star size={13} />{formatStars(plugin.stars)}</span></div>
               <div className="dsh-market-meta"><span>{plugin.category}</span>{plugin.npm ? <code>npm</code> : <code>GitHub</code>}{plugin.version && <code>{targetPackId ? '已安装 ' : ''}v{plugin.version}</code>}{targetPackId && <><span>{runtimeChanged ? '兼容性未知' : compatibilityLabel(compatibilityEntry)}</span>{latestVersion && latestVersion !== installVersion && <code>最新版本 v{latestVersion}</code>}</>}{plugin.installed && <b className={plugin.enabled ? 'market-enabled' : 'market-disabled'}>{plugin.enabled ? '已启用' : '未启用'}</b>}</div>
               <p>{plugin.description.zh ?? plugin.description.en ?? '暂无描述'}</p>
-              <div className="dsh-market-card-foot"><button type="button" className="dsh-market-link" onClick={() => void api.openExternal(plugin.url)}><ExternalLink size={13} />仓库</button><span className="dsh-market-grow" />{plugin.installed && <button type="button" className="icon-button" title={plugin.enabled ? '停用插件' : '启用插件'} disabled={isBusy} onClick={() => void mutate(plugin, 'toggle', !plugin.enabled)}>{plugin.enabled ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}</button>}{plugin.installed && plugin.updateAvailable && <button type="button" className="secondary-button dsh-market-action" disabled={isBusy || Boolean(targetPackId && (!plugin.updateVersion || loading || checkingUpdates || runtimeChanged))} onClick={() => void mutate(plugin, 'update')}>{isBusy ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}更新{targetPackId && plugin.updateVersion ? '至 v' + plugin.updateVersion : ''}</button>}{plugin.installed ? <button type="button" className="danger-button dsh-market-action" disabled={isBusy} onClick={() => void mutate(plugin, 'uninstall')}><Trash2 size={13} />卸载</button> : <button type="button" className="primary-command dsh-market-action" disabled={isBusy || Boolean(targetPackId && (!installVersion || loading || checkingUpdates))} onClick={() => void mutate(plugin, 'install')}>{isBusy ? <LoaderCircle size={13} className="spin" /> : <Check size={13} />}安装</button>}</div>
+              <div className="dsh-market-card-foot"><button type="button" className="dsh-market-link" onClick={() => void api.openExternal(plugin.url)}><ExternalLink size={13} />仓库</button><span className="dsh-market-grow" />{plugin.installed && <button type="button" className="icon-button" title={plugin.enabled ? '停用插件' : '启用插件'} disabled={busy !== null} onClick={() => void mutate(plugin, 'toggle', !plugin.enabled)}>{plugin.enabled ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}</button>}{plugin.installed && plugin.updateAvailable && <button type="button" className="secondary-button dsh-market-action" disabled={busy !== null || Boolean(targetPackId && (!plugin.updateVersion || loading || checkingUpdates || runtimeChanged))} onClick={() => void mutate(plugin, 'update')}>{isBusy ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}更新{targetPackId && plugin.updateVersion ? '至 v' + plugin.updateVersion : ''}</button>}{plugin.installed ? <button type="button" className="danger-button dsh-market-action" disabled={busy !== null} onClick={() => void mutate(plugin, 'uninstall')}><Trash2 size={13} />卸载</button> : <button type="button" className="primary-command dsh-market-action" disabled={busy !== null || Boolean(targetPackId && (!installVersion || loading || checkingUpdates))} onClick={() => void mutate(plugin, 'install')}>{isBusy ? <LoaderCircle size={13} className="spin" /> : <Check size={13} />}安装</button>}</div>
             </article>
           )
         })}

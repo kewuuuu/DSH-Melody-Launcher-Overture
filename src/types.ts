@@ -766,6 +766,8 @@ export interface CatalogImportResult {
 }
 
 export interface InstallProgress {
+  operationId?: string
+  cancellable?: boolean
   repository: string
   kind: 'plugin' | 'dsh' | 'skill' | 'application' | 'preset'
   phase: 'preparing' | 'resolving' | 'downloading' | 'building' | 'configuring' | 'verifying' | 'complete' | 'error'
@@ -1369,6 +1371,9 @@ export interface DshMarketUpdateStatus {
 }
 
 export interface DshMarketProgress {
+  operationId?: string
+  cancellable?: boolean
+  packId?: string
   name: string
   phase: 'loading' | 'checking' | 'resolving' | 'downloading' | 'building' | 'verifying' | 'complete' | 'error'
   percent: number | null
@@ -1729,6 +1734,7 @@ export interface LauncherApi {
   toggleDshMarketPlugin(name: string, enabled: boolean): Promise<DshMarketInstalledPlugin[]>
   checkDshMarketUpdates(force?: boolean): Promise<Record<string, DshMarketUpdateStatus>>
   installPlugin(request: string | PluginInstallRequest): Promise<RepositoryInstallResult>
+  cancelInstall(operationId: string): Promise<void>
   /** 手动按 npm 包名装插件（issue #10）：市场目录读不出来时的备用入口。 */
   installPluginFromNpm(request: NpmPluginInstallRequest): Promise<RepositoryInstallResult>
   /** 官方桌面端：读它的环境状态（未安装时 installed:false）。 */

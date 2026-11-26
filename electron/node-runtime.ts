@@ -1,9 +1,10 @@
-import { execFile, spawn } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, existsSync } from 'node:fs'
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { formatCommandLine, spawnCommand, trackSpawnedProcess, withExecutableDirectoryOnPath } from './process'
+import { withExecutableDirectoryOnPath } from './process'
+import { runCommand } from './command'
 import { npmRegistryCandidates } from './proxy'
 
 export const NODE_RUNTIME_VERSION = 'v24.19.0'
@@ -317,6 +318,7 @@ async function downloadFile(url: string, target: string, onProgress: (ratio: num
   const existingSize = existsSync(target) ? (await stat(target)).size : 0
   const response = await fetch(url, {
     redirect: 'follow',
+    signal: AbortSignal.timeout(15 * 60_000),
     headers: existingSize > 0 ? { Range: `bytes=${existingSize}-` } : undefined,
   })
   if (response.status === 416 && existingSize > 0) {
@@ -433,13 +435,6 @@ export async function downloadVerifiedNodeArchive(options: {
   throw new Error(`下载 Node.js 运行环境失败（已试 ${failures.join('；')}）。`)
 }
 
-async function waitForExit(child: ReturnType<typeof spawn>): Promise<number> {
-  return new Promise((resolve, reject) => {
-    child.once('error', reject)
-    child.once('exit', code => resolve(code ?? 1))
-  })
-}
-
 /**
  * 解压一律用 Windows 自带 bsdtar 的绝对路径。裸 `tar.exe` 会先命中 Git Bash / MSYS
  * 的 /usr/bin/tar，它读不懂 `C:\…`（报 "Cannot connect to C: resolve failed"），
@@ -500,22 +495,15 @@ export async function installManagedNodeRuntime(
     onProgress?.({ percent: 78, message: '正在校验 Node.js 安装包' })
 
     onProgress?.({ percent: 84, message: '正在解压 Node.js 运行环境' })
-    const tarExecutable = systemTarExecutable()
-    const extractor = trackSpawnedProcess(spawn(tarExecutable, ['-xf', archivePath, '-C', stagingRoot], {
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }))
-    onOutput?.('info', `命令：${formatCommandLine(tarExecutable, ['-xf', archivePath, '-C', stagingRoot])}\n工作目录：${runtimeRoot}`)
-    let extractionError = ''
-    extractor.stdout.on('data', chunk => onOutput?.('info', chunk.toString('utf8')))
-    extractor.stderr.on('data', chunk => {
-      const text = chunk.toString('utf8')
-      extractionError += text
-      onOutput?.('error', text)
+    const extraction = await runCommand(systemTarExecutable(), ['-xf', archivePath, '-C', stagingRoot], {
+      cwd: runtimeRoot,
+      env: process.env,
+      timeoutMs: 5 * 60_000,
+      onOutput: (text, level) => onOutput?.(level, text),
     })
-    const exitCode = await waitForExit(extractor)
-    onOutput?.(exitCode === 0 ? 'info' : 'error', `命令退出：${exitCode}`)
-    if (exitCode !== 0) throw new Error(`解压 Node.js 运行环境失败：${extractionError.trim() || `代码 ${exitCode}`}`)
+    if (extraction.exitCode !== 0) {
+      throw new Error(`解压 Node.js 运行环境失败：${extraction.output.trim() || `代码 ${extraction.exitCode}`}`)
+    }
 
     const stagedRoot = path.join(stagingRoot, extractedName)
     const stagedRuntime = runtimePaths(stagedRoot, true, 'distribution-root')
@@ -640,26 +628,18 @@ async function runNpmPnpmInstall(
   registry: string,
   onOutput?: OutputListener,
 ): Promise<{ exitCode: number; diagnostics: string }> {
-  const args = managedPnpmInstallArgs(runtimeRoot, registry)
-  onOutput?.('info', `命令：${formatCommandLine(nodeRuntime.npm, args)}\n工作目录：${runtimeRoot}`)
-  const child = spawnCommand(nodeRuntime.npm, args, {
+  const result = await runCommand(nodeRuntime.npm, managedPnpmInstallArgs(runtimeRoot, registry), {
     cwd: runtimeRoot,
     env: withExecutableDirectoryOnPath(nodeRuntime.node, {
       ...process.env,
       FORCE_COLOR: '0',
       NPM_CONFIG_UPDATE_NOTIFIER: 'false',
     }),
+    timeoutMs: 5 * 60_000,
+    captureLimit: 8_000,
+    onOutput: (text, level) => onOutput?.(level, text),
   })
-  let diagnostics = ''
-  child.stdout.on('data', chunk => onOutput?.('info', chunk.toString('utf8')))
-  child.stderr.on('data', chunk => {
-    const text = chunk.toString('utf8')
-    diagnostics = `${diagnostics}${text}`.slice(-8_000)
-    onOutput?.('error', text)
-  })
-  const exitCode = await waitForExit(child)
-  onOutput?.(exitCode === 0 ? 'info' : 'error', `命令退出：${exitCode}`)
-  return { exitCode, diagnostics }
+  return { exitCode: result.exitCode, diagnostics: result.output }
 }
 
 async function installManagedPnpmRuntime(

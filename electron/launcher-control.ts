@@ -1,3 +1,5 @@
+import type { InstallOperations } from './install-operations'
+import type { DshMarketProgress } from '../src/types'
 import path from 'node:path'
 import type { LauncherApiEntryInput, LauncherControlRequest, MigratablePath, SkillInstallTarget } from '../src/types'
 import type { PackManager } from './pack'
@@ -32,6 +34,8 @@ export function createLauncherControl(options: {
   fallbackWorkspace: () => string
   fetchImpl: typeof fetch
   emitOutput: (text: string) => void
+  installOperations?: InstallOperations
+  emitMarketProgress?: (progress: DshMarketProgress) => void
   loginRegistration: (enabled: boolean) => void
   storage: StorageController
   legacyRuntimeRunning: () => boolean
@@ -98,7 +102,7 @@ export function createLauncherControl(options: {
       if (command === 'pack.delete') return options.packManager.removePack(id)
       throw new Error('Unsupported lifecycle command')
     },
-    market: async (command, target, args) => {
+    market: async (command, target, args, packId) => {
       if (command === 'pack.market.compatibility' || command === 'pack.market.catalog' || command === 'pack.market.install' || command === 'pack.market.update') {
         const market = createDshMarketService({
           readSettings: async () => target,
@@ -107,7 +111,9 @@ export function createLauncherControl(options: {
           fetchImpl: options.fetchImpl,
           cachePath: path.join(userData, 'dsh-market-cache.json'),
           packageStoreRoot: path.join(userData, 'plugin-store'),
-          emitProgress: () => undefined,
+          emitProgress: progress => options.emitMarketProgress?.(progress),
+          installOperations: options.installOperations,
+          packId,
           emitOutput: (_level, text) => options.emitOutput(text),
           targeted: true,
           metadataLookup: marketMetadata,

@@ -7,6 +7,7 @@ function quitFixture(response: number, legacyRunning = false) {
     isPackRunning: () => true,
     isLegacyRuntimeBusy: () => legacyRunning,
     showMessageBox: vi.fn(async () => ({ response })),
+    drainInstalls: vi.fn(async () => {}),
     stopLegacyRuntime: vi.fn(async () => {}),
     shutdownPacks: vi.fn(async (_mode: 'keep' | 'stop') => {}),
   }
@@ -16,8 +17,22 @@ describe('launcher quit preparation', () => {
   it('leaves both runtime paths untouched when the user cancels', async () => {
     const fixture = quitFixture(2, true)
     await expect(prepareUserQuit(fixture)).resolves.toBe(false)
+    expect(fixture.drainInstalls).not.toHaveBeenCalled()
     expect(fixture.stopLegacyRuntime).not.toHaveBeenCalled()
     expect(fixture.shutdownPacks).not.toHaveBeenCalled()
+  })
+
+  it('waits for install cleanup before preserving running packs', async () => {
+    const fixture = quitFixture(1)
+    let finishCleanup!: () => void
+    fixture.drainInstalls.mockReturnValue(new Promise(resolve => { finishCleanup = resolve }))
+    const prepared = prepareUserQuit(fixture)
+    await vi.waitFor(() => expect(fixture.drainInstalls).toHaveBeenCalledOnce())
+    expect(fixture.shutdownPacks).not.toHaveBeenCalled()
+    finishCleanup()
+    await prepared
+    expect(fixture.shutdownPacks).toHaveBeenCalledWith('keep')
+    expect(fixture.stopLegacyRuntime).not.toHaveBeenCalled()
   })
 
   it('stops without prompting and waits for the owned pack outcome', async () => {

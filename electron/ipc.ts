@@ -74,6 +74,7 @@ export interface IpcDependencies {
   pluginReceiptsPath: string
   runtime: RuntimeController
   installer: Installer
+  installOperations?: import('./install-operations').InstallOperations
   launcherUpdater: LauncherUpdater
   pluginTrial: PluginTrialManager
   aiInstaller: AiInstaller
@@ -201,6 +202,9 @@ export function registerIpcHandlers(deps: IpcDependencies): void {
     return runtimeVersions.removeNode(version)
   })
   ipcMain.handle(IPC.runtimeEnvironmentCancel, () => runtimeVersions.cancel())
+  ipcMain.handle(IPC.installCancel, async (_event, operationId: unknown) => {
+    if (typeof operationId === 'string') await deps.installOperations?.cancel(operationId)
+  })
   ipcMain.handle(IPC.runtimeEnvironmentOpenDshFolder, async () => {
     const state = await runtimeVersions.read()
     await shell.openPath(state.dshRoot)

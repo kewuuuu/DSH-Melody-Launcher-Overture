@@ -1,6 +1,6 @@
+import { createInstallOperations, installProgressState, runInstallCommand, type InstallOperation, type InstallOperations } from './install-operations'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, rm, readFile, writeFile } from 'node:fs/promises'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import path from 'node:path'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { DSH_PACKAGE_NAME } from '../src/constants'
@@ -16,6 +16,8 @@ import type {
 import {
   findInstalledDsh,
   getManagedDshStatus,
+  prepareDshInstallRoot,
+  finishDshInstallRoot,
   managedDshExecutable,
   packageManagerProgress,
 } from './dsh-install'
@@ -206,8 +208,8 @@ export async function ensureDshVersionInstalled(
  * 渠道截断、以及「最新版 / 推荐版本」标记都在 candidatesFromPackument 内完成，
  * 两个标记在截断前计算并强制保留，这里不需要再做什么。
  */
-export async function listAvailableDshVersions(fetchImpl: typeof fetch = fetch, registryCandidates: string[] = dshRegistryCandidates()): Promise<RuntimeVersionCandidate[]> {
-  return candidatesFromPackument(await readDshVersionIndex(fetchImpl, registryCandidates))
+export async function listAvailableDshVersions(fetchImpl: typeof fetch = fetch, registryCandidates: string[] = dshRegistryCandidates(), signal?: AbortSignal): Promise<RuntimeVersionCandidate[]> {
+  return candidatesFromPackument(await readDshVersionIndex(fetchImpl, registryCandidates, { signal }))
 }
 
 function versionFromDshRoot(root: string): string | null {
@@ -241,6 +243,7 @@ export async function findManagedDshVersions(runtimeRoot: string): Promise<Array
 }
 
 export interface RuntimeVersionServiceOptions {
+  installOperations?: InstallOperations
   dshRoot: string
   nodeRoot: string
   readSettings: () => Promise<AppSettings>
@@ -275,52 +278,18 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
   let dshAvailable: RuntimeVersionCandidate[] = []
   let availableAt = 0
   let activeOperation: string | null = null
-  let activeCommand: ChildProcessWithoutNullStreams | null = null
   let cancellationRequested = false
-  let activeAbortController: AbortController | null = null
-
-  const terminateCommand = async (child: ChildProcessWithoutNullStreams): Promise<void> => {
-    if (process.platform === 'win32' && child.pid) {
-      const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' })
-      await new Promise<void>(resolve => {
-        killer.once('error', () => resolve())
-        killer.once('exit', () => resolve())
-      })
-      return
-    }
-    try { child.kill('SIGTERM') } catch { /* 已经退出 */ }
-  }
-
-  const executeTrackedCommand = (
-    executable: string,
-    args: string[],
-    commandOptions: Parameters<typeof runCommand>[2],
-  ): Promise<CommandResult> => {
-    let spawned: ChildProcessWithoutNullStreams | null = null
-    return executeCommand(executable, args, {
-      ...commandOptions,
-      onSpawn: child => {
-        spawned = child
-        activeCommand = child
-        commandOptions.onSpawn?.(child)
-        if (cancellationRequested) void terminateCommand(child)
-      },
-    }).finally(() => {
-      if (activeCommand === spawned) activeCommand = null
-    })
-  }
+  let dshOperation: InstallOperation | undefined
+  const installOperations = options.installOperations ?? createInstallOperations()
 
   async function runExclusive<T>(label: string, task: () => Promise<T>): Promise<T> {
     if (activeOperation) throw new Error(`运行环境操作正在进行：${activeOperation}`)
     activeOperation = label
     cancellationRequested = false
-    activeAbortController = new AbortController()
     try {
       return await task()
     } finally {
       activeOperation = null
-      activeCommand = null
-      activeAbortController = null
     }
   }
 
@@ -420,16 +389,32 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
   async function installDsh(version: string): Promise<RuntimeEnvironmentState> {
     const normalized = normalizeDshVersion(version)
     if (!validVersion(normalized)) throw new Error('DSH 版本格式无效。')
+    if (activeOperation) throw new Error(`运行环境操作正在进行：${activeOperation}`)
+    const operation = installOperations.start(`安装 DSH ${normalized}`)
+    dshOperation = operation
+    const emit = (progress: InstallProgress) => options.emitProgress({ ...progress, ...installProgressState(operation, progress.phase) })
     return runExclusive(`安装 DSH ${normalized}`, async () => {
+      emit(progressFor(normalized, `正在准备 DSH ${normalized}`, 'preparing', 3))
       if (options.isRuntimeRunning()) throw new Error('请先停止 DSH，再安装或更新本地 DSH。')
       const settings = await options.readSettings()
       const installNetwork = buildNetworkEnvironment(settings)
       const root = dshVersionRoot(settings.dshInstallPath, normalized)
-      await mkdir(root, { recursive: true })
+      const existing = await getManagedDshStatus(root)
+      if (existing.installed) {
+        operation.commit()
+        emit(progressFor(normalized, `正在应用已安装的 DSH ${normalized}`, 'configuring', 95))
+        if (!settings.activePackId || !settings.dshVersion) {
+          await options.saveSettings({ ...settings, dshVersion: normalized, launchExecutable: existing.executable!, launchArgs: ['web'] })
+        }
+        emit(progressFor(normalized, `DSH ${normalized} 已安装`, 'complete', 100))
+        return readInstalled(await options.readSettings())
+      }
+      operation.signal.throwIfAborted()
+      await prepareDshInstallRoot(root)
       const manifestPath = path.join(root, 'package.json')
       if (!existsSync(manifestPath)) await writeFile(manifestPath, `${JSON.stringify({ name: 'dsh-launcher-runtime', private: true }, null, 2)}\n`, 'utf8')
       await ensureDshScriptPolicy(manifestPath)
-      options.emitProgress(progressFor(normalized, `正在准备 DSH ${normalized} 依赖`, 'preparing', 5))
+      emit(progressFor(normalized, `正在准备 DSH ${normalized} 依赖`, 'preparing', 5))
       try {
         const currentManifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
         const existingOverrides = currentManifest.overrides
@@ -446,7 +431,7 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
         options.emitOutput('info', `[DSH ${normalized}] 正在校验核心包版本，避免 rc 版本混装。`)
         // 依赖可用性检查每次都执行；旧目录可能已经留下了不完整的 overrides，
         // 不能因为“看起来已锁定”就跳过对未发布包的拦截。
-        const coreOverrides = await resolveDshCoreOverrides(normalized, fetch, activeAbortController?.signal)
+        const coreOverrides = await resolveDshCoreOverrides(normalized, fetch, operation.signal)
         if (!alreadyPinned && Object.keys(coreOverrides).length > 0) {
             await writeFile(manifestPath, `${JSON.stringify({
               ...currentManifest,
@@ -457,15 +442,15 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
         }
       } catch (error) {
         if (error instanceof MissingDshDependencyError) throw error
-        if (cancellationRequested) throw error
+        if (operation.signal.aborted) throw error
         // registry 暂时不可用时仍允许包管理器使用本地缓存继续安装；错误会进入完整日志。
         options.emitOutput('error', `[DSH ${normalized}] 获取核心依赖版本锁定信息失败，将按原始依赖范围继续：${error instanceof Error ? error.message : String(error)}`)
       }
-      if (cancellationRequested) throw new Error(`已暂停下载 DSH ${normalized}`)
-      options.emitProgress(progressFor(normalized, `正在安装 DSH ${normalized}`, 'preparing', 5))
-      const node = await options.prepareNodeRuntime(progress => options.emitProgress(progressFor(normalized, progress.message, 'resolving', Math.max(8, progress.percent))))
-      const pnpm = await options.preparePnpmRuntime(node, progress => options.emitProgress(progressFor(normalized, progress.message, 'resolving', Math.max(8, progress.percent))))
-      if (cancellationRequested) throw new Error(`已暂停下载 DSH ${normalized}`)
+      operation.signal.throwIfAborted()
+      emit(progressFor(normalized, `正在安装 DSH ${normalized}`, 'preparing', 5))
+      const node = await options.prepareNodeRuntime(progress => emit(progressFor(normalized, progress.message, 'resolving', Math.max(8, progress.percent))))
+      const pnpm = await options.preparePnpmRuntime(node, progress => emit(progressFor(normalized, progress.message, 'resolving', Math.max(8, progress.percent))))
+      operation.signal.throwIfAborted()
       let currentPercent = 25
       let npmFetchedCount = 0
       let npmPlacedCount = 0
@@ -508,7 +493,7 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
         if (parsed) {
           currentPercent = Math.max(currentPercent, parsed.percent)
           lastProgressMessage = parsed.message
-          options.emitProgress(progressFor(normalized, parsed.message, 'downloading', currentPercent))
+          emit(progressFor(normalized, parsed.message, 'downloading', currentPercent))
         }
       }
       const runPackageManagerCommand = (args: string[]) => {
@@ -516,11 +501,12 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
           const elapsedSeconds = Math.floor((Date.now() - lastOutputAt) / 1000)
           if (elapsedSeconds < 5) return
           const message = `${lastProgressMessage} · 已等待 ${elapsedSeconds} 秒`
-          options.emitProgress(progressFor(normalized, message, 'downloading', currentPercent))
+          emit(progressFor(normalized, message, 'downloading', currentPercent))
           options.emitOutput('info', `[DSH ${normalized}] ${message}`)
         }, 5_000)
         heartbeat.unref()
-        return executeTrackedCommand(pnpm.executable, args, {
+        return runInstallCommand(executeCommand, pnpm.executable, args, {
+          signal: operation.signal,
           cwd: root,
           // 代理走环境变量（pnpm 认这个）；registry 不走——pnpm 11 忽略 npm_config_registry，
           // 必须用 --registry 旗标，见 buildManagedDshPnpmArgs。
@@ -544,11 +530,11 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
           node,
           nodeVersion: await probeNodeVersion(node.node),
         })
-      options.emitProgress(progressFor(normalized, lastProgressMessage, 'downloading', currentPercent))
+      emit(progressFor(normalized, lastProgressMessage, 'downloading', currentPercent))
       const result = await runPackageManagerCommand(buildManagedDshPnpmArgs(root, normalized, installNetwork.npmRegistry))
       if (result.exitCode !== 0) throw new Error(await installFailureMessage(`DSH ${normalized} 安装`, result))
       if (hasDshScriptPackage(root)) {
-        options.emitProgress(progressFor(normalized, `正在执行 ${DSH_SUBPROCESS_LOCAL_PACKAGE} 安装脚本`, 'configuring', 90))
+        emit(progressFor(normalized, `正在执行 ${DSH_SUBPROCESS_LOCAL_PACKAGE} 安装脚本`, 'configuring', 90))
         options.emitOutput('info', `正在执行 ${DSH_SUBPROCESS_LOCAL_PACKAGE} 的安装脚本。`)
         const rebuild = await runPackageManagerCommand([
           'rebuild', '--dir', root, '--reporter=append-only', DSH_SUBPROCESS_LOCAL_PACKAGE,
@@ -556,20 +542,24 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
         if (rebuild.exitCode !== 0) throw new Error(await installFailureMessage(`DSH ${normalized} 核心依赖安装脚本执行`, rebuild))
       }
       const executable = managedDshExecutable(root)
-      const status = await getManagedDshStatus(root)
+      const status = await getManagedDshStatus(root, true)
       if (!status.installed || !status.executable) throw new Error(`DSH ${normalized} 安装完成但未找到启动入口。`)
       // 已有激活整合包绑着某个版本时，下载新版本不抢「当前」——去整合包页切过去才算换环境。
+      operation.commit()
+      emit(progressFor(normalized, `正在保存 DSH ${normalized} 安装配置`, 'configuring', 95))
+      await finishDshInstallRoot(root)
       const adoptAsCurrent = !settings.activePackId || !settings.dshVersion
       await options.saveSettings(adoptAsCurrent
         ? { ...settings, dshVersion: normalized, launchExecutable: executable, launchArgs: ['web'] }
         : settings)
-      options.emitProgress(progressFor(normalized, `DSH ${normalized} 已安装`, 'complete', 100))
-      return read(true)
+      emit(progressFor(normalized, `DSH ${normalized} 已安装`, 'complete', 100))
+      return readInstalled(await options.readSettings())
     }).catch(error => {
-      options.emitProgress(progressFor(normalized, cancellationRequested
-        ? `已暂停下载 DSH ${normalized}`
-        : `DSH ${normalized} 安装失败：${error instanceof Error ? error.message : String(error)}`, 'error', 0))
+      emit(progressFor(normalized, error instanceof Error ? error.message : String(error), 'error', 0))
       throw error
+    }).finally(() => {
+      dshOperation = undefined
+      operation.finish()
     })
   }
 
@@ -667,11 +657,7 @@ export function createRuntimeVersionService(options: RuntimeVersionServiceOption
     selectNode: version => runExclusive(`切换 Node.js ${version ?? 'system'}`, () => selectNode(version)),
     removeNode: version => runExclusive(`删除 Node.js ${version}`, () => removeNode(version)),
     cancel: async () => {
-      if (!activeOperation) return
-      cancellationRequested = true
-      activeAbortController?.abort()
-      const processToStop = activeCommand
-      if (processToStop) await terminateCommand(processToStop)
+      if (dshOperation) await installOperations.cancel(dshOperation.id)
     },
     isBusy: () => activeOperation !== null,
   }

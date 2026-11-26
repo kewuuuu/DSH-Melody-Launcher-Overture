@@ -1,3 +1,4 @@
+import { createInstallOperations, installProgressState, runInstallCommand, type InstallOperation, type InstallOperations } from './install-operations'
 import { readFile } from 'node:fs/promises'
 import { writeFileAtomic } from './fs-atomic'
 import path from 'node:path'
@@ -74,6 +75,8 @@ export interface DshMarketOptions {
   /** 目录磁盘缓存路径（userData/dsh-market-cache.json），缺省则只用内存缓存。 */
   cachePath?: string
   targeted?: boolean
+  installOperations?: InstallOperations
+  packId?: string
   metadataLookup?: ReturnType<typeof createMarketMetadataLookup>
 }
 
@@ -294,12 +297,14 @@ export function createDshMarketService(options: DshMarketOptions) {
   let registryLoading: Promise<Registry> | null = null
   let updatesCache: { at: number; data: Record<string, DshMarketUpdateStatus> } | null = null
   let active = false
+  let operation: InstallOperation | undefined
+  const installOperations = options.installOperations ?? createInstallOperations()
   /** 「注册表条目名 → 实际 npm 包名」映射：git workspace 聚合包回退安装后登记，
       让目录/身份匹配（已安装、启停等）都能认识这条 npm 来源。 */
   const npmAliasByName = new Map<string, string>()
 
   const progress = (name: string, phase: DshMarketProgress['phase'], message: string, percent: number | null = null): void => {
-    options.emitProgress({ name, phase, message, percent })
+    options.emitProgress({ name, phase, message, percent, packId: options.packId, ...installProgressState(operation, phase) })
   }
 
   async function loadRegistry(): Promise<Registry> {
@@ -529,7 +534,7 @@ export function createDshMarketService(options: DshMarketOptions) {
     let useOfficialRegistry = false
     const runDshPlugin = (): Promise<CommandResult> => {
       const registry = registryOverride ?? (useOfficialRegistry ? NPM_OFFICIAL_REGISTRY : network.npmRegistry)
-      return execute(executable, commandArgs, {
+      return runInstallCommand(execute, executable, commandArgs, {
         cwd: settings.workspace,
         env: {
           ...dshEnv,
@@ -539,10 +544,11 @@ export function createDshMarketService(options: DshMarketOptions) {
         },
         onOutput: handleOutput,
         timeoutMs: DSH_MARKET_COMMAND_TIMEOUT_MS,
-      })
+      }, true)
     }
     options.emitOutput('info', `dsh-market 插件操作：${args.join(' ')}`)
-    progress(name, 'resolving', '正在解析精选插件来源', 12)
+    operation?.commit()
+    progress(name, 'building', '正在写入整合包并安装依赖，需等待此步骤完成', 20)
     let result = await runDshPlugin()
     // Existing Profiles may still have node_modules linked to the system pnpm
     // store. Move the links to the launcher's shared store before retrying the
@@ -551,12 +557,12 @@ export function createDshMarketService(options: DshMarketOptions) {
       const profilePath = path.join(settings.dshHome, 'profiles', settings.profileName)
       options.emitOutput('info', '检测到整合包使用旧 pnpm store，正在迁移依赖后自动重试。')
       progress(name, 'resolving', '正在迁移整合包依赖到启动器插件池', 78)
-      const migrate = await execute(pnpm.executable, ['install'], {
+      const migrate = await runInstallCommand(execute, pnpm.executable, ['install'], {
         cwd: profilePath,
         env: dshEnv,
         onOutput: (text, level) => options.emitOutput(level, text),
         timeoutMs: DSH_MARKET_COMMAND_TIMEOUT_MS,
-      })
+      }, true)
       if (migrate.exitCode !== 0) {
         throw new Error(`插件依赖迁移失败（代码 ${migrate.exitCode}）：${migrate.output.slice(-800)}`)
       }
@@ -749,8 +755,10 @@ export function createDshMarketService(options: DshMarketOptions) {
 
   async function mutate(name: string, action: 'install' | 'update' | 'uninstall', identity?: MutationIdentity): Promise<DshMarketInstalledPlugin[]> {
     if (active) throw new Error('dsh-market 正在执行另一个插件操作，请等待完成。')
+    operation = action === 'uninstall' ? undefined : installOperations.start('安装或更新插件 ' + name)
     active = true
     try {
+      progress(name, 'checking', '正在读取精选插件来源和整合包状态', 5)
       // 装已知插件不该依赖目录此刻能被拉下来：ensureRegistry 会先吃 30 分钟的磁盘缓存，
       // 只有冷启动没缓存时才真的联网（loadRegistry 拉不到就整句「目录为空」，装不上任何插件）。
       const registry = await ensureRegistry()
@@ -813,7 +821,11 @@ export function createDshMarketService(options: DshMarketOptions) {
     } catch (error) {
       progress(name, 'error', error instanceof Error ? error.message : 'dsh-market 操作失败', null)
       throw error
-    } finally { active = false }
+    } finally {
+      active = false
+      operation?.finish()
+      operation = undefined
+    }
   }
 
   async function checkUpdates(force = false): Promise<Record<string, DshMarketUpdateStatus>> {

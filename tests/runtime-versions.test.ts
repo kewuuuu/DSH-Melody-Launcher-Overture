@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { buildDshCoreOverrides, buildManagedDshInstallArgs, buildManagedDshPnpmArgs, createRuntimeVersionService, listAvailableDshVersions, MissingDshDependencyError, resolveDshCoreOverrides } from '../electron/runtime-versions'
+import { createInstallOperations } from '../electron/install-operations'
+import { getManagedDshStatus } from '../electron/dsh-install'
 import type { AppSettings } from '../src/types'
 import type { NodeRuntime, PnpmRuntime } from '../electron/node-runtime'
 
@@ -212,7 +214,7 @@ describe('运行环境读缓存', () => {
 })
 
 describe('DSH 版本安装的网络环境', () => {
-  it('pnpm 安装带上用户镜像源与代理，不再默认打官方源', async () => {
+  it('取消后可重试，且 pnpm 安装带上用户镜像源与代理', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-install-net-'))
     const versionRoot = path.join(root, 'versions', '0.1.7-rc.1')
     // 0.1.7 的依赖清单里有大体积二进制包，官方源在大陆网络下会超时；
@@ -224,6 +226,11 @@ describe('DSH 版本安装的网络环境', () => {
     })) as unknown as typeof fetch)
 
     const commands: { args: string[]; env: NodeJS.ProcessEnv }[] = []
+    const installs = createInstallOperations()
+    let operationId = ''
+    let abortFirstInstall = true
+    const partialFile = path.join(versionRoot, 'test-interrupted')
+    const saveSettings = vi.fn(async (next: AppSettings) => next)
     const settings = {
       dshInstallPath: root,
       dshHome: path.join(root, 'home'),
@@ -243,12 +250,13 @@ describe('DSH 版本安装的网络环境', () => {
         dshRoot: root,
         nodeRoot: path.join(root, 'node-runtime'),
         readSettings: async () => settings,
-        saveSettings: async next => next,
+        installOperations: installs,
+        saveSettings,
         prepareNodeRuntime: async () => ({ root, node: path.join(root, 'node.exe'), npm: '', npx: '', managed: false }) as NodeRuntime,
         preparePnpmRuntime: async () => ({ root, executable: path.join(root, 'pnpm.cmd') }) as PnpmRuntime,
         isRuntimeRunning: () => false,
         emitOutput: () => {},
-        emitProgress: () => {},
+        emitProgress: progress => { operationId = progress.operationId ?? '' },
         githubFetch: async () => { throw new Error('本条测试不该联网读版本列表') },
         runCommand: async (_executable, args, options) => {
           commands.push({ args, env: (options.env ?? {}) as NodeJS.ProcessEnv })
@@ -261,11 +269,25 @@ describe('DSH 版本安装的网络环境', () => {
           await writeFile(path.join(bin, 'dsh.cmd'), '@echo off\r\n', 'utf8')
           await writeFile(path.join(bin, 'dsh'), '#!/bin/sh\n', 'utf8')
           await writeFile(path.join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.7-rc.1' }), 'utf8')
+          if (abortFirstInstall) {
+            await writeFile(partialFile, 'incomplete')
+            void installs.cancel(operationId)
+            expect(options.signal?.aborted).toBe(true)
+            expect(installs.isBusy()).toBe(true)
+          } else {
+            await expect(access(partialFile)).rejects.toThrow()
+          }
           return { exitCode: 0, output: '' }
         },
       })
 
+      await expect(service.installDsh('0.1.7-rc.1')).rejects.toThrow('已取消')
+      expect(saveSettings).not.toHaveBeenCalled()
+      expect((await getManagedDshStatus(versionRoot)).installed).toBe(false)
+      expect(installs.isBusy()).toBe(false)
+      abortFirstInstall = false
       await service.installDsh('0.1.7-rc.1')
+      expect((await getManagedDshStatus(versionRoot)).installed).toBe(true)
 
       const install = commands.find(command => command.args[0] === 'add')
       // registry 必须由旗标带上——环境变量 pnpm 11 不认。

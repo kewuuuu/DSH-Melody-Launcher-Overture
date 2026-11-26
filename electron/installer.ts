@@ -1,3 +1,4 @@
+import { createInstallOperations, installProgressState, runInstallCommand, type InstallOperation, type InstallOperations } from './install-operations'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -34,11 +35,14 @@ import { analyzeCatalogWithProgress, mergeMetaRepositoryAnalysis } from './catal
 import {
   findInstalledDsh,
   getManagedDshStatus,
+  prepareDshInstallRoot,
+  finishDshInstallRoot,
   installWaitingMessage,
   isDshRepository,
   packageManagerProgress,
 } from './dsh-install'
 import { dshRegistryCandidates, dshVersionRoot, findManagedDshVersions, listAvailableDshVersions, normalizeDshVersion } from './runtime-versions'
+import { validVersion } from './dsh-release'
 import { checkDshUpdate } from './dsh-update'
 import { resolveNodeExecutable, type NodeRuntime, type NodeRuntimeProgress, type PnpmRuntime } from './node-runtime'
 import { approveAllIgnoredBuilds, denyBuildKeys } from './plugin-install'
@@ -118,6 +122,7 @@ function validateNpmVersion(version?: string): string | undefined {
 }
 
 export interface InstallerOptions {
+  installOperations?: InstallOperations
   readSettings: () => Promise<AppSettings>
   saveSettings: (settings: AppSettings) => Promise<AppSettings>
   /** 确保 Node.js 可用；onProgress 用于把下载进度并入安装进度。 */
@@ -254,11 +259,13 @@ export async function syncProfilePnpmConfig(
 
 export function createInstaller(options: InstallerOptions): Installer {
   let active: InstallProgress | null = null
+  let operation: InstallOperation | undefined
+  const installOperations = options.installOperations ?? createInstallOperations()
   const executeCommand = options.runCommand ?? runCommand
 
   const emit = (progress: InstallProgress) => {
-    active = progress
-    options.emitProgress(progress)
+    active = { ...progress, ...installProgressState(operation, progress.phase) }
+    options.emitProgress(active)
   }
 
   const currentPercent = (fallback: number) => active?.percent ?? fallback
@@ -578,6 +585,10 @@ export function createInstaller(options: InstallerOptions): Installer {
     const executable = resolveNodeExecutable(settings.launchExecutable, nodeRuntime)
     const commandArgs = buildPluginCommandArgs(settings, executable, args, targetProfile)
     const workspacePath = path.join(settings.dshHome, 'profiles', targetProfile, 'pnpm-workspace.yaml')
+    if (operation && installingRepository && (operation.cancellable || operation.signal.aborted)) {
+      operation.commit()
+      emit({ repository: installingRepository, kind: 'plugin', phase: 'configuring', percent: 18, message: '正在写入整合包并安装依赖，需等待此步骤完成' })
+    }
     if (deniedRegistryBuildKeys.length > 0) await mkdir(path.dirname(workspacePath), { recursive: true })
     if (deniedRegistryBuildKeys.length > 0) await denyBuildKeys(workspacePath, deniedRegistryBuildKeys)
     await syncProfilePnpmConfig(path.join(settings.dshHome, 'profiles', targetProfile), network.npmRegistry, options.packageStoreRoot)
@@ -593,7 +604,7 @@ export function createInstaller(options: InstallerOptions): Installer {
 
     let result
     try {
-      result = await executeCommand(executable, commandArgs, {
+      result = await runInstallCommand(executeCommand, executable, commandArgs, {
         cwd: settings.workspace,
         env: withExecutableDirectoryOnPath(
           pnpmRuntime.executable,
@@ -612,7 +623,7 @@ export function createInstaller(options: InstallerOptions): Installer {
           options.emitOutput(level, text)
           tracker?.handleOutput(text)
         },
-      })
+      }, true)
     } finally {
       tracker?.stop()
     }
@@ -629,7 +640,7 @@ export function createInstaller(options: InstallerOptions): Installer {
         percent: Math.max(78, currentPercent(78)),
         message: '正在迁移插件依赖（pnpm store 升级）',
       })
-      const migrate = await executeCommand(pnpmRuntime.executable, ['install'], {
+      const migrate = await runInstallCommand(executeCommand, pnpmRuntime.executable, ['install'], {
         cwd: profilePath,
         env: withExecutableDirectoryOnPath(nodeRuntime.node, {
           ...process.env,
@@ -643,7 +654,7 @@ export function createInstaller(options: InstallerOptions): Installer {
           FORCE_COLOR: '0',
         }),
         onOutput: (text, level: OutputLevel) => options.emitOutput(level, text),
-      })
+      }, true)
       if (migrate.exitCode === 0) {
         options.emitOutput('info', '整合包依赖已迁移到当前 pnpm store，正在重试安装。')
         return runPluginCommand(args, installingRepository, false, profileName, approvedRegistryBuildKeys, deniedRegistryBuildKeys)
@@ -683,20 +694,22 @@ export function createInstaller(options: InstallerOptions): Installer {
     const settings = await options.readSettings()
     let selectedVersion: string | null = null
     try {
-      const available = await listAvailableDshVersions(options.githubFetch, dshRegistryCandidates(buildNetworkEnvironment(settings).npmRegistry))
+      const available = await listAvailableDshVersions(options.githubFetch, dshRegistryCandidates(buildNetworkEnvironment(settings).npmRegistry), operation?.signal)
       // 推荐版本由主进程按「稳定优先、同级取新」标在候选项上（规则见 electron/dsh-release.ts）。
       // 不直接采信 npm 的 latest 标签：上游至今没发正式版，latest 会长期停在某个旧预发布版上。
-      selectedVersion = selectedVersion
-        ?? available.find(candidate => candidate.recommended)?.version
+      selectedVersion = available.find(candidate => candidate.recommended)?.version
         ?? available.find(candidate => !candidate.prerelease)?.version
         ?? available[0]?.version
         ?? (settings.dshVersion ? normalizeDshVersion(settings.dshVersion) : null)
     } catch (error) {
-      // 首次部署不能因版本索引暂时不可用而阻塞；没有精确选择时回落到已配置版本。
+      operation?.signal.throwIfAborted()
+      // 版本索引暂时不可用时，回落到已配置的精确版本。
       selectedVersion = settings.dshVersion ? normalizeDshVersion(settings.dshVersion) : null
       options.emitOutput('info', `读取 DSH 版本列表失败，回落到已配置版本：${error instanceof Error ? error.message : String(error)}`)
     }
-    const runtimeRoot = selectedVersion ? dshVersionRoot(settings.dshInstallPath, selectedVersion) : settings.dshInstallPath
+    operation?.signal.throwIfAborted()
+    if (!selectedVersion || !validVersion(selectedVersion)) throw new Error('无法确定要安装的 DSH 版本，请检查网络后重试。')
+    const runtimeRoot = dshVersionRoot(settings.dshInstallPath, selectedVersion)
     // 选中的发布版本与已安装版本一致时直接认定已是最新，而不是对现有目录重跑一次安装。
     // 已装目录可能由 pnpm 管理（node_modules 走 junction 链接），npm 重装同一布局会
     // 在依赖树解析阶段崩溃（@npmcli/arborist Link.matches：Cannot read properties of null）。
@@ -709,7 +722,7 @@ export function createInstaller(options: InstallerOptions): Installer {
         return { kind: 'dsh', profile, settings, dshInstallation: existing }
       }
     }
-    await mkdir(runtimeRoot, { recursive: true })
+    await prepareDshInstallRoot(runtimeRoot)
     const manifestPath = path.join(runtimeRoot, 'package.json')
     if (!existsSync(manifestPath)) {
       await writeFile(manifestPath, `${JSON.stringify({ name: 'dsh-launcher-runtime', private: true }, null, 2)}\n`, 'utf8')
@@ -722,7 +735,7 @@ export function createInstaller(options: InstallerOptions): Installer {
     const tracker = trackPackageProgress(repository, 'dsh', '正在下载并安装 DSH')
     let result
     try {
-      result = await executeCommand(nodeRuntime.npm, [
+      result = await runInstallCommand(executeCommand, nodeRuntime.npm, [
         'install',
         '--prefix', runtimeRoot,
         '--save-exact',
@@ -733,9 +746,10 @@ export function createInstaller(options: InstallerOptions): Installer {
         // 让运行日志保留 npm 的 registry 请求、依赖解析和安装脚本原文。
         '--loglevel=verbose',
         '--foreground-scripts',
-        selectedVersion ? `${DSH_PACKAGE_NAME}@${selectedVersion}` : `${DSH_PACKAGE_NAME}@latest`,
+        `${DSH_PACKAGE_NAME}@${selectedVersion}`,
       ], {
         cwd: runtimeRoot,
+        signal: operation?.signal,
         env: withExecutableDirectoryOnPath(nodeRuntime.node, {
           ...process.env,
           FORCE_COLOR: '0',
@@ -749,7 +763,7 @@ export function createInstaller(options: InstallerOptions): Installer {
       if (result.exitCode === 0 && hasDshScriptPackage(runtimeRoot)) {
         emit({ repository, kind: 'dsh', phase: 'configuring', percent: 90, message: '正在执行 DSH 核心依赖安装脚本' })
         options.emitOutput('info', `正在执行 ${DSH_SUBPROCESS_LOCAL_PACKAGE} 的安装脚本。`)
-        const rebuild = await executeCommand(nodeRuntime.npm, [
+        const rebuild = await runInstallCommand(executeCommand, nodeRuntime.npm, [
           'rebuild',
           '--prefix', runtimeRoot,
           '--foreground-scripts',
@@ -757,6 +771,7 @@ export function createInstaller(options: InstallerOptions): Installer {
           DSH_SUBPROCESS_LOCAL_PACKAGE,
         ], {
           cwd: runtimeRoot,
+          signal: operation?.signal,
           env: withExecutableDirectoryOnPath(nodeRuntime.node, {
             ...process.env,
             FORCE_COLOR: '0',
@@ -776,12 +791,14 @@ export function createInstaller(options: InstallerOptions): Installer {
     }
     if (result.exitCode !== 0) throw new Error(`本地 DSH 安装失败（代码 ${result.exitCode}），请查看运行日志。`)
 
-    emit({ repository, kind: 'dsh', phase: 'configuring', percent: 90, message: '正在切换本地启动命令' })
-    const dshInstallation = await getManagedDshStatus(runtimeRoot)
+    const dshInstallation = await getManagedDshStatus(runtimeRoot, true)
     if (!dshInstallation.installed || !dshInstallation.executable) {
       throw new Error('安装完成，但没有找到本地 DSH 可执行文件。')
     }
 
+    operation?.commit()
+    emit({ repository, kind: 'dsh', phase: 'configuring', percent: 95, message: '正在切换本地启动命令' })
+    await finishDshInstallRoot(runtimeRoot)
     const saved = await options.saveSettings({
       ...settings,
       dshVersion: dshInstallation.version ? normalizeDshVersion(dshInstallation.version) : selectedVersion,
@@ -810,7 +827,7 @@ export function createInstaller(options: InstallerOptions): Installer {
       : path.basename(executable).toLowerCase().startsWith('dsh')
         ? []
         : ['--yes', DSH_PACKAGE_NAME]
-    const result = await executeCommand(executable, [...prefix, '--profile', profileName, '--dump-config'], {
+    const result = await runInstallCommand(executeCommand, executable, [...prefix, '--profile', profileName, '--dump-config'], {
       cwd: settings.workspace,
       env: withExecutableDirectoryOnPath(nodeRuntime.node, {
         ...process.env,
@@ -833,6 +850,7 @@ export function createInstaller(options: InstallerOptions): Installer {
 
     async install(fullName: string): Promise<RepositoryInstallResult> {
       if (active) throw new Error(`正在安装 ${active.repository}，请等待当前任务完成。`)
+      operation = installOperations.start('安装' + fullName)
       const kind = isDshRepository(fullName) ? 'dsh' : 'plugin'
       emit({
         repository: fullName,
@@ -883,6 +901,8 @@ export function createInstaller(options: InstallerOptions): Installer {
         throw error
       } finally {
         active = null
+        operation?.finish()
+        operation = undefined
       }
     },
 
@@ -1011,6 +1031,7 @@ export function createInstaller(options: InstallerOptions): Installer {
     ): Promise<RepositoryInstallResult> {
       const fullName = request.repository
       if (active) throw new Error(`正在安装 ${active.repository}，请等待当前任务完成。`)
+      operation = installOperations.start('安装' + fullName)
       emit({ repository: fullName, kind: 'plugin', phase: 'preparing', percent: 5, message: '正在检查插件结构' })
       const temporaryArtifacts: string[] = []
       try {
@@ -1043,19 +1064,16 @@ export function createInstaller(options: InstallerOptions): Installer {
           const tgzPath = path.join(options.pluginSourceRoot, tgzName)
           await mkdir(options.pluginSourceRoot, { recursive: true })
           emit({ repository: fullName, kind: 'plugin', phase: 'downloading', percent: 30, message: '正在下载 Release 安装包' })
-          const asset = options.githubFetch
-            ? await downloadReleaseAsset(target.tarballUrl, MAX_RELEASE_BYTES, undefined, options.githubFetch)
-            : await downloadReleaseAsset(target.tarballUrl, MAX_RELEASE_BYTES)
-          await writeFile(tgzPath, asset)
+          const asset = await downloadReleaseAsset(target.tarballUrl, MAX_RELEASE_BYTES, undefined, options.githubFetch, operation?.signal, 45_000)
+          operation?.signal.throwIfAborted()
+          await writeFileAtomic(tgzPath, asset)
           specifier = `file:${tgzPath}`
         } else if (target.source === 'local-directory') {
           specifier = `file:${validateLocalPluginDirectory(target.localDirectory)}`
         } else {
           const onProgress = (progress: PluginSourceProgress) =>
             emit({ repository: fullName, kind: 'plugin', phase: 'downloading', ...progress })
-          const packageDirectory = options.githubFetch
-            ? await prepareSubdirectoryPlugin(options.pluginSourceRoot, fullName, target, onProgress, options.githubFetch)
-            : await prepareSubdirectoryPlugin(options.pluginSourceRoot, fullName, target, onProgress)
+          const packageDirectory = await prepareSubdirectoryPlugin(options.pluginSourceRoot, fullName, target, onProgress, options.githubFetch, operation?.signal)
           specifier = `file:${packageDirectory}`
         }
 
@@ -1109,6 +1127,8 @@ export function createInstaller(options: InstallerOptions): Installer {
       } finally {
         for (const file of temporaryArtifacts) await rm(file, { force: true }).catch(() => undefined)
         active = null
+        operation?.finish()
+        operation = undefined
       }
     },
 
@@ -1118,6 +1138,7 @@ export function createInstaller(options: InstallerOptions): Installer {
       const profileName = profileOverride ?? (await options.readSettings()).profileName
       const repository = request.repository ?? `npm:${request.packageName}`
       if (active) throw new Error(`正在安装 ${active.repository}，请等待当前任务完成。`)
+      operation = installOperations.start('安装' + repository)
       emit({ repository, kind: 'plugin', phase: 'preparing', percent: 5, message: '正在准备 npm 插件' })
       try {
         const specifier = version ? `${request.packageName}@${version}` : request.packageName
@@ -1159,6 +1180,8 @@ export function createInstaller(options: InstallerOptions): Installer {
         throw error
       } finally {
         active = null
+        operation?.finish()
+        operation = undefined
       }
     },
 

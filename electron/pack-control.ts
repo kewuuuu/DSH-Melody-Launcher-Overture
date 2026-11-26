@@ -26,7 +26,7 @@ export interface PackControlOptions {
   probePackActiveSessions?: (url: string) => Promise<number | null>
   beforeStart?: (record: PackRecord, settings: AppSettings) => Promise<void>
   lifecycle?: (command: string, packId: string | undefined, args: Record<string, unknown>) => Promise<unknown>
-  market?: (command: string, settings: AppSettings, args: Record<string, unknown>) => Promise<unknown>
+  market?: (command: string, settings: AppSettings, args: Record<string, unknown>, packId: string) => Promise<unknown>
   /** 外部遗留进程的扫描与停止；默认走 external-runtime 的真实实现，测试注入假实现。 */
   externalRuntime?: {
     scan?: typeof scanExternalRuntimes
@@ -624,7 +624,7 @@ export function createPackControl(options: PackControlOptions) {
     }))
     if (command === 'pack.resources.list') return resources(r, args.kind)
     if (command === 'pack.market.catalog' || command === 'pack.market.compatibility') {
-      return options.market?.(command, await options.resolveSettings(r, await config(r.id, command !== 'pack.market.compatibility')), args)
+      return options.market?.(command, await options.resolveSettings(r, await config(r.id, command !== 'pack.market.compatibility')), args, r.id)
     }
     if (command === 'pack.stop' && args.force === true && controllers.get(r.id)?.isRunning()) {
       if (closing) throw new Error('Launcher is shutting down')
@@ -670,7 +670,7 @@ export function createPackControl(options: PackControlOptions) {
         if (linked) throw new Error('请先解除共享引用，再更新此插件。')
         await assertNotSharedSource(r.id, 'plugins', args.packageName)
       }
-      if (command.startsWith('pack.market.') || command.startsWith('pack.skillMarket.')) return options.market?.(command, s, args)
+      if (command.startsWith('pack.market.') || command.startsWith('pack.skillMarket.')) return options.market?.(command, s, args, current.id)
       if (command === 'pack.resources.enabled' || command === 'pack.resources.remove') {
         if (command.endsWith('.remove') || args.kind === 'skills' || args.kind === 'presets') await assertNotSharedSource(r.id, args.kind, args.name)
         if (typeof args.name !== 'string') throw new Error('Resource name required')
@@ -681,7 +681,7 @@ export function createPackControl(options: PackControlOptions) {
           if (command.endsWith('.remove')) {
             const sidecar = path.join(s.dshHome, '.launcher-shared-plugins-' + encodeURIComponent(name) + '.json')
             const shared = await readFile(sidecar, 'utf8').then(() => true).catch(() => false)
-            if (!shared) return options.market?.('pack.market.remove', s, args)
+            if (!shared) return options.market?.('pack.market.remove', s, args, current.id)
             const manifestPath = path.join(s.dshHome, 'profiles', s.profileName, 'package.json')
             const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
             delete manifest.dependencies?.[name]

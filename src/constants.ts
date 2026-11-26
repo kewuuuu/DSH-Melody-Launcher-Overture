@@ -148,6 +148,7 @@ export const IPC = {
   dshMarketToggle: 'dsh-market:toggle',
   dshMarketUpdates: 'dsh-market:updates',
   pluginsInstall: 'plugins:install',
+  installCancel: 'plugins:install-cancel',
   pluginsInstallNpm: 'plugins:install-npm',
   desktopStatus: 'desktop:status',
   desktopInstall: 'desktop:install',

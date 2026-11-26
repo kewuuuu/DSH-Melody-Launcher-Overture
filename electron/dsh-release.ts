@@ -80,6 +80,7 @@ export const ABBREVIATED_PACKUMENT_ACCEPT = 'application/vnd.npm.install-v1+json
 export interface ReadDshVersionIndexOptions {
   accept?: string
   timeoutMs?: number
+  signal?: AbortSignal
 }
 
 /**
@@ -94,17 +95,21 @@ export async function readDshVersionIndex(
   const seen = new Set<string>()
   let lastError: unknown = null
   for (const candidate of registryCandidates) {
+    options.signal?.throwIfAborted()
     const base = candidate.trim().replace(/\/+$/, '')
     if (!base || seen.has(base)) continue
     seen.add(base)
     try {
       const response = await fetchImpl(`${base}/${DSH_PACKAGE_NAME.replace('/', '%2F')}`, {
         headers: { Accept: options.accept ?? FULL_PACKUMENT_ACCEPT, 'User-Agent': 'DSH-Launcher' },
-        signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
+        signal: options.signal
+          ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? 15_000)])
+          : AbortSignal.timeout(options.timeoutMs ?? 15_000),
       })
       if (!response.ok) throw new Error(`读取 DSH npm 版本列表失败（HTTP ${response.status}）。`)
       return await response.json() as DshRegistryResponse
     } catch (error) {
+      options.signal?.throwIfAborted()
       lastError = error
     }
   }

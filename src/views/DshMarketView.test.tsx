@@ -3,7 +3,7 @@ import { act, StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { LauncherApiProvider } from '../api/client'
-import type { DshMarketCatalog, DshMarketCompatibility, DshMarketCompatibilityEntry, LauncherApi, LauncherControlRequest } from '../types'
+import type { DshMarketCatalog, DshMarketCompatibility, DshMarketCompatibilityEntry, DshMarketProgress, LauncherApi, LauncherControlRequest } from '../types'
 import { DshMarketView } from './DshMarketView'
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
@@ -242,4 +242,83 @@ it('discards a lookup from before a catalog refresh even if the same catalog obj
   await act(async () => current.resolve({ dshVersion: '0.3.0', entries: [entry('example', '1.3.0')] }))
   expect(installButton('example')?.disabled).toBe(false)
   expect(card('example')?.textContent).toContain('兼容版本 v1.3.0')
+})
+
+function subscribeToMarketProgress() {
+  const listeners = new Set<(progress: DshMarketProgress) => void>()
+  return {
+    onDshMarketProgress: (listener: (progress: DshMarketProgress) => void) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    emit: (progress: Partial<DshMarketProgress>) => act(async () => {
+      listeners.forEach(listener => listener({ name: 'example', phase: 'downloading', percent: 40, message: '正在下载依赖', ...progress }))
+    }),
+  }
+}
+
+it('cancels the selected pack install once, waits for its terminal event, and allows a clean retry', async () => {
+  const events = subscribeToMarketProgress()
+  const first = deferred<{ installed: boolean }>()
+  const retry = deferred<{ installed: boolean }>()
+  const cancel = deferred<void>()
+  const install = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(retry.promise)
+  const cancelInstall = vi.fn(() => cancel.promise)
+  const launcherControl = vi.fn(async ({ command }: LauncherControlRequest) => {
+    if (command === 'pack.market.catalog') return { ...catalog('example'), dshVersion: '0.2.1' }
+    if (command === 'pack.market.compatibility') return { dshVersion: '0.2.1', entries: [entry('example', '1.4.0')] }
+    return install()
+  })
+  await render({ launcherControl, ...events, cancelInstall } as unknown as LauncherApi, 'global', 'pack-a')
+  await click('安装')
+  expect(container.textContent).toContain('正在准备安装插件')
+  await events.emit({ packId: 'pack-b', operationId: 'other-pack', cancellable: true })
+  await events.emit({ operationId: 'global', cancellable: true })
+  await events.emit({ packId: 'pack-a', name: 'other', operationId: 'other-plugin', cancellable: true })
+  expect(container.textContent).not.toContain('取消安装')
+  await events.emit({ packId: 'pack-a', operationId: 'old', cancellable: true })
+  const button = Array.from(container.querySelectorAll('button')).find(item => item.textContent === '取消安装')!
+  expect(button.disabled).toBe(false)
+  await act(async () => { button.click(); button.click() })
+  expect(cancelInstall).toHaveBeenCalledExactlyOnceWith('old')
+  await act(async () => cancel.resolve(undefined))
+  expect(container.textContent).toContain('正在取消安装…')
+  expect(installButton('example')?.disabled).toBe(true)
+  await events.emit({ packId: 'pack-a', operationId: 'old', phase: 'error', cancellable: false, message: '已取消安装。' })
+  expect(container.textContent).toContain('已取消安装。')
+  expect(container.textContent).not.toContain('正在取消安装…')
+  await act(async () => first.resolve({ installed: false }))
+  await click('安装')
+  await events.emit({ packId: 'pack-a', operationId: 'old', cancellable: true })
+  expect(container.textContent).toContain('正在准备安装插件')
+  expect(container.textContent).not.toContain('取消安装')
+  await events.emit({ packId: 'pack-a', operationId: 'new', cancellable: true })
+  await events.emit({ packId: 'pack-a', operationId: 'old', phase: 'error', message: '过期事件' })
+  expect(container.textContent).not.toContain('过期事件')
+  await events.emit({ packId: 'pack-a', operationId: 'new', phase: 'verifying', cancellable: false, message: '正在写入配置' })
+  expect(container.textContent).toContain('正在写入配置')
+  expect(container.textContent).not.toContain('取消安装')
+  await act(async () => retry.resolve({ installed: true }))
+  expect(install).toHaveBeenCalledTimes(2)
+})
+
+it('shows global market progress and rejects pack-scoped or ID-less cancel events', async () => {
+  const events = subscribeToMarketProgress()
+  const install = deferred<unknown>()
+  const cancelInstall = vi.fn().mockRejectedValue(new Error('已进入写入阶段'))
+  const api = { ...events, cancelInstall, loadDshMarket: async () => catalog('example'), installDshMarketPlugin: () => install.promise } as unknown as LauncherApi
+  await render(api, 'global')
+  await click('安装')
+  await events.emit({ packId: 'pack-a', operationId: 'other', cancellable: true })
+  await events.emit({ cancellable: true })
+  expect(container.textContent).toContain('正在下载依赖')
+  expect(container.textContent).not.toContain('取消安装')
+  await events.emit({ operationId: 'global', cancellable: true })
+  await click('取消安装')
+  expect(cancelInstall).toHaveBeenCalledExactlyOnceWith('global')
+  expect(container.textContent).toContain('已进入写入阶段')
+  await events.emit({ operationId: 'global', cancellable: false, phase: 'verifying', message: '正在写入配置' })
+  expect(container.textContent).toContain('正在写入配置')
+  expect(container.textContent).not.toContain('取消安装')
+  await act(async () => install.resolve(undefined))
 })

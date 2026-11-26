@@ -1,9 +1,12 @@
 import { LoaderCircle, PackagePlus } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useLauncherApi } from '../../api/client'
 import { errorText } from '../../lib/format'
 import { parsePluginAddInput } from '../../lib/plugin-add'
 import { ModalShell } from './ModalShell'
+import { InstallStage } from '../InstallStage'
+import { useInstallOperation } from '../../hooks/use-install-operation'
+import type { InstallProgress } from '../../types'
 
 interface PluginAddDialogProps {
   /** 插件装进哪个整合包：安装永远落在当前激活的那个包上。 */
@@ -24,8 +27,12 @@ export function PluginAddDialog({ profileName, onClose, onInstalled, desktop = f
   const [value, setValue] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const install = useInstallOperation<InstallProgress>(api.cancelInstall)
+  const { acceptProgress, begin } = install
+  useEffect(() => desktop ? undefined : api.onInstallProgress?.(acceptProgress), [acceptProgress, api, desktop])
 
   const submit = async () => {
+    if (busy) return
     let target: ReturnType<typeof parsePluginAddInput>
     try {
       target = parsePluginAddInput(value)
@@ -33,6 +40,11 @@ export function PluginAddDialog({ profileName, onClose, onInstalled, desktop = f
       setError(errorText(cause))
       return
     }
+    const repository = target.kind === 'github' ? target.name : `npm:${target.name}`
+    const finish = desktop ? null : begin({
+      repository, kind: 'plugin', phase: 'preparing', percent: 0, message: '正在准备安装插件', indeterminate: true,
+    }, progress => progress.kind === 'plugin' && progress.repository.toLowerCase() === repository.toLowerCase())
+    if (!desktop && !finish) return
     setBusy(true)
     setError(null)
     try {
@@ -43,11 +55,13 @@ export function PluginAddDialog({ profileName, onClose, onInstalled, desktop = f
       } else {
         await api.installPluginFromNpm({ packageName: target.name, ...(target.version !== undefined ? { version: target.version } : {}) })
       }
+      finish?.()
       await onInstalled()
       onClose()
     } catch (cause) {
       setError(errorText(cause))
     } finally {
+      finish?.()
       setBusy(false)
     }
   }
@@ -79,6 +93,7 @@ export function PluginAddDialog({ profileName, onClose, onInstalled, desktop = f
           onKeyDown={event => { if (event.key === 'Enter') void submit() }}
         />
       </label>
+      {install.progress && <InstallStage progress={install.progress} cancelling={install.cancelling} cancelError={install.cancelError} onCancel={install.cancel} />}
       {error && <div className="error-banner"><span>{error}</span><button type="button" onClick={() => setError(null)}>忽略</button></div>}
       <p className="dialog-note">
         {desktop

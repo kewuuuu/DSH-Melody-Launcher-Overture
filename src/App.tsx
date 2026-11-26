@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState, type CSSPropertie
 import { Layers3, LoaderCircle } from 'lucide-react'
 import { LauncherApiProvider, resolveLauncherApi, useLauncherApi } from './api/client'
 import { PackDashboard } from './components/PackDashboard'
+import { InstallStage } from './components/InstallStage'
 import { PendingResumesBanner } from './components/PendingResumesBanner'
 import { StartView, updateNeedsDialog } from './components/start/StartView'
 import { TopBar } from './components/TopBar'
@@ -99,9 +100,8 @@ function LauncherShell() {
     }
   }, [theme, effectiveAppearance])
 
-  const installingResource = isInstallProgressActive(store.installProgress)
-  const installingDsh = store.busy === BUSY.dshInstall
-    || (installingResource && store.installProgress?.kind === 'dsh')
+  const installingResource = store.dshInstall.busy || isInstallProgressActive(store.installProgress)
+  const dshOverviewProgress = store.dshInstall.progress?.repository === DSH_REPOSITORY ? store.dshInstall.progress : null
   const installingApplication = installingResource && store.installProgress?.kind === 'application'
   // 安装会写入整合包、Skill 或应用注册表；跨页时仍需阻止这些写操作。
   const profileMutationLocked = installingResource
@@ -167,7 +167,10 @@ function LauncherShell() {
       busy={store.busy}
       onUninstallSkill={store.uninstallSkill}
       profileMutationLocked={profileMutationLocked}
-      installProgress={store.installProgress}
+      installProgress={dshOverviewProgress ? null : store.dshInstall.progress}
+      cancellingInstall={store.dshInstall.cancelling}
+      cancelInstallError={store.dshInstall.cancelError}
+      onCancelInstall={store.dshInstall.cancel}
       onRefresh={() => {
         void store.refreshProfile()
         void store.refreshSecondaryResources()
@@ -280,9 +283,12 @@ function LauncherShell() {
                       runtime={store.runtime}
                       dshInstallation={store.dshInstallation}
                       dshUpdate={store.dshUpdate}
-                      installProgress={store.installProgress?.repository === DSH_REPOSITORY ? store.installProgress : null}
+                      installProgress={dshOverviewProgress}
+                      cancellingInstall={store.dshInstall.cancelling}
+                      cancelInstallError={dshOverviewProgress ? store.dshInstall.cancelError : null}
+                      onCancelInstall={store.dshInstall.cancel}
                       busy={runtimeBusy}
-                      installingDsh={installingDsh}
+                      installingDsh={Boolean(dshOverviewProgress && store.dshInstall.busy)}
                       onOpenWeb={openHarness}
                       onStop={() => void toggleRuntime()}
                       onUpdateDsh={() => { void store.updateDsh() }}
@@ -417,11 +423,14 @@ function LauncherShell() {
  * 旧启动页 <details> 里「运行时安装、更新与启动器工具」的入口迁到这里；
  * 具体某个整合包的启动/停止仍在下面控制面板的表格里。
  */
-function PacksRuntimeBar({ runtime, dshInstallation, dshUpdate, installProgress, busy, installingDsh, onOpenWeb, onStop, onUpdateDsh }: {
+function PacksRuntimeBar({ runtime, dshInstallation, dshUpdate, installProgress, cancellingInstall, cancelInstallError, onCancelInstall, busy, installingDsh, onOpenWeb, onStop, onUpdateDsh }: {
   runtime: RuntimeState
   dshInstallation: DshInstallationStatus
   dshUpdate: DshUpdateStatus | null
   installProgress: InstallProgress | null
+  cancellingInstall: boolean
+  cancelInstallError: string | null
+  onCancelInstall: () => void
   busy: boolean
   installingDsh: boolean
   onOpenWeb: () => void
@@ -429,9 +438,7 @@ function PacksRuntimeBar({ runtime, dshInstallation, dshUpdate, installProgress,
   onUpdateDsh: () => void
 }) {
   const version = dshInstallation.version ?? '未安装'
-  const updateLabel = installingDsh
-    ? (installProgress?.indeterminate ? '正在安装…' : `正在安装 ${installProgress?.percent ?? 0}%`)
-    : dshUpdate?.state === 'update-available'
+  const updateLabel = dshUpdate?.state === 'update-available'
       ? `可更新到 ${dshUpdate.remoteVersion ?? '新版本'}`
       : dshUpdate?.state === 'up-to-date'
         ? '已是最新'
@@ -445,7 +452,7 @@ function PacksRuntimeBar({ runtime, dshInstallation, dshUpdate, installProgress,
       </div>
       <div className="packs-runtime-meta">
         <span>DSH {version}</span>
-        <span>{updateLabel}</span>
+        {!installProgress && <span>{updateLabel}</span>}
       </div>
       <div className="packs-runtime-actions">
         {runtime.running && runtime.url && <button type="button" className="secondary-button" onClick={onOpenWeb}>打开网页</button>}
@@ -454,6 +461,7 @@ function PacksRuntimeBar({ runtime, dshInstallation, dshUpdate, installProgress,
           {installingDsh ? '安装中…' : dshInstallation.installed ? '更新 DSH' : '安装 DSH'}
         </button>
       </div>
+      {installProgress && <div className="packs-runtime-install"><InstallStage progress={installProgress} cancelling={cancellingInstall} cancelError={cancelInstallError} onCancel={onCancelInstall} /></div>}
     </section>
   )
 }
