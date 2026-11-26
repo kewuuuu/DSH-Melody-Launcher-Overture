@@ -4,20 +4,20 @@ import { once } from 'node:events'
 import { createReadStream } from 'node:fs'
 import { lstat, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { gte, parse } from 'semver'
 import { LAUNCHER_RELEASE_REPOSITORY } from '../src/constants'
 import type { LauncherUpdateProgress, LauncherUpdateStatus } from '../src/types'
 import { compareVersions, normalizeVersion } from './dsh-update'
 import { downloadReleaseAsset } from './release-download'
 import {
-  buildApplyCommand,
-  buildApplyCommandPath,
   buildApplyLogPath,
+  buildInstallerArgs,
   installDirFromExecPath,
 } from './launcher-update-helper'
 
 /**
  * 启动器自更新：启动时检测 GitHub Release 是否有新版本 → 自动后台下载 Setup（带进度）
- * → 退出前交给一次性助手：等本进程退出，再 `Setup /S /D=<当前安装目录>` 静默覆盖安装，
+ * → 直接启动 Setup：等本进程退出后静默覆盖当前安装目录，
  * 只有装成功才重新拉起启动器。便携版已停发，只发安装版。
  * 检测逻辑与 dsh-update 对齐：任何网络/解析失败都收敛成 error 状态，绝不阻塞启动。
  */
@@ -34,6 +34,7 @@ const GITHUB_HEADERS = {
 /** 新安装包体积上限（Setup 约 91MB，放宽到 512MiB 防极端情况）。 */
 const MAX_LAUNCHER_BYTES = 512 * 1024 * 1024
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000
+const MIN_HANDOFF_VERSION = '1.3.7'
 
 /** 停整合包最多等这么久：等不到就中止更新——覆盖安装不能撞上正在运行的文件。 */
 export const APPLY_STOP_PACKS_TIMEOUT_MS = 20_000
@@ -78,7 +79,7 @@ function collectAssets(release: GitHubLatestRelease, marker: string): ResolvedLa
     const candidate = entry as GitHubReleaseAsset | null
     if (!candidate || typeof candidate.name !== 'string' || typeof candidate.browser_download_url !== 'string') continue
     const lower = candidate.name.toLowerCase()
-    if (!lower.endsWith('.exe') || !lower.includes(marker) || /[<>:"/\\|?*]/.test(candidate.name)) continue
+    if (!lower.endsWith('.exe') || !lower.includes(marker) || /[\x00-\x1f<>:"/\\|?*]/.test(candidate.name)) continue
     collected.push({
       name: candidate.name,
       size: Number.isFinite(candidate.size) ? Number(candidate.size) : 0,
@@ -279,7 +280,7 @@ export function detectInstallMode(
 export interface LauncherUpdaterOptions {
   /** 本地启动器版本。 */
   getVersion: () => string
-  /** userData 目录：下载缓存、升级助手脚本与日志都在这里的 launcher-update/。 */
+  /** userData 目录：下载缓存与交接日志都在这里的 launcher-update/。 */
   userDataPath: string
   /** 当前运行的可执行文件路径；测试注入。缺省 process.execPath。 */
   getExecPath?: () => string
@@ -299,7 +300,7 @@ export interface LauncherUpdaterOptions {
   emitProgress: (progress: LauncherUpdateProgress) => void
   /** 测试注入的 spawn。缺省 node:child_process spawn。 */
   spawnProcess?: typeof nodeSpawn
-  /** 助手启动后退出旧进程；主进程可注入异步清理及正常退出。缺省 process.exit。 */
+  /** Setup 启动后退出旧进程；主进程可注入异步清理及正常退出。缺省 process.exit。 */
   exitProcess?: (code?: number) => void | Promise<void>
 }
 
@@ -311,7 +312,7 @@ type RelaunchRollback = () => void | Promise<void>
 
 export interface LauncherApplyOptions {
   signal?: AbortSignal
-  /** 安装助手即将启动，此后不能取消。 */
+  /** 安装程序已启动，此后不能取消。 */
   onCommit?: () => void
   beforeCommit?: () => Promise<void>
   continuation?: { operationId: string; toVersion: string }
@@ -341,7 +342,7 @@ async function installerMatches(filePath: string, size: number, sha256: string):
 
 export function createLauncherUpdater(options: LauncherUpdaterOptions): LauncherUpdater {
   const doFetch = options.githubFetch ?? fetch
-  const updateRoot = path.join(options.userDataPath, 'launcher-update')
+  const updateRoot = path.resolve(options.userDataPath, 'launcher-update')
   /** 用户手里那个 exe：安装版就是 process.execPath（便携版已停发，不再取 PORTABLE_EXECUTABLE_FILE）。 */
   const execPathOf = (): string => (options.getExecPath ?? (() => process.execPath))()
   const stopPacksTimeoutMs =
@@ -480,60 +481,39 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     }
   }
 
-  /**
-   * 安装版：写一个一次性批处理助手，由它等本进程退出后再执行
-   * 《Setup /S /D=<当前安装目录>》，装成功才重新拉起启动器。
-   *
-   * - 必须等本进程退出：Setup 要覆盖正在运行的 exe，活着装就是文件占用。
-   * - 必须带 /D=<当前安装目录>：不带的话 Setup 会装回它自己认定的默认目录，
-   *   用户自定义的安装目录（连同 EXE 同级的 launcher-storage.json 数据目录指针）就丢了。
-   * - 装失败不拉起 exe；保留安装包和日志，供手动恢复。
-   */
-  async function writeSetupHelper(target: PendingUpdate, execPath: string, operationId?: string): Promise<string> {
-    const setup = target.setup
-    if (!setup) throw new Error('新版本没有可下载的安装版安装包。')
-    const setupPath = path.join(updateRoot, setup.name)
-    if (!verifiedSha256 || !await installerMatches(setupPath, setup.size, verifiedSha256)) {
+  async function verifyInstaller(setupPath: string, size: number): Promise<void> {
+    if (!verifiedSha256 || !await installerMatches(setupPath, size, verifiedSha256)) {
       throw new InstallerIntegrityError('安装包校验失败，请重新下载更新后再试。')
     }
-    const installDir = installDirFromExecPath(execPath)
-    if (!installDir) throw new Error('找不到当前安装目录，已中止更新。')
-    await mkdir(updateRoot, { recursive: true })
-    const logPath = buildApplyLogPath(updateRoot)
-    // 写明安装请求，便于排查助手没有启动的情况。
-    await writeFile(logPath, `[apply] apply requested for ${setup.name} at ${new Date().toISOString()}\n`, { flag: 'a' })
-    const commandPath = buildApplyCommandPath(updateRoot, process.pid)
-    await writeFile(commandPath, buildApplyCommand({
-      pid: process.pid,
-      setupPath,
-      installDir,
-      exePath: execPath,
-      logPath,
-      adoptRunningPacks: options.preserveRunningPacks,
-      relaunchDataDir: options.relaunchDataDir,
-      operationId,
-    }))
-    return commandPath
   }
 
-  async function startSetupHelper(commandPath: string): Promise<void> {
+  async function startInstaller(setupPath: string, args: string[], onCommit?: () => void): Promise<void> {
     const doSpawn = options.spawnProcess ?? nodeSpawn
-    const systemRoot = process.env.SystemRoot
-    const cmd = systemRoot ? path.win32.join(systemRoot, 'System32', 'cmd.exe') : 'cmd.exe'
-    // CreateProcess sets the working directory. Only the generated filename goes through cmd.
-    const args = ['/d', '/c', '.\\' + path.basename(commandPath)]
+    const child = doSpawn(setupPath, args, {
+      // Verbatim arguments also bypass quoting for argv[0]. NSIS needs a delimited executable name.
+      argv0: '"' + setupPath + '"',
+      shell: false,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+      cwd: updateRoot,
+    })
+    let earlyFailure: Error | undefined
+    const onError = (error: Error) => { earlyFailure = error }
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      earlyFailure = new Error('安装程序在交接前退出（' + (signal ?? code) + '）。')
+    }
+    child.on('error', onError)
+    child.once('exit', onExit)
     try {
-      const child = doSpawn(cmd, args, {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-        windowsVerbatimArguments: true,
-        cwd: updateRoot,
-      })
       await once(child, 'spawn')
+      if (earlyFailure) throw earlyFailure
       child.unref()
-    } catch (error) {
-      throw new Error(`启动安装助手失败：${errorMessage(error)}`)
+      onCommit?.()
+    } finally {
+      child.off('error', onError)
+      child.off('exit', onExit)
     }
   }
 
@@ -542,7 +522,16 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     if (status.state !== 'downloaded' || !pending) {
       throw new Error('没有已下载的启动器更新。')
     }
-    const target = pending as PendingUpdate
+    const target = pending
+    const setup = target.setup
+    const releaseTag = normalizeVersion(target.tag)
+    const releaseVersion = parse(releaseTag)
+    const assetName = setup?.name.toLowerCase()
+    const assetVersion = releaseTag.toLowerCase()
+    if (!setup || !releaseVersion || !gte(releaseVersion, MIN_HANDOFF_VERSION)
+      || !(assetName?.endsWith('-setup-' + assetVersion + '.exe') || assetName?.endsWith('-' + assetVersion + '-setup.exe'))) {
+      throw new Error('待安装的版本不支持安全更新交接，请手动安装。')
+    }
     const continuation = applyOptions.continuation
     if (continuation && (!options.preserveRunningPacks || normalizeVersion(target.tag) !== normalizeVersion(continuation.toVersion))) {
       throw new Error('待安装更新版本与续接请求不匹配。')
@@ -564,7 +553,22 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     let rollback: RelaunchRollback | void = undefined
     status = { ...status, state: 'applying', message: '正在准备安装更新，请稍候…' }
     try {
-      const commandPath = await writeSetupHelper(target, execPath, continuation?.operationId)
+      const setupPath = path.join(updateRoot, setup.name)
+      if (/["\x00-\x1f]/.test(setupPath)) throw new Error('安装包路径含有无效字符，已中止更新。')
+      const dataDir = options.relaunchDataDir
+      if (dataDir !== undefined && (!path.isAbsolute(dataDir) || path.relative(options.userDataPath, dataDir) !== '')) {
+        throw new Error('指定的数据目录与更新缓存所在的数据目录不一致，已中止更新。')
+      }
+      const args = buildInstallerArgs({
+        pid: process.pid,
+        installDir: installDirFromExecPath(execPath),
+        useCacheRoot: dataDir !== undefined,
+        operationId: continuation?.operationId,
+      })
+      await verifyInstaller(setupPath, setup.size)
+      signal.throwIfAborted()
+      const logPath = buildApplyLogPath(updateRoot, process.pid)
+      await writeFile(logPath, '[apply] apply requested for ' + setup.name + ' at ' + new Date().toISOString() + '\r\n', { flag: 'a' })
       signal.throwIfAborted()
       if (options.preserveRunningPacks && prepare) {
         rollback = await prepare(signal)
@@ -575,9 +579,13 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
       await applyOptions.beforeCommit?.()
       signal.throwIfAborted()
       options.emitProgress({ phase: 'applying', percent: 100 })
+      await verifyInstaller(setupPath, setup.size)
       signal.throwIfAborted()
-      applyOptions.onCommit?.()
-      await startSetupHelper(commandPath)
+      try {
+        await startInstaller(setupPath, args, applyOptions.onCommit)
+      } catch (error) {
+        throw new Error('启动安装程序失败：' + errorMessage(error), { cause: error })
+      }
     } catch (error) {
       let message = errorMessage(error)
       try {
@@ -594,7 +602,7 @@ export function createLauncherUpdater(options: LauncherUpdaterOptions): Launcher
     try {
       await doExit(0)
     } catch (error) {
-      const message = '安装助手已启动，但退出启动器失败：' + errorMessage(error)
+      const message = '安装程序已启动，但退出启动器失败：' + errorMessage(error)
       status = { ...status, message }
       throw new LauncherRelaunchExitError(message, { cause: error })
     }

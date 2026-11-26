@@ -278,6 +278,8 @@ node bin/launcher-control.cjs update cancel
 
 `update check` 比对本地版本与最新 Release（`kewuuuu/DSH-Melody-Launcher-Overture`），返回 `LauncherUpdateStatus`，状态为 `up-to-date` / `update-available` / `downloaded` / `error`。取得用户明确同意后再运行 `update apply`。它返回当前更新状态，后台检查并下载 Setup，等所有整合包的会话空闲后原地安装并重启启动器。支持续接的启动器在重启后接管已核实的运行中整合包，保留原进程 PID、监听和端口，并跳过本次启动的 `autoStart`。
 
+从 1.3.7 起，自更新直接运行 Setup 交接安装。使用 1.3.6 或更早版本且旧更新助手无法启动时，请先退出启动器，再手动用 1.3.7 或更新版本的 Setup 覆盖安装。交接日志位于数据目录的 `launcher-update/handoff-<PID>.log`。如果同时运行了多份同名启动器，请先退出其他启动器再安装，旧版卸载器会按 EXE 文件名查找运行中的启动器。
+
 在当前对话中申请更新并续接时，**正在运行的启动器服务端**必须支持更新续接。CLI 先查询 `update status`，只有收到 `supportsResume: true` 才会向同一控制端点发送 `update apply`。`--pack`、`--session`、`--resume` 必须同时提供或一起省略，续接不能与 `--force` 一起用。CLI 发送 `update.apply`，将三项放在 `args.resume = { packId, sessionId, prompt }` 中。
 
 用 `pack list` 核对整合包 ID。只有可信的运行时元数据或能够核实就是当前对话的 DSH 会话界面，才可作为原会话 ID 的来源。无法核实就不要提交续接。续接只发往指定整合包中的原会话，提示应写清任务、已完成的工作、下一步和所需上下文。

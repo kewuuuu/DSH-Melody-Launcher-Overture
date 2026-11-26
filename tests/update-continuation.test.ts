@@ -4,7 +4,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { LauncherUpdateStatus } from '../src/types'
 import type { LauncherApplyOptions } from '../electron/launcher-update'
-import { buildApplyCommand } from '../electron/launcher-update-helper'
+import { buildInstallerArgs } from '../electron/launcher-update-helper'
 import { readRunningSessions, sendExactResume, verifyExactResumeSession } from '../electron/pending-resume'
 import { defaultSettings } from '../electron/settings'
 import { armUpdateContinuation, clearUpdateContinuation, consumeUpdateContinuation, saveUpdateContinuation, UPDATE_CONTINUATION_FLAG } from '../electron/update-continuation'
@@ -187,12 +187,10 @@ describe('update-only continuation', () => {
     expect(gatewayError.prompts()).toHaveLength(1)
   })
 
-  it('only passes the operation ID on the successful installer branch', () => {
-    const command = buildApplyCommand({ pid: 12, setupPath: 'C:/update/setup.exe', installDir: 'C:/install', exePath: 'C:/install/launcher.exe', logPath: 'C:/update/log', adoptRunningPacks: true, operationId: ID })
-    expect(command).toContain('if not "%CODE%"=="0" goto setup_failed')
-    expect(command.match(new RegExp(ID, 'g'))).toHaveLength(1)
-    expect(command.indexOf(ID)).toBeGreaterThan(command.indexOf('goto setup_failed'))
-    expect(command.indexOf(ID)).toBeLessThan(command.indexOf(':setup_failed\r\n'))
+  it('hands the operation ID to Setup without passing the launcher-only continuation flag', () => {
+    const input = { pid: 12, installDir: 'C:/install' }
+    expect(buildInstallerArgs(input)).toEqual(['/S', '--dsh-handoff=12', '/D=C:\\install'])
+    expect(buildInstallerArgs({ ...input, operationId: ID })).toEqual(['/S', '--dsh-handoff=12', '--dsh-continue=' + ID, '/D=C:\\install'])
   })
 
   it.each([{}, { sessions: [{}] }, { items: ['bad entry'] }, [{ id: 's', state: ['idle'] }]])('requires a known gateway status for the idle check (%j)', async response => {

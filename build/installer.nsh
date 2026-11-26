@@ -9,7 +9,23 @@
   ${EndIf}
 !macroend
 
+!ifndef BUILD_UNINSTALLER
+  !macro customHeader
+    !include "getProcessInfo.nsh"
+    Var pid
+    !include "installer-handoff.nsh"
+  !macroend
+
+  !macro customCheckAppRunning
+    ${If} $dshHandoffPid == ""
+      !insertmacro IS_POWERSHELL_AVAILABLE
+      !insertmacro _CHECK_APP_RUNNING
+    ${EndIf}
+  !macroend
+!endif
+
 !macro customInit
+  Call DshHandoffInit
   InitPluginsDir
   !insertmacro backupStoragePointer HKCU storage-pointer-user
   !insertmacro backupStoragePointer HKLM storage-pointer-machine
@@ -41,4 +57,9 @@
   ${EndIf}
 
   storagePointerRestoreDone:
+  ${If} $dshHandoffPid != ""
+    Push "storage-pointer-restored"
+    Call DshHandoffLog
+    Call DshHandoffRelaunch
+  ${EndIf}
 !macroend

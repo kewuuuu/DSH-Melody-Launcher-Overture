@@ -21,6 +21,8 @@ import { createUpdateFlow } from '../electron/update-flow'
 import { defaultSettings } from '../electron/settings'
 
 const SETUP_KEWU = 'DSH-launcher-KEWU-Setup-1.1.0.exe'
+const HANDOFF_SETUP = 'DSH-launcher-KEWU-Setup-1.3.7.exe'
+const OPERATION_ID = '2ff065d2-1c98-4b56-bccc-4a6e351ec279'
 const LEGACY_SETUP = 'DSH-Launcher-1.0.4-setup.exe'
 const setupDigest = (bytes: Uint8Array): string => 'sha256:' + createHash('sha256').update(bytes).digest('hex')
 const ZERO_SETUP_DIGEST = setupDigest(Buffer.alloc(9))
@@ -112,11 +114,11 @@ interface Harness {
  * 造一个「已下载好 Setup、可以 apply」的安装版启动器：
  * 下载目录里先放一份与资产摘要匹配的文件，download() 校验后直接复用。
  */
-async function readyUpdater(overrides: Partial<UpdaterOptions> = {}): Promise<Harness> {
+async function readyUpdater(overrides: Partial<UpdaterOptions> = {}, tag = 'v1.3.7', asset = HANDOFF_SETUP): Promise<Harness> {
   const userDataPath = overrides.userDataPath ?? tempUserData()
   const updateRoot = path.join(userDataPath, 'launcher-update')
   await mkdir(updateRoot, { recursive: true })
-  await writeFile(path.join(updateRoot, SETUP_KEWU), new Uint8Array(9))
+  await writeFile(path.join(updateRoot, asset), new Uint8Array(9))
   const calls: string[] = []
   const spawned: Harness['spawned'] = []
   const exitCodes: number[] = []
@@ -135,7 +137,7 @@ async function readyUpdater(overrides: Partial<UpdaterOptions> = {}): Promise<Ha
     getVersion: () => '1.0.4',
     userDataPath,
     getExecPath: () => INSTALLED_EXEC,
-    githubFetch: latestFetch(releaseBody('v1.1.0', SETUP_KEWU, 9, ZERO_SETUP_DIGEST)),
+    githubFetch: latestFetch(releaseBody(tag, asset, 9, ZERO_SETUP_DIGEST)),
     emitProgress: () => undefined,
     spawnProcess: fakeSpawn,
     exitProcess: fakeExit,
@@ -328,7 +330,7 @@ describe('createLauncherUpdater download', () => {
 
   it('复用 SHA-256 匹配的缓存，且无需下载资产', async () => {
     const { updateRoot } = await readyUpdater()
-    expect(await readFile(path.join(updateRoot, SETUP_KEWU))).toEqual(Buffer.alloc(9))
+    expect(await readFile(path.join(updateRoot, HANDOFF_SETUP))).toEqual(Buffer.alloc(9))
   })
 
   it.each([CHUNKED_SETUP_DIGEST.toUpperCase(), null])('重新下载不可验证的同大小缓存（digest=%s）', async digest => {
@@ -518,7 +520,7 @@ describe('createLauncherUpdater download', () => {
   })
 })
 
-describe('apply（安装版：一次性助手覆盖安装）', () => {
+describe('apply（安装版：直接启动 Setup）', () => {
   it('没有已下载的更新就 apply 时抛中文错误', async () => {
     const updater = createLauncherUpdater({
       getVersion: () => '1.0.4',
@@ -548,59 +550,65 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
     }
   })
 
-  it('先停整合包，再以 cmd 隐藏拉起批处理并退出应用', async () => {
-    delete process.env.PORTABLE_EXECUTABLE_FILE
-    const { updater, updateRoot, calls, spawned, exitCodes } = await readyUpdater()
-    await updater.apply()
-
-    // 顺序：先停整合包，再拉起助手。
-    expect(calls).toEqual(['stop', 'spawn'])
-    expect(spawned).toHaveLength(1)
-    expect(path.win32.basename(spawned[0].command)).toBe('cmd.exe')
-    expect(spawned[0].args).toEqual(['/d', '/c', '.\\apply-' + process.pid + '.cmd'])
-    expect(spawned[0].options).toMatchObject({
-      cwd: updateRoot,
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      windowsVerbatimArguments: true,
+  it('stops packs, launches the verified Setup with raw NSIS arguments, then exits', async () => {
+    const userDataPath = path.join(tempUserData(), 'custom cache & 10%')
+    const { updater, updateRoot, calls, spawned, exitCodes } = await readyUpdater({ userDataPath })
+    const beforeCommit = vi.fn(async () => { calls.push('arm') })
+    const onCommit = vi.fn(() => {
+      expect(exitCodes).toEqual([])
+      calls.push('commit')
     })
+    await updater.apply({ beforeCommit, onCommit })
+
+    expect(calls).toEqual(['stop', 'arm', 'spawn', 'commit'])
+    const setupPath = path.join(updateRoot, HANDOFF_SETUP)
+    expect(spawned).toEqual([{
+      command: setupPath,
+      args: ['/S', '--dsh-handoff=' + process.pid, '/D=' + INSTALLED_DIR],
+      options: {
+        argv0: '"' + setupPath + '"',
+        cwd: updateRoot,
+        detached: true,
+        shell: false,
+        stdio: 'ignore',
+        windowsHide: true,
+        windowsVerbatimArguments: true,
+      },
+    }])
     expect(exitCodes).toEqual([0])
 
-    const commandPath = path.join(updateRoot, 'apply-' + process.pid + '.cmd')
-
-    // cmd：等 PID 退出 → Setup /S /D=<当前安装目录> → 只有成功才 start 新 exe。
-    const command = await readFile(commandPath, 'utf8')
-    expect(command).toContain('/D=' + INSTALLED_DIR)
-    expect(command).toContain('waiting for launcher pid ' + process.pid)
-    expect(command).toContain('if "%ERRORLEVEL%"=="0" goto launcher_gone')
-    expect(command).toContain('start "" "' + INSTALLED_EXEC + '"\r\n')
-    expect(command).not.toContain('--adopt-running-packs')
-    expect(command).toContain('if not "%CODE%"=="0" goto setup_failed')
-
-    // 日志落在 <userData>/launcher-update/apply-<时间戳>.log
-    const logNames = (await import('node:fs/promises').then(fs => fs.readdir(updateRoot))).filter(name => name.endsWith('.log'))
-    expect(logNames).toHaveLength(1)
-    expect(command).toContain(logNames[0])
+    const logName = 'handoff-' + process.pid + '.log'
+    expect((await readdir(updateRoot)).sort()).toEqual([HANDOFF_SETUP, logName].sort())
+    expect(await readFile(path.join(updateRoot, logName), 'utf8')).toContain('[apply] apply requested for ' + HANDOFF_SETUP)
   })
 
-  it('装失败时不启动新版本（失败分支里没有 start）', async () => {
-    delete process.env.PORTABLE_EXECUTABLE_FILE
-    const { updater, updateRoot } = await readyUpdater()
-    await updater.apply()
-    const command = await readFile(path.join(updateRoot, 'apply-' + process.pid + '.cmd'), 'utf8')
-    const label = '\r\n:setup_failed\r\n'
-    const endLabel = '\r\n:done\r\n'
-    const failedBranch = command.slice(command.indexOf(label), command.indexOf(endLabel))
-    expect(failedBranch).toContain(':setup_failed')
-    expect(failedBranch).not.toContain('start ""')
-    expect(failedBranch).toContain('setup failed with exit code %CODE%')
+  it.each([
+    ['v1.3.6', 'DSH-launcher-KEWU-Setup-1.3.6.exe'],
+    ['v1.3.7-rc.1', 'DSH-launcher-KEWU-Setup-1.3.7-rc.1.exe'],
+    ['v1.3.7', 'DSH-launcher-KEWU-Setup-1.3.6.exe'],
+  ])('refuses unsupported handoff or a mismatched installer (%s, %s)', async (tag, asset) => {
+    const { updater, calls, exitCodes } = await readyUpdater({}, tag, asset)
+    await expect(updater.apply()).rejects.toThrow('不支持安全更新交接')
+    expect(calls).toEqual([])
+    expect(exitCodes).toEqual([])
   })
 
-  it('waits for sessions before preserving the live packs and writes the adoption relaunch command', async () => {
-    const dataDir = 'D:\\Custom data & 10% !'
+  it.each([undefined, '1.3.6', 'invalid'])('rejects a continuation with an incompatible apply context (%s)', async reason => {
+    const preserveRunningPacks = reason !== undefined
+    const { updater, calls, exitCodes } = await readyUpdater({ preserveRunningPacks, prepareForRelaunch: () => undefined })
+    const continuation = { operationId: reason === 'invalid' ? OPERATION_ID + '\n' : OPERATION_ID, toVersion: reason === '1.3.6' ? reason : '1.3.7' }
+    const beforeCommit = vi.fn()
+    await expect(updater.apply({ continuation, beforeCommit })).rejects.toThrow(reason === 'invalid' ? 'Invalid launcher update continuation ID' : '与续接请求不匹配')
+    expect(beforeCommit).not.toHaveBeenCalled()
+    expect(calls).toEqual([])
+    expect(exitCodes).toEqual([])
+  })
+
+  it('waits for sessions before preserving live packs and only passes a cache-root marker', async () => {
+    const dataDir = path.join(tempUserData(), 'Custom data & 10% !')
     const prepared: boolean[] = []
-    const { updater, updateRoot, calls, exitCodes } = await readyUpdater({
+    const { updater, updateRoot, calls, spawned, exitCodes } = await readyUpdater({
+      userDataPath: dataDir,
       preserveRunningPacks: true,
       prepareForRelaunch: signal => { prepared.push(signal.aborted) },
       relaunchDataDir: dataDir,
@@ -632,10 +640,7 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
     expect(prepared).toEqual([false])
     expect(calls).toEqual(['spawn'])
     expect(exitCodes).toEqual([0])
-    const command = await readFile(path.join(updateRoot, 'apply-' + process.pid + '.cmd'), 'utf8')
-    const restart = 'start "" "' + INSTALLED_EXEC + '" --adopt-running-packs --data-dir "D:\\Custom data & 10%% !"'
-    expect(command).toContain(restart)
-    expect(command.indexOf('if not "%CODE%"=="0" goto setup_failed')).toBeLessThan(command.indexOf(restart))
+    expect(spawned[0].args).toEqual(['/S', '--dsh-handoff=' + process.pid, '--dsh-use-cache-root=1', '/D=' + INSTALLED_DIR])
   })
 
   it('rejects duplicate apply and rolls back cancellation during live preparation', async () => {
@@ -681,17 +686,54 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
       prepareForRelaunch: () => () => { rollback.push('rollback') },
       spawnProcess: (() => {
         const child = new EventEmitter()
-        queueMicrotask(() => child.emit('error', new Error('cmd missing')))
+        queueMicrotask(() => child.emit('error', new Error('Setup missing')))
         return child
       }) as never,
     })
-    await expect(failing.updater.apply()).rejects.toThrow('cmd missing')
+    await expect(failing.updater.apply()).rejects.toThrow('Setup missing')
     expect(failing.exitCodes).toEqual([])
     expect(rollback).toEqual(['rollback'])
     expect((await failing.updater.check()).state).toBe('downloaded')
   })
 
-  it('awaits graceful exit after helper spawn and keeps a failed exit committed', async () => {
+  it('rolls back when the installer exits immediately before commit', async () => {
+    const rollback = vi.fn()
+    const onCommit = vi.fn()
+    const { updater, exitCodes } = await readyUpdater({
+      preserveRunningPacks: true,
+      prepareForRelaunch: () => rollback,
+      spawnProcess: (() => {
+        const child = new EventEmitter()
+        queueMicrotask(() => {
+          child.emit('spawn')
+          child.emit('exit', 2, null)
+        })
+        return child
+      }) as never,
+    })
+    await expect(updater.apply({ onCommit })).rejects.toThrow('安装程序在交接前退出（2）')
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(rollback).toHaveBeenCalledOnce()
+    expect(exitCodes).toEqual([])
+    expect((await updater.check()).state).toBe('downloaded')
+  })
+
+  it('passes the armed UUID to Setup with the independently selected cache root', async () => {
+    const dataDir = path.join(tempUserData(), 'Custom data')
+    const beforeCommit = vi.fn(async () => undefined)
+    const { updater, spawned, exitCodes } = await readyUpdater({
+      userDataPath: dataDir,
+      relaunchDataDir: dataDir,
+      preserveRunningPacks: true,
+      prepareForRelaunch: () => undefined,
+    })
+    await updater.apply({ beforeCommit, continuation: { operationId: OPERATION_ID, toVersion: '1.3.7' } })
+    expect(beforeCommit).toHaveBeenCalledOnce()
+    expect(spawned[0].args).toEqual(['/S', '--dsh-handoff=' + process.pid, '--dsh-continue=' + OPERATION_ID, '--dsh-use-cache-root=1', '/D=' + INSTALLED_DIR])
+    expect(exitCodes).toEqual([0])
+  })
+
+  it('awaits graceful exit after Setup spawn and keeps a failed exit committed', async () => {
     const exiting = deferred()
     const release = deferred()
     const rollback: string[] = []
@@ -728,11 +770,24 @@ describe('apply（安装版：一次性助手覆盖安装）', () => {
 
   it('交接前拒绝下载后被替换的同大小安装包', async () => {
     const { updater, updateRoot, calls, spawned } = await readyUpdater()
-    await writeFile(path.join(updateRoot, SETUP_KEWU), Buffer.alloc(9, 1))
+    await writeFile(path.join(updateRoot, HANDOFF_SETUP), Buffer.alloc(9, 1))
     await expect(updater.apply()).rejects.toThrow('安装包校验失败')
     expect(calls).toEqual([])
     expect(spawned).toEqual([])
     await expect(updater.apply()).rejects.toThrow('没有已下载的启动器更新')
+  })
+
+  it('rechecks the digest after preparation and rolls back if the cached installer changed', async () => {
+    const rollback = vi.fn()
+    const { updater, updateRoot, spawned, exitCodes } = await readyUpdater({
+      preserveRunningPacks: true,
+      prepareForRelaunch: () => rollback,
+    })
+    const beforeCommit = () => writeFile(path.join(updateRoot, HANDOFF_SETUP), Buffer.alloc(9, 1))
+    await expect(updater.apply({ beforeCommit })).rejects.toThrow('安装包校验失败')
+    expect(rollback).toHaveBeenCalledOnce()
+    expect(spawned).toEqual([])
+    expect(exitCodes).toEqual([])
   })
 
   it('安装包没下载完就 apply 时抛中文错误', async () => {
